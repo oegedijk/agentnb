@@ -228,6 +228,8 @@ class KernelProvisioner:
             path = preferred_python.expanduser().absolute()
             if not path.exists():
                 raise InvalidInputError(f"Python interpreter not found: {path}")
+            if not _python_supports_module(path, "sys"):
+                raise InvalidInputError(f"Python interpreter is not executable: {path}")
             return [(path, "explicit")]
 
         candidates: list[tuple[Path, str]] = []

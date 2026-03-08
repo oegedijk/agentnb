@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pytest_mock import MockerFixture
 
-from agentnb.errors import ProvisioningError
+from agentnb.errors import InvalidInputError, ProvisioningError
 from agentnb.provisioner import DoctorCheck, InterpreterSelection, KernelProvisioner
 
 
@@ -55,15 +55,28 @@ def test_select_interpreter_precedence(
     supports.assert_called_once()
 
 
-def test_select_interpreter_honors_explicit_python(project_dir: Path, tmp_path: Path) -> None:
-    explicit = tmp_path / "my-python"
-    _touch(explicit)
+def test_select_interpreter_honors_explicit_python(
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    explicit = Path(sys.executable).absolute()
     _touch(project_dir / ".venv" / "bin" / "python")
+    supports = mocker.patch(
+        "agentnb.provisioner._python_supports_module",
+        side_effect=[True, True],
+    )
 
     selected = KernelProvisioner(project_dir).select_interpreter(preferred_python=explicit)
 
     assert selected.source == "explicit"
     assert selected.executable == str(explicit.absolute())
+    assert selected.ipykernel_available is True
+    supports.assert_any_call(explicit, "sys")
+
+
+def test_select_interpreter_rejects_non_executable_explicit_python(project_dir: Path) -> None:
+    with pytest.raises(InvalidInputError, match="not executable"):
+        KernelProvisioner(project_dir).select_interpreter(preferred_python=project_dir)
 
 
 def test_ensure_ipykernel_raises_when_auto_install_disabled(project_dir: Path) -> None:

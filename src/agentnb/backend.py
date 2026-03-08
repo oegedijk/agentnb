@@ -309,7 +309,7 @@ class LocalIPythonBackend:
                 time.sleep(0.1)
 
         if pid_exists(session.pid):
-            os.kill(session.pid, signal.SIGKILL)
+            os.kill(session.pid, _hard_kill_signal())
 
         if connection_file.exists():
             connection_file.unlink()
@@ -427,3 +427,7 @@ def _as_dict(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return cast(dict[str, object], value)
     return {}
+
+
+def _hard_kill_signal() -> int:
+    return getattr(signal, "SIGKILL", signal.SIGTERM)

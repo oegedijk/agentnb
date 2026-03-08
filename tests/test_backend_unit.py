@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import signal
 import subprocess
 from pathlib import Path
 
+from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 
+from agentnb.backend import LocalIPythonBackend
 from agentnb.provisioner import _python_supports_module
+from agentnb.session import SessionInfo
 
 
 def test_python_supports_module_uses_subprocess_probe(mocker: MockerFixture) -> None:
@@ -14,3 +18,30 @@ def test_python_supports_module_uses_subprocess_probe(mocker: MockerFixture) -> 
 
     assert _python_supports_module(Path("/usr/bin/python3"), "ipykernel_launcher") is True
     run_mock.assert_called_once()
+
+
+def test_stop_falls_back_to_sigterm_when_sigkill_is_unavailable(
+    tmp_path: Path,
+    mocker: MockerFixture,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    backend = LocalIPythonBackend()
+    session = SessionInfo(
+        session_id="default",
+        pid=1234,
+        connection_file=str(tmp_path / "kernel-default.json"),
+        python_executable="python",
+        project_root=str(tmp_path),
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+
+    monkeypatch.delattr("agentnb.backend.signal.SIGKILL", raising=False)
+    mocker.patch("agentnb.backend.pid_exists", side_effect=[True, True, True, True, True])
+    mocker.patch("agentnb.backend.time.monotonic", side_effect=[0.0, 1.0, 1.0, 4.0])
+    kill_mock = mocker.patch("agentnb.backend.os.kill")
+
+    backend.stop(session, timeout_s=0.0)
+
+    assert kill_mock.call_count == 2
+    assert kill_mock.call_args_list[0].args == (1234, signal.SIGTERM)
+    assert kill_mock.call_args_list[1].args == (1234, signal.SIGTERM)

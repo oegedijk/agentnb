@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -8,7 +9,7 @@ from typing import Any
 
 DEFAULT_SESSION_ID = "default"
 STATE_DIR_NAME = ".agentnb"
-SESSION_FILE_NAME = "session.json"
+LEGACY_SESSION_FILE_NAME = "session.json"
 HISTORY_FILE_NAME = "history.jsonl"
 
 
@@ -64,7 +65,8 @@ class SessionStore:
         self.project_root = project_root.resolve()
         self.session_id = session_id
         self.state_dir = self.project_root / STATE_DIR_NAME
-        self.session_file = self.state_dir / SESSION_FILE_NAME
+        self.session_file = self.state_dir / _session_file_name(session_id)
+        self.legacy_session_file = self.state_dir / LEGACY_SESSION_FILE_NAME
         self.history_file = self.state_dir / HISTORY_FILE_NAME
         self.connection_file = self.state_dir / f"kernel-{self.session_id}.json"
 
@@ -72,13 +74,17 @@ class SessionStore:
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def load_session(self) -> SessionInfo | None:
-        if not self.session_file.exists():
-            return None
-        payload = json.loads(self.session_file.read_text(encoding="utf-8"))
-        session = SessionInfo.from_dict(payload)
-        if session.session_id != self.session_id:
-            return None
-        return session
+        for path in self._session_paths():
+            session = self._load_session_file(path)
+            if session is None:
+                continue
+            if session.session_id != self.session_id:
+                continue
+            if path == self.legacy_session_file:
+                self.save_session(session)
+                self._safe_unlink(self.legacy_session_file)
+            return session
+        return None
 
     def save_session(self, session: SessionInfo) -> None:
         self.ensure_state_dir()
@@ -87,8 +93,7 @@ class SessionStore:
         )
 
     def clear_session(self) -> None:
-        if self.session_file.exists():
-            self.session_file.unlink()
+        self._safe_unlink(self.session_file)
 
     def cleanup_stale(self) -> bool:
         session = self.load_session()
@@ -145,3 +150,31 @@ class SessionStore:
                 continue
             entries.append(entry)
         return entries
+
+    def _session_paths(self) -> tuple[Path, ...]:
+        if self.legacy_session_file == self.session_file:
+            return (self.session_file,)
+        return (self.session_file, self.legacy_session_file)
+
+    def _load_session_file(self, path: Path) -> SessionInfo | None:
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return SessionInfo.from_dict(payload)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError):
+            self._safe_unlink(path)
+            return None
+
+    def _safe_unlink(self, path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def _session_file_name(session_id: str) -> str:
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12]
+    return f"session-{digest}.json"

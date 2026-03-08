@@ -89,7 +89,7 @@ Pass `--json` to emit a stable machine-readable envelope.
 ## Development
 
 ```bash
-uv sync --dev
+uv sync --extra dev
 uv run ruff check src tests
 uv run ruff format --check src tests
 uv run ty check src

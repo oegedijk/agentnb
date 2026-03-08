@@ -1,0 +1,78 @@
+[project]
+name = "agentnb"
+version = "0.1.0"
+description = "A persistent Python notebook for AI agents, driven from the CLI"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Oege Dijk", email = "oegedijk@gmail.com" },
+]
+keywords = ["agent", "repl", "notebook", "ipython", "jupyter", "cli", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "click>=8.1",
+    "ipykernel>=6.0",
+    "jupyter-client>=8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.14",
+    "ruff>=0.11",
+    "ty>=0.0.1a6",
+]
+
+[project.scripts]
+agentnb = "agentnb.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/oege/agentnb"
+Repository = "https://github.com/oege/agentnb"
+Issues = "https://github.com/oege/agentnb/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentnb"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "RUF",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agentnb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

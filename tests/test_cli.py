@@ -76,6 +76,21 @@ def test_cli_returns_no_kernel_error(cli_runner: CliRunner, project_dir: Path) -
     assert payload["error"]["code"] == "NO_KERNEL"
 
 
+def test_cli_returns_kernel_not_ready_error_when_connection_exists_without_session(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    state_dir = project_dir / ".agentnb"
+    state_dir.mkdir()
+    (state_dir / "kernel-default.json").write_text("{}", encoding="utf-8")
+
+    result = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1+1"])
+    assert result.exit_code == 1
+
+    payload = _payload(result.output)
+    assert payload["status"] == "error"
+    assert payload["error"]["code"] == "KERNEL_NOT_READY"
+
+
 def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path) -> None:
     result = cli_runner.invoke(main, ["doctor", "--project", str(project_dir), "--json"])
     assert result.exit_code == 0
@@ -173,3 +188,90 @@ def test_cli_human_output_shows_suggestions(cli_runner: CliRunner, project_dir: 
     assert result.exit_code == 0
     assert "Kernel is not running." in result.output
     assert "Next:" in result.output
+
+
+def test_cli_agent_preset_enables_json_and_suppresses_suggestions(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    result = cli_runner.invoke(main, ["--agent", "status", "--project", str(project_dir)])
+    assert result.exit_code == 0
+
+    payload = _payload(result.output)
+    assert payload["status"] == "ok"
+    assert payload["command"] == "status"
+    assert payload["suggestions"] == []
+
+
+def test_cli_no_suggestions_strips_suggestions_from_json(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    result = cli_runner.invoke(
+        main, ["--no-suggestions", "status", "--project", str(project_dir), "--json"]
+    )
+    assert result.exit_code == 0
+
+    payload = _payload(result.output)
+    assert payload["suggestions"] == []
+
+
+def test_cli_env_format_json_applies_without_per_command_flag(
+    cli_runner: CliRunner, project_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTNB_FORMAT", "json")
+
+    result = cli_runner.invoke(main, ["status", "--project", str(project_dir)])
+    assert result.exit_code == 0
+
+    payload = _payload(result.output)
+    assert payload["command"] == "status"
+
+
+def test_cli_exec_result_only_returns_selected_text(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    start_res = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
+    assert start_res.exit_code == 0
+
+    exec_res = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--result-only", "1 + 1"],
+    )
+    assert exec_res.exit_code == 0
+    assert exec_res.output.strip() == "2"
+
+    stop_res = cli_runner.invoke(main, ["stop", "--project", str(project_dir), "--json"])
+    assert stop_res.exit_code == 0
+
+
+def test_cli_history_latest_returns_only_most_recent_entry(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    start_res = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
+    assert start_res.exit_code == 0
+
+    cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1 + 1"])
+    cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "2 + 2"])
+
+    history_res = cli_runner.invoke(
+        main,
+        ["history", "--project", str(project_dir), "--latest", "--json"],
+    )
+    assert history_res.exit_code == 0
+
+    payload = _payload(history_res.output)
+    assert len(payload["data"]["entries"]) == 1
+    assert payload["data"]["entries"][0]["code"] == "2 + 2"
+
+    stop_res = cli_runner.invoke(main, ["stop", "--project", str(project_dir), "--json"])
+    assert stop_res.exit_code == 0
+
+
+def test_cli_history_last_rejects_latest_combination(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    result = cli_runner.invoke(
+        main,
+        ["history", "--project", str(project_dir), "--latest", "--last", "2"],
+    )
+    assert result.exit_code != 0
+    assert "Use either --latest or --last" in result.output

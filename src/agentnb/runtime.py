@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
 from .contracts import ExecutionResult, KernelStatus, utc_now_iso
-from .errors import ExecutionTimedOutError, NoKernelRunningError
+from .errors import ExecutionTimedOutError, KernelNotReadyError, NoKernelRunningError
 from .hooks import Hooks
 from .provisioner import KernelProvisioner
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
@@ -178,10 +178,14 @@ class KernelRuntime:
         store.cleanup_stale()
         session = store.load_session()
         if session is None:
+            if store.has_connection_file():
+                raise KernelNotReadyError()
             raise NoKernelRunningError()
 
         status = self._backend.status(session)
         if not status.alive:
+            if store.has_connection_file():
+                raise KernelNotReadyError()
             store.clear_session()
             raise NoKernelRunningError()
 

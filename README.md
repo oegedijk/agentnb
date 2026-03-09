@@ -29,6 +29,16 @@ agentnb vars --json
 agentnb stop --json
 ```
 
+For lower-noise agent integrations, you can set defaults once per shell:
+
+```bash
+export AGENTNB_FORMAT=agent
+```
+
+That enables JSON output and suppresses suggestions across commands. You can also use
+top-level flags such as `agentnb --agent ...`, `agentnb --json ...`,
+`agentnb --no-suggestions ...`, and `agentnb --quiet ...`.
+
 ## Recommended Workflow
 
 The normal agent loop is:
@@ -62,12 +72,13 @@ It is not a notebook editing tool:
 ## Commands
 
 - `agentnb start [--project PATH] [--python PATH] [--auto-install]`
+- top-level flags: `agentnb [--json] [--agent] [--quiet] [--no-suggestions] <command>`
 - `agentnb status [--project PATH]`
-- `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--project PATH] [--json]`
+- `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--stdout-only|--stderr-only|--result-only] [--project PATH] [--json]`
 - `agentnb vars [--project PATH] [--json] [--types]`
 - `agentnb inspect NAME [--project PATH] [--json]`
 - `agentnb reload MODULE [--project PATH] [--json]`
-- `agentnb history [--project PATH] [--errors] [--json]`
+- `agentnb history [--project PATH] [--errors] [--latest|--last N] [--json]`
 - `agentnb interrupt [--project PATH] [--json]`
 - `agentnb reset [--project PATH] [--json]`
 - `agentnb stop [--project PATH] [--json]`
@@ -89,6 +100,9 @@ it for you, or use `agentnb doctor --fix --json`.
 ## JSON Mode
 
 Pass `--json` to emit a stable machine-readable envelope. This is the preferred mode for agent integrations.
+
+If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORMAT=agent`.
+`agent` also suppresses suggestions and enables quiet mode.
 
 ```json
 {
@@ -137,6 +151,13 @@ uv run ruff format --check src tests
 uv run ty check src
 uv run pytest
 ```
+
+## 0.1.1 Ergonomics
+
+- top-level `--agent`, `--json`, `--quiet`, and `--no-suggestions` flags
+- `AGENTNB_FORMAT`, `AGENTNB_NO_SUGGESTIONS`, and `AGENTNB_QUIET` environment defaults
+- `exec --stdout-only`, `--stderr-only`, and `--result-only` for script-friendly capture
+- `history --latest` and `history --last N` shortcuts
 
 ## License
 

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
-from agentnb.errors import ExecutionTimedOutError
+from agentnb.contracts import KernelStatus
+from agentnb.errors import ExecutionTimedOutError, KernelNotReadyError
 from agentnb.runtime import KernelRuntime
+from agentnb.session import SessionInfo, SessionStore
 
 pytest.importorskip("jupyter_client")
 pytest.importorskip("ipykernel")
@@ -64,3 +68,38 @@ def test_runtime_reset_clears_namespace(started_runtime: tuple[KernelRuntime, Pa
 
     assert after_reset.status == "error"
     assert after_reset.ename in {"NameError", "KeyError"}
+
+
+def test_runtime_execute_reports_kernel_not_ready_when_connection_exists_without_session(
+    project_dir: Path,
+) -> None:
+    runtime = KernelRuntime()
+    store = SessionStore(project_dir)
+    store.ensure_state_dir()
+    store.connection_file.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(KernelNotReadyError):
+        runtime.execute(project_root=project_dir, code="1 + 1", timeout_s=5)
+
+
+def test_runtime_execute_reports_kernel_not_ready_when_session_exists_but_status_is_not_alive(
+    project_dir: Path,
+) -> None:
+    session = SessionInfo(
+        session_id="default",
+        pid=os.getpid(),
+        connection_file=str(project_dir / ".agentnb" / "kernel-default.json"),
+        python_executable="python",
+        project_root=str(project_dir),
+        started_at="2026-03-09T00:00:00+00:00",
+    )
+    store = SessionStore(project_dir)
+    store.save_session(session)
+    store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.return_value = KernelStatus(alive=False)
+    runtime = KernelRuntime(backend=backend)
+
+    with pytest.raises(KernelNotReadyError):
+        runtime.execute(project_root=project_dir, code="1 + 1", timeout_s=5)

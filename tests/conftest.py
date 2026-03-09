@@ -17,6 +17,8 @@ from agentnb.session import SessionInfo, pid_exists
 class TestLocalIPythonBackend(LocalIPythonBackend):
     """Use aggressive teardown in tests to avoid paying production stop timeouts."""
 
+    __test__ = False
+
     def stop(self, session: SessionInfo, timeout_s: float = 0.0) -> None:
         del timeout_s
         connection_file = Path(session.connection_file)

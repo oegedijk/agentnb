@@ -86,6 +86,7 @@ class LocalIPythonBackend:
                 stdin=subprocess.DEVNULL,
                 stdout=kernel_log,
                 stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
 
         session = SessionInfo(

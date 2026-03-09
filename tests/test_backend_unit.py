@@ -45,3 +45,31 @@ def test_stop_falls_back_to_sigterm_when_sigkill_is_unavailable(
     assert kill_mock.call_count == 2
     assert kill_mock.call_args_list[0].args == (1234, signal.SIGTERM)
     assert kill_mock.call_args_list[1].args == (1234, signal.SIGTERM)
+
+
+def test_start_detaches_kernel_process(
+    tmp_path: Path,
+    mocker: MockerFixture,
+) -> None:
+    backend = LocalIPythonBackend()
+    process = mocker.Mock(pid=4321)
+    popen_mock = mocker.patch("agentnb.backend.subprocess.Popen", return_value=process)
+    wait_mock = mocker.patch.object(backend, "_wait_for_ready")
+    execute_mock = mocker.patch.object(
+        backend,
+        "execute",
+        return_value=mocker.Mock(status="ok", evalue=None, ename=None),
+    )
+
+    session = backend.start(
+        project_root=tmp_path,
+        state_dir=tmp_path / ".agentnb",
+        session_id="default",
+        python_executable="/usr/bin/python3",
+    )
+
+    assert session.pid == 4321
+    popen_mock.assert_called_once()
+    assert popen_mock.call_args.kwargs["start_new_session"] is True
+    wait_mock.assert_called_once()
+    execute_mock.assert_called_once()

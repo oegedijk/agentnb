@@ -45,6 +45,30 @@ def test_session_store_roundtrip_and_stale_cleanup(project_dir: Path) -> None:
     assert not connection_file.exists()
 
 
+def test_session_store_ignores_untrusted_connection_file_path(project_dir: Path) -> None:
+    store = SessionStore(project_dir)
+    store.ensure_state_dir()
+    victim = project_dir.parent / "victim.txt"
+    victim.write_text("keep me", encoding="utf-8")
+
+    session = SessionInfo(
+        session_id="default",
+        pid=999_999,
+        connection_file=str(victim),
+        python_executable="python",
+        project_root=str(project_dir),
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+    store.save_session(session)
+
+    loaded = store.load_session()
+
+    assert loaded is not None
+    assert loaded.connection_file == str(store.connection_file)
+    assert store.cleanup_stale() is True
+    assert victim.exists()
+
+
 def test_session_store_isolated_by_session_id(project_dir: Path) -> None:
     primary = SessionStore(project_dir, session_id="primary")
     secondary = SessionStore(project_dir, session_id="secondary")

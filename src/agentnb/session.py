@@ -80,6 +80,7 @@ class SessionStore:
                 continue
             if session.session_id != self.session_id:
                 continue
+            session = self._normalize_session(session)
             if path == self.legacy_session_file:
                 self.save_session(session)
                 self._safe_unlink(self.legacy_session_file)
@@ -165,6 +166,19 @@ class SessionStore:
         except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError):
             self._safe_unlink(path)
             return None
+
+    def _normalize_session(self, session: SessionInfo) -> SessionInfo:
+        expected_connection_file = str(self.connection_file)
+        if session.connection_file == expected_connection_file:
+            return session
+        return SessionInfo(
+            session_id=session.session_id,
+            pid=session.pid,
+            connection_file=expected_connection_file,
+            python_executable=session.python_executable,
+            project_root=session.project_root,
+            started_at=session.started_at,
+        )
 
     def _safe_unlink(self, path: Path) -> None:
         try:

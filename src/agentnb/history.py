@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal, cast
+
+from .contracts import ExecutionResult, utc_now_iso
+from .session import DEFAULT_SESSION_ID, STATE_DIR_NAME
+
+HISTORY_FILE_NAME = "history.jsonl"
+
+HistoryKind = Literal["user_command", "kernel_execution"]
+
+_PREVIEW_LIMIT = 160
+
+
+@dataclass(slots=True)
+class HistoryRecord:
+    kind: HistoryKind
+    ts: str
+    session_id: str
+    status: str
+    duration_ms: int
+    command_type: str
+    label: str
+    user_visible: bool
+    input: str | None = None
+    code: str | None = None
+    origin: str | None = None
+    error_type: str | None = None
+    result_preview: str | None = None
+    stdout_preview: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": self.kind,
+            "ts": self.ts,
+            "session_id": self.session_id,
+            "status": self.status,
+            "duration_ms": self.duration_ms,
+            "command_type": self.command_type,
+            "label": self.label,
+            "user_visible": self.user_visible,
+        }
+        optional_fields = {
+            "input": self.input,
+            "code": self.code,
+            "origin": self.origin,
+            "error_type": self.error_type,
+            "result_preview": self.result_preview,
+            "stdout_preview": self.stdout_preview,
+        }
+        for key, value in optional_fields.items():
+            if value is not None:
+                payload[key] = value
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> HistoryRecord:
+        return cls(
+            kind=cast(
+                HistoryKind,
+                _require_literal(payload, "kind", {"user_command", "kernel_execution"}),
+            ),
+            ts=_require_str(payload, "ts"),
+            session_id=_require_str(payload, "session_id"),
+            status=_require_str(payload, "status"),
+            duration_ms=_require_int(payload, "duration_ms"),
+            command_type=_require_str(payload, "command_type"),
+            label=_require_str(payload, "label"),
+            user_visible=_require_bool(payload, "user_visible"),
+            input=_optional_str(payload, "input"),
+            code=_optional_str(payload, "code"),
+            origin=_optional_str(payload, "origin"),
+            error_type=_optional_str(payload, "error_type"),
+            result_preview=_optional_str(payload, "result_preview"),
+            stdout_preview=_optional_str(payload, "stdout_preview"),
+        )
+
+
+class HistoryStore:
+    def __init__(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
+        self.project_root = project_root.resolve()
+        self.session_id = session_id
+        self.state_dir = self.project_root / STATE_DIR_NAME
+        self.history_file = self.state_dir / HISTORY_FILE_NAME
+
+    def append(self, record: HistoryRecord) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        with self.history_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record.to_dict(), ensure_ascii=True))
+            handle.write("\n")
+
+    def read(
+        self,
+        *,
+        include_internal: bool = False,
+        errors_only: bool = False,
+    ) -> list[HistoryRecord]:
+        if not self.history_file.exists():
+            return []
+
+        entries: list[HistoryRecord] = []
+        for line in self.history_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+                record = HistoryRecord.from_dict(payload)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if record.session_id != self.session_id:
+                continue
+            if not include_internal and not record.user_visible:
+                continue
+            if errors_only and record.status != "error":
+                continue
+            entries.append(record)
+        return entries
+
+
+def user_command_record(
+    *,
+    session_id: str,
+    command_type: str,
+    label: str,
+    input_text: str | None = None,
+    code: str | None = None,
+    origin: str | None = None,
+    execution: ExecutionResult | None = None,
+    error: Exception | None = None,
+    status: str | None = None,
+    duration_ms: int | None = None,
+    error_type: str | None = None,
+    stdout: str | None = None,
+    result: str | None = None,
+) -> HistoryRecord:
+    resolved_status, resolved_duration, resolved_error_type, result_preview, stdout_preview = (
+        _resolve_execution_metadata(
+            execution=execution,
+            error=error,
+            status=status,
+            duration_ms=duration_ms,
+            error_type=error_type,
+            stdout=stdout,
+            result=result,
+        )
+    )
+    return HistoryRecord(
+        kind="user_command",
+        ts=utc_now_iso(),
+        session_id=session_id,
+        status=resolved_status,
+        duration_ms=resolved_duration,
+        command_type=command_type,
+        label=label,
+        input=input_text,
+        code=code,
+        origin=origin,
+        user_visible=True,
+        error_type=resolved_error_type,
+        result_preview=result_preview,
+        stdout_preview=stdout_preview,
+    )
+
+
+def kernel_execution_record(
+    *,
+    session_id: str,
+    command_type: str,
+    label: str,
+    code: str | None,
+    origin: str,
+    execution: ExecutionResult | None = None,
+    error: Exception | None = None,
+    status: str | None = None,
+    duration_ms: int | None = None,
+    error_type: str | None = None,
+    stdout: str | None = None,
+    result: str | None = None,
+) -> HistoryRecord:
+    resolved_status, resolved_duration, resolved_error_type, result_preview, stdout_preview = (
+        _resolve_execution_metadata(
+            execution=execution,
+            error=error,
+            status=status,
+            duration_ms=duration_ms,
+            error_type=error_type,
+            stdout=stdout,
+            result=result,
+        )
+    )
+    return HistoryRecord(
+        kind="kernel_execution",
+        ts=utc_now_iso(),
+        session_id=session_id,
+        status=resolved_status,
+        duration_ms=resolved_duration,
+        command_type=command_type,
+        label=label,
+        code=code,
+        origin=origin,
+        user_visible=False,
+        error_type=resolved_error_type,
+        result_preview=result_preview,
+        stdout_preview=stdout_preview,
+    )
+
+
+def summarize_history_text(value: str | None, limit: int = _PREVIEW_LIMIT) -> str | None:
+    if value is None:
+        return None
+    compact = " ".join(value.strip().split())
+    if not compact:
+        return None
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _resolve_execution_metadata(
+    *,
+    execution: ExecutionResult | None,
+    error: Exception | None,
+    status: str | None,
+    duration_ms: int | None,
+    error_type: str | None,
+    stdout: str | None,
+    result: str | None,
+) -> tuple[str, int, str | None, str | None, str | None]:
+    resolved_status = status
+    resolved_duration = 0 if duration_ms is None else duration_ms
+    resolved_error_type = error_type
+    resolved_stdout = stdout
+    resolved_result = result
+
+    if execution is not None:
+        if resolved_status is None:
+            resolved_status = execution.status
+        if duration_ms is None:
+            resolved_duration = execution.duration_ms
+        if resolved_error_type is None:
+            resolved_error_type = execution.ename
+        if resolved_stdout is None:
+            resolved_stdout = execution.stdout
+        if resolved_result is None:
+            resolved_result = execution.result
+
+    if error is not None:
+        if resolved_status is None:
+            resolved_status = "error"
+        if resolved_error_type is None:
+            resolved_error_type = type(error).__name__
+
+    if resolved_status is None:
+        resolved_status = "ok"
+
+    return (
+        resolved_status,
+        resolved_duration,
+        resolved_error_type,
+        summarize_history_text(resolved_result),
+        summarize_history_text(resolved_stdout),
+    )
+
+
+def _require_literal(payload: dict[str, Any], key: str, allowed: set[str]) -> str:
+    value = _require_str(payload, key)
+    if value not in allowed:
+        raise ValueError(f"Invalid {key}: {value}")
+    return value
+
+
+def _require_str(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Missing {key}")
+    return value
+
+
+def _optional_str(payload: dict[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid {key}")
+    return value
+
+
+def _require_int(payload: dict[str, Any], key: str) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int):
+        raise ValueError(f"Invalid {key}")
+    return value
+
+
+def _require_bool(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"Invalid {key}")
+    return value

@@ -9,6 +9,15 @@ Use this skill when iterative Python work would benefit from preserved in-memory
 
 Treat `agentnb` as a persistent REPL for agents, or an append-only notebook without a notebook UI. It keeps live state and execution history, but it is not a notebook editor.
 
+Module reloading is explicit. Do not assume edited project files are reloaded
+automatically on each execution.
+
+`exec` follows normal IPython/Notebook behavior: if the final line of a code
+snippet is an expression, its value is returned as the result.
+
+When you need low-noise machine-readable output, prefer `agentnb --agent ...`.
+It returns compact JSON by default to reduce token usage.
+
 Typical cases:
 - exploring a codebase or API incrementally
 - keeping expensive imports, setup, or data loaded
@@ -55,27 +64,33 @@ Notes:
 Use this order for normal work:
 
 1. `agentnb start --json`
-2. `agentnb exec ... --json`
-3. `agentnb vars --json` or `agentnb inspect NAME --json`
-4. `agentnb reload MODULE --json` after editing source files
-5. `agentnb history --json` when you need to review prior steps
+2. `agentnb exec ... --json` for short inline snippets
+3. `agentnb exec --file ... --json` or pipe code through stdin for multiline work
+4. `agentnb vars --json` or `agentnb inspect NAME --json`
+5. `agentnb reload --json` after editing project-local source files
+6. `agentnb reload myapp.models --json` when you want to target one imported module
+7. `agentnb history --json` when you need to review prior steps
 
 Examples:
 
 ```bash
 agentnb exec "from myapp.models import User" --json
 agentnb exec "u = User(name='test'); print(u)" --json
+agentnb exec --file scripts/debug_snippet.py --json
+agentnb exec --json <<'PY'
+import pandas as pd
+df = pd.read_csv("tips.csv")
+df.head()
+PY
 agentnb vars --json
 agentnb inspect u --json
+agentnb reload --json
 agentnb reload myapp.models --json
 ```
 
-For multi-line code, prefer `--file` or stdin over fragile shell quoting:
-
-```bash
-agentnb exec --file scripts/debug_snippet.py --json
-printf '%s\n' 'x = 1' 'x + 1' | agentnb exec --json
-```
+For multi-line code, prefer `--file` or stdin/heredoc over shell-escaped
+backslashes. A literal multi-line shell argument is fine if your shell passes
+it through, but `--file` and stdin are the reliable defaults.
 
 ## Recovery
 
@@ -104,7 +119,14 @@ Use `history --errors --json` to inspect recent failures.
 
 - Check `status` or `start` before assuming a live kernel exists.
 - Prefer `exec` for real work and `vars` or `inspect` for observation.
-- Use `reload` after editing importable modules instead of assuming live definitions updated automatically.
+- Prefer short inline `exec` for one-liners and stdin or `--file` for multiline code.
+- Use `reload` after editing importable project modules instead of assuming live definitions updated automatically.
+- Bare `reload` reloads all imported project-local modules. `reload MODULE` targets one imported project-local module.
+- If reload reports stale objects, recreate them or run `reset` when the whole namespace has become unreliable.
+- `vars` includes type information by default; pass `--no-types` only when you need less noise.
+- `vars` hides imported helper routines and classes and summarizes common containers compactly.
+- `history` shows semantic user-visible steps by default; use `history --all --json` only when debugging internals.
+- `inspect` gives compact previews for pandas-like values and for common `list`/`dict` payloads.
 - Keep snippets focused and incremental; avoid pasting large scripts unless the task truly needs that.
 - Treat the kernel as project-scoped state. Stop it when the task is complete or when stale state could confuse later work.
 

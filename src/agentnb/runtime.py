@@ -4,8 +4,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
-from .contracts import ExecutionResult, KernelStatus, utc_now_iso
+from .contracts import ExecutionResult, KernelStatus
 from .errors import ExecutionTimedOutError, KernelNotReadyError, NoKernelRunningError
+from .history import HistoryStore
 from .hooks import Hooks
 from .provisioner import KernelProvisioner
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
@@ -95,27 +96,9 @@ class KernelRuntime:
                 self._backend.interrupt(session)
                 raise ExecutionTimedOutError(timeout_s) from exc
 
-            store.append_history(
-                {
-                    "ts": utc_now_iso(),
-                    "code": code,
-                    "status": result.status,
-                    "duration_ms": result.duration_ms,
-                    "error_type": result.ename,
-                }
-            )
             return result
         except Exception as exc:
             error = exc
-            store.append_history(
-                {
-                    "ts": utc_now_iso(),
-                    "code": code,
-                    "status": "error",
-                    "duration_ms": 0,
-                    "error_type": type(exc).__name__,
-                }
-            )
             raise
         finally:
             self._hooks.after_execute(store.project_root, session_id, code, result, error)
@@ -130,27 +113,24 @@ class KernelRuntime:
         timeout_s: float = 10.0,
         session_id: str = DEFAULT_SESSION_ID,
     ) -> ExecutionResult:
-        store, session = self._require_session(project_root=project_root, session_id=session_id)
-        result = self._backend.reset(session=session, timeout_s=timeout_s)
-        store.append_history(
-            {
-                "ts": utc_now_iso(),
-                "code": "<reset>",
-                "status": result.status,
-                "duration_ms": result.duration_ms,
-                "error_type": result.ename,
-            }
-        )
-        return result
+        _, session = self._require_session(project_root=project_root, session_id=session_id)
+        return self._backend.reset(session=session, timeout_s=timeout_s)
 
     def history(
         self,
         project_root: Path,
         session_id: str = DEFAULT_SESSION_ID,
         errors_only: bool = False,
+        include_internal: bool = False,
     ) -> list[dict[str, object]]:
-        store = SessionStore(project_root=project_root, session_id=session_id)
-        return store.read_history(errors_only=errors_only)
+        history_store = HistoryStore(project_root=project_root, session_id=session_id)
+        return [
+            entry.to_dict()
+            for entry in history_store.read(
+                errors_only=errors_only,
+                include_internal=include_internal,
+            )
+        ]
 
     def doctor(
         self,

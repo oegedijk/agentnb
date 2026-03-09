@@ -16,10 +16,7 @@ from .contracts import ExecutionEvent, ExecutionResult, KernelStatus, utc_now_is
 from .errors import BackendOperationError
 from .session import SessionInfo, pid_exists
 
-STARTUP_CODE = """%load_ext autoreload
-%autoreload 2
-
-import os
+STARTUP_CODE = """import os
 import sys
 
 _project_root = os.environ.get("AGENTNB_PROJECT_ROOT", ".")

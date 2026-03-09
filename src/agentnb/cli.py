@@ -8,8 +8,15 @@ from pathlib import Path
 
 import click
 
-from .contracts import CommandResponse, error_response, success_response
-from .errors import AgentNBException, InvalidInputError
+from .compact import (
+    compact_execution_payload,
+    compact_history_entry,
+    compact_inspect_payload,
+    compact_traceback,
+)
+from .contracts import CommandResponse, ExecutionResult, error_response, success_response
+from .errors import AgentNBException, InvalidInputError, KernelNotReadyError, NoKernelRunningError
+from .history import HistoryStore, kernel_execution_record, user_command_record
 from .ops import NotebookOps
 from .output import RenderOptions, render_response
 from .runtime import KernelRuntime
@@ -52,14 +59,24 @@ def main(
 
       1. agentnb start --json
       2. agentnb exec "from myapp import thing" --json
-      3. agentnb vars --json
-      4. agentnb inspect thing --json
-      5. agentnb reload myapp.module --json
-      6. agentnb history --json
+      3. agentnb exec --file analysis.py --json
+      4. agentnb vars --json
+      5. agentnb inspect thing --json
+      6. agentnb reload myapp.module --json
+      7. agentnb history --json
 
-    Prefer --json for agent integrations and machine-readable parsing.
-    Startup does not install ipykernel unless you pass --auto-install or use
-    agentnb doctor --fix.
+    For multiline code, prefer --file or stdin/heredoc over shell-escaped
+    backslashes. `vars` includes type information by default. `history`
+    shows semantic user-visible steps by default; pass --all to include
+    internal helper executions. Module reloading is explicit: use `reload`
+    after editing project-local modules. agentnb does not auto-reload modules
+    on every execution. Like a regular IPython notebook, the final expression
+    in an exec block is returned as the result output. In `--agent` mode,
+    JSON payloads are compacted by default to reduce token usage.
+
+    Prefer --json for agent integrations and machine-readable parsing. Startup
+    does not install ipykernel unless you pass --auto-install or use agentnb
+    doctor --fix.
     """
     ctx.obj = _resolve_render_options(
         root_as_json=root_as_json,
@@ -215,7 +232,8 @@ def _execute_command(
             message=exc.message,
             ename=exc.ename,
             evalue=exc.evalue,
-            traceback=exc.traceback,
+            traceback=compact_traceback(exc.traceback),
+            data=exc.data,
             suggestions=_suggestions(command_name, "error", {}),
         )
     except Exception as exc:
@@ -288,8 +306,20 @@ def exec_cmd(
 ) -> None:
     """Execute code in the live kernel.
 
-    Provide code as an argument, with --file, or through stdin. The kernel must
-    already be running for the target project.
+    Provide code as an argument, with --file, or through stdin. For multiline
+    code, prefer --file or a stdin heredoc. The kernel must already be running
+    for the target project. Like a notebook cell, the final expression is
+    returned as the execution result.
+
+    Examples:
+
+      agentnb exec "1 + 1" --json
+      agentnb exec --file analysis.py --json
+      agentnb exec --json <<'PY'
+      import pandas as pd
+      df = pd.read_csv("tips.csv")
+      df.head()
+      PY
     """
     try:
         source = _resolve_code_input(code=code, filepath=filepath)
@@ -310,27 +340,59 @@ def exec_cmd(
         return
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        result = runtime.execute(
-            project_root=project_root,
+        history_store = HistoryStore(project_root=project_root, session_id=session_id)
+        try:
+            result = runtime.execute(
+                project_root=project_root,
+                session_id=session_id,
+                code=source,
+                timeout_s=timeout,
+            )
+        except Exception as exc:
+            _record_exec_history(
+                history_store=history_store,
+                session_id=session_id,
+                code=source,
+                error=exc,
+            )
+            raise
+
+        _record_exec_history(
+            history_store=history_store,
             session_id=session_id,
             code=source,
-            timeout_s=timeout,
+            execution=result,
         )
         payload = result.to_dict()
         if output_selector is not None:
             payload["selected_output"] = output_selector
             payload["selected_text"] = _select_exec_output(payload, output_selector)
+        payload = compact_execution_payload(payload)
+        if result.status == "error":
+            raise AgentNBException(
+                code="EXECUTION_ERROR",
+                message="Execution failed",
+                ename=result.ename,
+                evalue=result.evalue,
+                traceback=result.traceback,
+                data=payload,
+            )
         return payload
 
     _execute_command("exec", project, as_json, handler)
 
 
 @main.command("vars")
-@click.option("--types", "include_types", is_flag=True, help="Include type information")
+@click.option("--types/--no-types", "include_types", default=True, help="Show type information")
 @project_option
 @json_option
 def vars_cmd(project: Path | None, as_json: bool, include_types: bool) -> None:
-    """List user variables currently defined in the kernel namespace."""
+    """List user variables currently defined in the kernel namespace.
+
+    Type information is included by default. Pass --no-types to hide it.
+    Imported helper routines and classes are omitted, and common dataframe or
+    container values are summarized compactly.
+    """
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         values = ops.list_vars(project_root=project_root, session_id=session_id)
@@ -346,21 +408,30 @@ def vars_cmd(project: Path | None, as_json: bool, include_types: bool) -> None:
 @project_option
 @json_option
 def inspect_cmd(name: str, project: Path | None, as_json: bool) -> None:
-    """Inspect one variable in the kernel namespace."""
+    """Inspect one variable in the kernel namespace.
+
+    Dataframe-like values get a compact tabular preview. Lists, tuples, sets,
+    and dicts get a compact structural preview instead of a generic repr.
+    """
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         payload = ops.inspect_var(project_root=project_root, session_id=session_id, name=name)
-        return {"inspect": payload}
+        return {"inspect": compact_inspect_payload(payload)}
 
     _execute_command("inspect", project, as_json, handler)
 
 
 @main.command("reload")
-@click.argument("module")
+@click.argument("module", required=False)
 @project_option
 @json_option
-def reload_cmd(module: str, project: Path | None, as_json: bool) -> None:
-    """Reload an imported module with importlib.reload."""
+def reload_cmd(module: str | None, project: Path | None, as_json: bool) -> None:
+    """Reload project-local modules in the live kernel.
+
+    Pass a module name to reload one imported project-local module. Omit the
+    module to reload all currently imported project-local modules. The reload
+    report includes rebound names and possible stale objects.
+    """
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         payload = ops.reload_module(
@@ -387,24 +458,35 @@ def status(project: Path | None, as_json: bool) -> None:
 @click.option("--errors", is_flag=True, help="Only show failed executions")
 @click.option("--latest", is_flag=True, help="Show only the most recent history entry")
 @click.option("--last", type=click.IntRange(min=1), default=None, help="Show the last N entries")
+@click.option("--all", "include_internal", is_flag=True, help="Include internal kernel executions")
 @project_option
 @json_option
 def history(
     errors: bool,
     latest: bool,
     last: int | None,
+    include_internal: bool,
     project: Path | None,
     as_json: bool,
 ) -> None:
-    """Show recent execution history recorded for the project."""
+    """Show recent execution history recorded for the project.
+
+    By default, this shows semantic user-visible steps such as exec, vars,
+    inspect, reload, and reset. Pass --all to include internal helper
+    executions. History entries are compact summaries by default.
+    """
 
     if latest and last is not None:
         raise click.UsageError("Use either --latest or --last, not both.")
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         entries = runtime.history(
-            project_root=project_root, session_id=session_id, errors_only=errors
+            project_root=project_root,
+            session_id=session_id,
+            errors_only=errors,
+            include_internal=include_internal,
         )
+        entries = [compact_history_entry(entry) for entry in entries]
         if latest:
             entries = entries[-1:]
         elif last is not None:
@@ -435,8 +517,37 @@ def reset(timeout: float, project: Path | None, as_json: bool) -> None:
     """Clear user state from the kernel while keeping the process alive."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        result = runtime.reset(project_root=project_root, session_id=session_id, timeout_s=timeout)
-        return result.to_dict()
+        history_store = HistoryStore(project_root=project_root, session_id=session_id)
+        try:
+            result = runtime.reset(
+                project_root=project_root,
+                session_id=session_id,
+                timeout_s=timeout,
+            )
+        except Exception as exc:
+            _record_reset_history(
+                history_store=history_store,
+                session_id=session_id,
+                error=exc,
+            )
+            raise
+
+        _record_reset_history(
+            history_store=history_store,
+            session_id=session_id,
+            execution=result,
+        )
+        payload = compact_execution_payload(result.to_dict())
+        if result.status == "error":
+            raise AgentNBException(
+                code="EXECUTION_ERROR",
+                message="Reset failed",
+                ename=result.ename,
+                evalue=result.evalue,
+                traceback=result.traceback,
+                data=payload,
+            )
+        return payload
 
     _execute_command("reset", project, as_json, handler)
 
@@ -480,6 +591,77 @@ def doctor(
         )
 
     _execute_command("doctor", project, as_json, handler)
+
+
+def _record_exec_history(
+    *,
+    history_store: HistoryStore,
+    session_id: str,
+    code: str,
+    execution: ExecutionResult | None = None,
+    error: Exception | None = None,
+) -> None:
+    if _should_skip_history(error):
+        return
+    history_store.append(
+        kernel_execution_record(
+            session_id=session_id,
+            command_type="exec",
+            label="exec kernel execution",
+            code=code,
+            origin="cli",
+            execution=execution,
+            error=error,
+        )
+    )
+    history_store.append(
+        user_command_record(
+            session_id=session_id,
+            command_type="exec",
+            label="exec",
+            input_text=code,
+            code=code,
+            origin="cli",
+            execution=execution,
+            error=error,
+        )
+    )
+
+
+def _record_reset_history(
+    *,
+    history_store: HistoryStore,
+    session_id: str,
+    execution: ExecutionResult | None = None,
+    error: Exception | None = None,
+) -> None:
+    if _should_skip_history(error):
+        return
+    history_store.append(
+        kernel_execution_record(
+            session_id=session_id,
+            command_type="reset",
+            label="reset kernel state",
+            code=None,
+            origin="cli",
+            execution=execution,
+            error=error,
+        )
+    )
+    history_store.append(
+        user_command_record(
+            session_id=session_id,
+            command_type="reset",
+            label="reset",
+            origin="cli",
+            execution=execution,
+            error=error,
+        )
+    )
+
+
+def _should_skip_history(error: Exception | None) -> bool:
+    return isinstance(error, (NoKernelRunningError, KernelNotReadyError))
 
 
 def _resolve_code_input(code: str | None, filepath: Path | None) -> str:

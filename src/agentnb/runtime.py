@@ -29,7 +29,7 @@ class KernelRuntime:
         project_root: Path,
         session_id: str = DEFAULT_SESSION_ID,
         python_executable: Path | None = None,
-        auto_install: bool = True,
+        auto_install: bool = False,
     ) -> tuple[KernelStatus, bool]:
         store = SessionStore(project_root=project_root, session_id=session_id)
         store.cleanup_stale()

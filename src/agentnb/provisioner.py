@@ -99,7 +99,7 @@ class KernelProvisioner:
     def provision(
         self,
         preferred_python: Path | None = None,
-        auto_install: bool = True,
+        auto_install: bool = False,
     ) -> ProvisionResult:
         selected = self.select_interpreter(preferred_python=preferred_python)
         installed = self.ensure_ipykernel(selected, auto_install=auto_install)

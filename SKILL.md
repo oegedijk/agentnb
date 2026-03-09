@@ -26,6 +26,10 @@ agentnb status --json
 agentnb start --json
 ```
 
+If `agentnb start` reports that `ipykernel` is missing, either rerun with
+`--auto-install` or use `agentnb doctor --fix --json`. Startup no longer
+installs dependencies unless asked.
+
 If a specific interpreter is required:
 
 ```bash

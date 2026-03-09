@@ -37,11 +37,14 @@ The normal agent loop is:
 
 Use `agentnb doctor --json` if startup fails, `agentnb interrupt --json` if execution hangs, and `agentnb reset --json` if the namespace needs a clean slate.
 
+If startup reports that `ipykernel` is missing, rerun `agentnb start` with
+`--auto-install` or use `agentnb doctor --fix --json`.
+
 Running `agentnb` with no arguments, or `agentnb --help`, prints an agent-oriented command guide and workflow summary.
 
 ## Commands
 
-- `agentnb start [--project PATH] [--python PATH] [--auto-install/--no-auto-install]`
+- `agentnb start [--project PATH] [--python PATH] [--auto-install]`
 - `agentnb status [--project PATH]`
 - `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--project PATH] [--json]`
 - `agentnb vars [--project PATH] [--json] [--types]`
@@ -62,7 +65,9 @@ On `agentnb start`, the runtime selects an interpreter in this order:
 3. active `VIRTUAL_ENV` interpreter
 4. current Python executable
 
-If `ipykernel` is missing for the selected interpreter, `agentnb` auto-installs it by default (`--auto-install`). Use `--no-auto-install` to disable this behavior.
+If `ipykernel` is missing for the selected interpreter, `agentnb start` fails
+with the exact install command. Pass `--auto-install` to let `agentnb` install
+it for you, or use `agentnb doctor --fix --json`.
 
 ## JSON Mode
 

@@ -38,10 +38,14 @@ def main(ctx: click.Context) -> None:
       6. agentnb history --json
 
     Prefer --json for agent integrations and machine-readable parsing.
-    Use agentnb doctor if kernel startup fails.
+    Startup does not install ipykernel unless you pass --auto-install or use
+    agentnb doctor --fix.
     """
     if ctx.invoked_subcommand is None:
-        click.echo("No command provided. Run `agentnb --help` to see the full workflow and command guide.\n")
+        click.echo(
+            "No command provided. Run `agentnb --help` to see the full workflow "
+            "and command guide.\n"
+        )
         click.echo(ctx.get_help())
         ctx.exit(0)
 
@@ -199,7 +203,11 @@ def _execute_command(
 @main.command()
 @project_option
 @python_option
-@click.option("--auto-install/--no-auto-install", default=True, show_default=True)
+@click.option(
+    "--auto-install",
+    is_flag=True,
+    help="Install ipykernel into the selected interpreter if it is missing.",
+)
 @json_option
 def start(
     project: Path | None,
@@ -210,8 +218,8 @@ def start(
     """Start or reuse the project's persistent kernel.
 
     The interpreter is selected from --python, .venv, VIRTUAL_ENV, or the
-    current Python executable. By default agentnb auto-installs ipykernel into
-    the chosen interpreter if needed.
+    current Python executable. Without --auto-install, startup fails with the
+    exact install command if ipykernel is missing.
     """
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:

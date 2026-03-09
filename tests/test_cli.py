@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from pytest_mock import MockerFixture
 
 from agentnb.cli import main
 
@@ -85,6 +86,60 @@ def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path
     assert "checks" in payload["data"]
 
 
+def test_cli_start_auto_install_is_opt_in(
+    cli_runner: CliRunner,
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    start_mock = mocker.patch("agentnb.cli.runtime.start")
+    start_mock.return_value = (
+        mocker.Mock(
+            to_dict=lambda: {
+                "alive": True,
+                "pid": 1234,
+                "connection_file": str(project_dir / ".agentnb" / "kernel-default.json"),
+                "started_at": "2026-03-09T00:00:00+00:00",
+                "uptime_s": 0.0,
+                "python": "python",
+            }
+        ),
+        True,
+    )
+
+    result = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    assert start_mock.call_args.kwargs["auto_install"] is False
+
+
+def test_cli_start_auto_install_flag_enables_installs(
+    cli_runner: CliRunner,
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    start_mock = mocker.patch("agentnb.cli.runtime.start")
+    start_mock.return_value = (
+        mocker.Mock(
+            to_dict=lambda: {
+                "alive": True,
+                "pid": 1234,
+                "connection_file": str(project_dir / ".agentnb" / "kernel-default.json"),
+                "started_at": "2026-03-09T00:00:00+00:00",
+                "uptime_s": 0.0,
+                "python": "python",
+            }
+        ),
+        True,
+    )
+
+    result = cli_runner.invoke(
+        main, ["start", "--project", str(project_dir), "--auto-install", "--json"]
+    )
+
+    assert result.exit_code == 0
+    assert start_mock.call_args.kwargs["auto_install"] is True
+
+
 def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(main, [])
     assert result.exit_code == 0
@@ -98,8 +153,8 @@ def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "Persistent project-scoped Python state for agent workflows." in result.output
     assert "agentnb start --json" in result.output
-    assert "doctor" in result.output
-    assert "startup fails" in result.output
+    assert "--auto-install" in result.output
+    assert "doctor --fix" in result.output
 
 
 def test_cli_json_response_includes_suggestions(cli_runner: CliRunner, project_dir: Path) -> None:

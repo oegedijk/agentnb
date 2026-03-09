@@ -50,6 +50,38 @@ def test_runtime_start_uses_provisioner_and_passes_python(
     assert backend.start.call_args.kwargs["python_executable"] == "/custom/python"
 
 
+def test_runtime_start_defaults_auto_install_to_false(
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    backend = mocker.Mock()
+    session = SessionInfo(
+        session_id="default",
+        pid=12345,
+        connection_file=str(project_dir / ".agentnb" / "kernel-default.json"),
+        python_executable="/custom/python",
+        project_root=str(project_dir),
+        started_at="2026-03-09T00:00:00+00:00",
+    )
+    backend.start.return_value = session
+    backend.status.return_value = KernelStatus(alive=True, pid=12345, python="/custom/python")
+
+    provisioner = mocker.Mock()
+    provisioner.provision.return_value = ProvisionResult(
+        executable="/custom/python",
+        source="explicit",
+        installed_ipykernel=False,
+    )
+
+    runtime = KernelRuntime(backend=backend, provisioner_factory=lambda _: provisioner)
+    runtime.start(project_root=project_dir)
+
+    provisioner.provision.assert_called_once_with(
+        preferred_python=None,
+        auto_install=False,
+    )
+
+
 def test_runtime_doctor_merges_store_metadata(project_dir: Path, mocker: MockerFixture) -> None:
     backend = mocker.Mock()
     provisioner = mocker.Mock()

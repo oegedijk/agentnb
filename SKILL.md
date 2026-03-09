@@ -1,11 +1,13 @@
 ---
 name: agentnb
-description: Use this when working in a repo that has agentnb installed or under development and the task benefits from a persistent Python kernel instead of one-off Python commands. Covers starting the project-scoped kernel, executing code, inspecting live state, recovering from failures, and shutting the session down cleanly.
+description: Use this when working in a repo that has agentnb installed or under development and the task benefits from a persistent Python REPL instead of one-off Python commands. Covers starting the project-scoped kernel, executing code, inspecting live state, recovering from failures, and shutting the session down cleanly.
 ---
 
 # agentnb
 
 Use this skill when iterative Python work would benefit from preserved in-memory state across turns or commands.
+
+Treat `agentnb` as a persistent REPL for agents, or an append-only notebook without a notebook UI. It keeps live state and execution history, but it is not a notebook editor.
 
 Typical cases:
 - exploring a codebase or API incrementally
@@ -108,6 +110,7 @@ Use `history --errors --json` to inspect recent failures.
 
 ## Limits
 
-- `agentnb` is a persistent kernel interface, not a notebook editor.
+- `agentnb` is a persistent REPL interface, not a notebook editor.
+- It behaves more like an append-only notebook transcript than a mutable notebook document.
 - State is process-local and can drift from on-disk source until modules are reloaded or the kernel is restarted.
 - Commands operate on the default session model in the current implementation.

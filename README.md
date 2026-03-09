@@ -1,10 +1,12 @@
 # agentnb
 
-A persistent project-scoped Python kernel for coding agents, exposed through a simple CLI.
+A persistent project-scoped Python REPL for coding agents, exposed through a simple CLI.
 
 ## Why
 
 Agents can run shell commands, but they lose state when using one-off `python -c` and script invocations. `agentnb` gives agents a long-running IPython kernel they can drive with CLI commands, so they can explore incrementally, keep expensive setup in memory, inspect live variables, and recover without restarting from scratch on every step.
+
+The right mental model is a persistent REPL for agents, or an append-only notebook without a notebook UI. `agentnb` keeps execution state and history, but it does not edit notebook cells or manage `.ipynb` files.
 
 ## Install
 
@@ -41,6 +43,18 @@ If startup reports that `ipykernel` is missing, rerun `agentnb start` with
 `--auto-install` or use `agentnb doctor --fix --json`.
 
 Running `agentnb` with no arguments, or `agentnb --help`, prints an agent-oriented command guide and workflow summary.
+
+## Positioning
+
+`agentnb` is optimized for stateful agent iteration inside a project:
+- a persistent REPL the agent can keep using across steps
+- a lightweight append-only notebook model backed by execution history
+- module reload and variable inspection without a notebook editor
+
+It is not a notebook editing tool:
+- it does not edit cells
+- it does not write `.ipynb` files
+- it does not synchronize with JupyterLab
 
 ## Commands
 

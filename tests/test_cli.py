@@ -151,7 +151,8 @@ def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None
 def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(main, ["--help"])
     assert result.exit_code == 0
-    assert "Persistent project-scoped Python state for agent workflows." in result.output
+    assert "Persistent project-scoped Python REPL for agent workflows." in result.output
+    assert "append-only notebook" in result.output
     assert "agentnb start --json" in result.output
     assert "--auto-install" in result.output
     assert "doctor --fix" in result.output

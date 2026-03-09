@@ -23,10 +23,14 @@ ops = NotebookOps(runtime)
 )
 @click.pass_context
 def main(ctx: click.Context) -> None:
-    """Persistent project-scoped Python state for agent workflows.
+    """Persistent project-scoped Python REPL for agent workflows.
 
     Start a long-running kernel for the current project, execute code against it,
     inspect live variables, and recover without losing all state on every step.
+
+    Think of agentnb as an agent REPL, or an append-only notebook without a
+    notebook editor. It preserves execution state and history, but does not
+    edit notebook cells or manage .ipynb files.
 
     Recommended loop:
 

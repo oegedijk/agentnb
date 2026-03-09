@@ -1,10 +1,10 @@
 # agentnb
 
-A persistent Python notebook environment for coding agents, exposed through a simple CLI.
+A persistent project-scoped Python kernel for coding agents, exposed through a simple CLI.
 
 ## Why
 
-Agents can run shell commands, but they lose state when using one-off `python -c` and script invocations. `agentnb` gives agents a long-running project-scoped IPython kernel they can drive with CLI commands.
+Agents can run shell commands, but they lose state when using one-off `python -c` and script invocations. `agentnb` gives agents a long-running IPython kernel they can drive with CLI commands, so they can explore incrementally, keep expensive setup in memory, inspect live variables, and recover without restarting from scratch on every step.
 
 ## Install
 
@@ -17,12 +17,27 @@ pip install agentnb
 ## Quick Start
 
 ```bash
-agentnb start --project /path/to/project
-agentnb exec "from myapp.models import User"
-agentnb exec "u = User(name='test'); print(u)"
-agentnb vars
-agentnb stop
+agentnb start --project /path/to/project --json
+agentnb exec "from myapp.models import User" --json
+agentnb exec "u = User(name='test'); print(u)" --json
+agentnb vars --json
+agentnb stop --json
 ```
+
+## Recommended Workflow
+
+The normal agent loop is:
+
+1. `agentnb start --json`
+2. `agentnb exec "..." --json`
+3. `agentnb vars --json`
+4. `agentnb inspect NAME --json`
+5. `agentnb reload MODULE --json` after source edits
+6. `agentnb history --json`
+
+Use `agentnb doctor --json` if startup fails, `agentnb interrupt --json` if execution hangs, and `agentnb reset --json` if the namespace needs a clean slate.
+
+Running `agentnb` with no arguments, or `agentnb --help`, prints an agent-oriented command guide and workflow summary.
 
 ## Commands
 
@@ -51,7 +66,7 @@ If `ipykernel` is missing for the selected interpreter, `agentnb` auto-installs 
 
 ## JSON Mode
 
-Pass `--json` to emit a stable machine-readable envelope.
+Pass `--json` to emit a stable machine-readable envelope. This is the preferred mode for agent integrations.
 
 ```json
 {
@@ -69,6 +84,11 @@ Pass `--json` to emit a stable machine-readable envelope.
     "execution_count": 1,
     "duration_ms": 12
   },
+  "suggestions": [
+    "Run `agentnb vars --json` to inspect the updated namespace.",
+    "Run `agentnb inspect NAME --json` to inspect a specific variable.",
+    "Run `agentnb history --json` to review prior executions."
+  ],
   "error": null
 }
 ```

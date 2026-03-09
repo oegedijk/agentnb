@@ -615,21 +615,78 @@ def test_cli_inspect_compacts_dataframe_payload(cli_runner: CliRunner, project_d
     start_res = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
     assert start_res.exit_code == 0
 
-    cli_runner.invoke(
+    exec_res = cli_runner.invoke(
         main,
         [
             "exec",
             "--project",
             str(project_dir),
             "--json",
-            "import pandas as pd\ndf = pd.DataFrame({'a':[1,2,3,4], 'b':[5,6,7,8]})",
+            """
+class _DTypes:
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def astype(self, _type_name):
+        return self
+
+    def to_dict(self):
+        return self._mapping
+
+
+class _NullCounts:
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def sum(self):
+        return self
+
+    def to_dict(self):
+        return self._mapping
+
+
+class _HeadRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def reset_index(self):
+        return self
+
+    def to_dict(self, orient="records"):
+        assert orient == "records"
+        return self._rows
+
+
+class DataFrameLike:
+    shape = (4, 2)
+    columns = ["a", "b"]
+    dtypes = _DTypes({"a": "int64", "b": "int64"})
+
+    def head(self, n):
+        return _HeadRows(
+            [
+                {"a": 1, "b": 5},
+                {"a": 2, "b": 6},
+                {"a": 3, "b": 7},
+                {"a": 4, "b": 8},
+            ][:n]
+        )
+
+    def isna(self):
+        return _NullCounts({"a": 0, "b": 0})
+
+
+df = DataFrameLike()
+""",
         ],
     )
+    assert exec_res.exit_code == 0
 
     inspect_res = cli_runner.invoke(
         main,
         ["inspect", "--project", str(project_dir), "--json", "df"],
     )
+    assert inspect_res.exit_code == 0
     payload = _payload(inspect_res.output)
     inspect_payload = payload["data"]["inspect"]
     assert "repr" not in inspect_payload

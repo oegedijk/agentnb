@@ -7,17 +7,49 @@ import pytest
 from agentnb.errors import AgentNBException
 from agentnb.ops import NotebookOps
 from agentnb.runtime import KernelRuntime
+from tests.conftest import TestLocalIPythonBackend
+from tests.helpers import cleanup_integration_project, create_project_dir
 
 pytest.importorskip("jupyter_client")
 pytest.importorskip("ipykernel")
+
+
+@pytest.fixture(scope="module")
+def integration_project_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return create_project_dir(tmp_path_factory.mktemp("ops-integration"))
+
+
+@pytest.fixture(scope="module")
+def integration_runtime() -> KernelRuntime:
+    return KernelRuntime(backend=TestLocalIPythonBackend())
+
+
+@pytest.fixture(scope="module")
+def started_runtime_module(
+    integration_runtime: KernelRuntime,
+    integration_project_dir: Path,
+) -> tuple[KernelRuntime, Path]:
+    integration_runtime.start(integration_project_dir)
+    try:
+        yield integration_runtime, integration_project_dir
+    finally:
+        if integration_runtime.status(integration_project_dir).alive:
+            integration_runtime.stop(integration_project_dir)
+
+
+@pytest.fixture(autouse=True)
+def clean_started_runtime(started_runtime_module: tuple[KernelRuntime, Path]) -> None:
+    yield
+    runtime, project_dir = started_runtime_module
+    cleanup_integration_project(runtime, project_dir)
 
 
 def _write_module(project_dir: Path, name: str, body: str) -> None:
     (project_dir / f"{name}.py").write_text(body, encoding="utf-8")
 
 
-def test_ops_vars_inspect_reload(started_runtime: tuple[KernelRuntime, Path]) -> None:
-    runtime, project_dir = started_runtime
+def test_ops_vars_inspect_reload(started_runtime_module: tuple[KernelRuntime, Path]) -> None:
+    runtime, project_dir = started_runtime_module
     _write_module(
         project_dir,
         "localmod",
@@ -102,8 +134,10 @@ def greet() -> str:
     assert any("get_ipython" in str(entry.get("code")) for entry in helper_entries)
 
 
-def test_ops_inspect_dataframe_like_preview(started_runtime: tuple[KernelRuntime, Path]) -> None:
-    runtime, project_dir = started_runtime
+def test_ops_inspect_dataframe_like_preview(
+    started_runtime_module: tuple[KernelRuntime, Path],
+) -> None:
+    runtime, project_dir = started_runtime_module
     runtime.execute(
         project_root=project_dir,
         timeout_s=5,
@@ -177,9 +211,9 @@ frame = DataFrameLike()
 
 
 def test_ops_reload_without_module_reloads_imported_project_modules(
-    started_runtime: tuple[KernelRuntime, Path],
+    started_runtime_module: tuple[KernelRuntime, Path],
 ) -> None:
-    runtime, project_dir = started_runtime
+    runtime, project_dir = started_runtime_module
     _write_module(
         project_dir,
         "alpha_mod",
@@ -243,9 +277,9 @@ def value() -> str:
 
 
 def test_ops_history_records_errors_as_semantic_commands(
-    started_runtime: tuple[KernelRuntime, Path],
+    started_runtime_module: tuple[KernelRuntime, Path],
 ) -> None:
-    runtime, project_dir = started_runtime
+    runtime, project_dir = started_runtime_module
     ops = NotebookOps(runtime)
 
     with pytest.raises(AgentNBException):
@@ -264,3 +298,77 @@ def test_ops_history_records_errors_as_semantic_commands(
     )
     assert len(internal_history) == 2
     assert sum(1 for entry in internal_history if entry["kind"] == "kernel_execution") == 1
+
+
+def test_ops_list_vars_compacts_dataframe_repr(
+    started_runtime_module: tuple[KernelRuntime, Path],
+) -> None:
+    runtime, project_dir = started_runtime_module
+    runtime.execute(
+        project_root=project_dir,
+        timeout_s=5,
+        code="""
+class FakeFrame:
+    shape = (10, 3)
+    columns = ["a", "b", "c"]
+
+
+frame = FakeFrame()
+""",
+    )
+
+    vars_payload = NotebookOps(runtime).list_vars(project_root=project_dir)
+    frame_entry = next(item for item in vars_payload if item["name"] == "frame")
+    assert frame_entry["repr"] == "DataFrame shape=(10, 3) columns=a, b, c"
+
+
+def test_ops_sqlite_rows_get_structural_previews(
+    started_runtime_module: tuple[KernelRuntime, Path],
+) -> None:
+    runtime, project_dir = started_runtime_module
+    db_path = project_dir / "rows.db"
+    runtime.execute(
+        project_root=project_dir,
+        timeout_s=5,
+        code=f"""
+import sqlite3
+
+conn = sqlite3.connect({str(db_path)!r})
+conn.execute("create table items (id integer primary key, title text)")
+conn.executemany("insert into items (title) values (?)", [("a",), ("b",)])
+conn.commit()
+conn.row_factory = sqlite3.Row
+rows = conn.execute("select * from items order by id").fetchall()
+""",
+    )
+
+    ops = NotebookOps(runtime)
+    vars_payload = ops.list_vars(project_root=project_dir)
+    row_entry = next(item for item in vars_payload if item["name"] == "rows")
+    assert row_entry["repr"] == "list len=2 item_keys=id, title"
+
+    inspect_payload = ops.inspect_var(project_root=project_dir, name="rows")
+    assert inspect_payload["preview"]["sample_keys"] == ["id", "title"]
+    assert inspect_payload["preview"]["sample"][0]["title"] == "a"
+
+
+def test_ops_inspect_sequence_preview(started_runtime_module: tuple[KernelRuntime, Path]) -> None:
+    runtime, project_dir = started_runtime_module
+    runtime.execute(
+        project_root=project_dir,
+        timeout_s=5,
+        code="""
+posts = [
+    {"id": 1, "title": "a", "body": "alpha"},
+    {"id": 2, "title": "b", "body": "beta"},
+    {"id": 3, "title": "c", "body": "gamma"},
+]
+""",
+    )
+
+    inspect_payload = NotebookOps(runtime).inspect_var(project_root=project_dir, name="posts")
+    assert inspect_payload["preview"]["kind"] == "sequence-like"
+    assert inspect_payload["preview"]["length"] == 3
+    assert inspect_payload["preview"]["item_type"] == "dict"
+    assert inspect_payload["preview"]["sample_keys"] == ["id", "title", "body"]
+    assert len(inspect_payload["preview"]["sample"]) == 3

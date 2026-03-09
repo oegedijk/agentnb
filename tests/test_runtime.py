@@ -11,9 +11,44 @@ from agentnb.errors import ExecutionTimedOutError, KernelNotReadyError
 from agentnb.history import HistoryStore
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, SessionStore
+from tests.conftest import TestLocalIPythonBackend
+from tests.helpers import cleanup_integration_project, create_project_dir
 
 pytest.importorskip("jupyter_client")
 pytest.importorskip("ipykernel")
+
+
+@pytest.fixture(scope="module")
+def integration_project_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return create_project_dir(tmp_path_factory.mktemp("runtime-integration"))
+
+
+@pytest.fixture(scope="module")
+def integration_runtime() -> KernelRuntime:
+    return KernelRuntime(backend=TestLocalIPythonBackend())
+
+
+@pytest.fixture(scope="module")
+def started_runtime_module(
+    integration_runtime: KernelRuntime,
+    integration_project_dir: Path,
+) -> tuple[KernelRuntime, Path]:
+    integration_runtime.start(integration_project_dir)
+    try:
+        yield integration_runtime, integration_project_dir
+    finally:
+        if integration_runtime.status(integration_project_dir).alive:
+            integration_runtime.stop(integration_project_dir)
+
+
+@pytest.fixture
+def started_runtime(
+    started_runtime_module: tuple[KernelRuntime, Path],
+) -> tuple[KernelRuntime, Path]:
+    runtime, project_dir = started_runtime_module
+    cleanup_integration_project(runtime, project_dir)
+    yield started_runtime_module
+    cleanup_integration_project(runtime, project_dir)
 
 
 def test_runtime_start_status_stop(runtime: KernelRuntime, project_dir: Path) -> None:

@@ -96,6 +96,9 @@ class SessionStore:
     def clear_session(self) -> None:
         self._safe_unlink(self.session_file)
 
+    def has_connection_file(self) -> bool:
+        return self.connection_file.exists()
+
     def cleanup_stale(self) -> bool:
         session = self.load_session()
         if session is None:

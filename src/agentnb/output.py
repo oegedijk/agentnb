@@ -1,25 +1,36 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from .contracts import CommandResponse
 
 
-def render_response(response: CommandResponse, *, as_json: bool) -> str:
-    if as_json:
+@dataclass(slots=True)
+class RenderOptions:
+    as_json: bool = False
+    show_suggestions: bool = True
+    quiet: bool = False
+
+
+def render_response(response: CommandResponse, *, options: RenderOptions) -> str:
+    if options.as_json:
         return json.dumps(response.to_dict(), ensure_ascii=True)
-    return render_human(response)
+    return render_human(response, options=options)
 
 
-def render_human(response: CommandResponse) -> str:
+def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
     if response.status == "error":
         body = _render_error(response)
     else:
         command = response.command
         data = response.data
 
-        if command == "start":
+        quiet_commands = {"start", "status", "stop", "interrupt", "reload", "doctor"}
+        if options.quiet and command in quiet_commands:
+            body = ""
+        elif command == "start":
             if data.get("alive"):
                 python = data.get("python")
                 if data.get("started_new"):
@@ -64,12 +75,17 @@ def render_human(response: CommandResponse) -> str:
             inspect_data = data.get("inspect", {})
             members = inspect_data.get("members", [])
             members_text = ", ".join(members[:30]) if members else "(none)"
-            body = (
-                f"name: {inspect_data.get('name')}\n"
-                f"type: {inspect_data.get('type')}\n"
-                f"repr: {inspect_data.get('repr')}\n"
-                f"members: {members_text}"
-            )
+            lines = [
+                f"name: {inspect_data.get('name')}",
+                f"type: {inspect_data.get('type')}",
+                f"repr: {inspect_data.get('repr')}",
+            ]
+            preview = inspect_data.get("preview")
+            if isinstance(preview, dict) and preview.get("kind") == "dataframe-like":
+                lines.extend(_render_dataframe_preview(preview))
+            else:
+                lines.append(f"members: {members_text}")
+            body = "\n".join(lines)
 
         elif command == "reload":
             body = f"Reloaded module: {data.get('module')}"
@@ -103,10 +119,16 @@ def render_human(response: CommandResponse) -> str:
         else:
             body = json.dumps(data, ensure_ascii=True, indent=2)
 
-    return _append_suggestions(body, response.suggestions)
+    suggestions = response.suggestions if options.show_suggestions else []
+    return _append_suggestions(body, suggestions)
 
 
 def _render_exec_like(data: dict[str, Any]) -> str:
+    selector = data.get("selected_output")
+    if selector is not None:
+        selected_text = data.get("selected_text", "")
+        return str(selected_text).rstrip("\n")
+
     lines: list[str] = []
     stdout = data.get("stdout")
     stderr = data.get("stderr")
@@ -144,3 +166,32 @@ def _append_suggestions(body: str, suggestions: list[str]) -> str:
     lines = [body, "", "Next:"]
     lines.extend(f"- {suggestion}" for suggestion in suggestions)
     return "\n".join(lines)
+
+
+def _render_dataframe_preview(preview: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    shape = preview.get("shape")
+    if isinstance(shape, list) and len(shape) == 2:
+        lines.append(f"shape: ({shape[0]}, {shape[1]})")
+
+    columns = preview.get("columns")
+    if isinstance(columns, list) and columns:
+        lines.append("columns: " + ", ".join(str(column) for column in columns[:20]))
+
+    dtypes = preview.get("dtypes")
+    if isinstance(dtypes, dict) and dtypes:
+        dtype_items = list(dtypes.items())[:10]
+        dtype_text = ", ".join(f"{name}={dtype}" for name, dtype in dtype_items)
+        lines.append(f"dtypes: {dtype_text}")
+
+    null_counts = preview.get("null_counts")
+    if isinstance(null_counts, dict) and null_counts:
+        null_items = list(null_counts.items())[:10]
+        null_text = ", ".join(f"{name}={count}" for name, count in null_items)
+        lines.append(f"nulls: {null_text}")
+
+    head = preview.get("head")
+    if isinstance(head, list):
+        lines.append("head: " + json.dumps(head, ensure_ascii=True))
+
+    return lines

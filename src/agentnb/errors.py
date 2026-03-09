@@ -27,6 +27,14 @@ class NoKernelRunningError(AgentNBException):
         )
 
 
+class KernelNotReadyError(AgentNBException):
+    def __init__(self) -> None:
+        super().__init__(
+            code="KERNEL_NOT_READY",
+            message=("Kernel startup is still in progress or not yet ready. Wait and retry."),
+        )
+
+
 class InvalidInputError(AgentNBException):
     def __init__(self, message: str) -> None:
         super().__init__(code="INVALID_INPUT", message=message)

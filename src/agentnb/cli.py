@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -9,7 +11,7 @@ import click
 from .contracts import CommandResponse, error_response, success_response
 from .errors import AgentNBException, InvalidInputError
 from .ops import NotebookOps
-from .output import render_response
+from .output import RenderOptions, render_response
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID, resolve_project_root
 
@@ -21,8 +23,22 @@ ops = NotebookOps(runtime)
     invoke_without_command=True,
     context_settings={"help_option_names": ["--help", "-h"]},
 )
+@click.option("--json", "root_as_json", is_flag=True, help="Output all commands as JSON")
+@click.option(
+    "--agent",
+    is_flag=True,
+    help="Agent preset: JSON output with deterministic, low-noise defaults.",
+)
+@click.option("--quiet", is_flag=True, help="Reduce non-essential human output")
+@click.option("--no-suggestions", is_flag=True, help="Suppress next-step suggestions")
 @click.pass_context
-def main(ctx: click.Context) -> None:
+def main(
+    ctx: click.Context,
+    root_as_json: bool,
+    agent: bool,
+    quiet: bool,
+    no_suggestions: bool,
+) -> None:
     """Persistent project-scoped Python REPL for agent workflows.
 
     Start a long-running kernel for the current project, execute code against it,
@@ -45,6 +61,12 @@ def main(ctx: click.Context) -> None:
     Startup does not install ipykernel unless you pass --auto-install or use
     agentnb doctor --fix.
     """
+    ctx.obj = _resolve_render_options(
+        root_as_json=root_as_json,
+        agent=agent,
+        quiet=quiet,
+        no_suggestions=no_suggestions,
+    )
     if ctx.invoked_subcommand is None:
         click.echo(
             "No command provided. Run `agentnb --help` to see the full workflow "
@@ -78,7 +100,14 @@ def python_option(func: Callable[..., object]) -> Callable[..., object]:
 
 
 def _emit(response: CommandResponse, *, as_json: bool) -> None:
-    click.echo(render_response(response, as_json=as_json))
+    options = _current_render_options(local_as_json=as_json)
+    if response.command == "exec" and response.data.get("selected_output") is not None:
+        response = replace(response, suggestions=[])
+    if not options.show_suggestions:
+        response = replace(response, suggestions=[])
+    rendered = render_response(response, options=options)
+    if rendered:
+        click.echo(rendered)
     if response.status == "error":
         raise click.exceptions.Exit(1)
 
@@ -200,7 +229,6 @@ def _execute_command(
             evalue=str(exc),
             suggestions=_suggestions(command_name, "error", {}),
         )
-
     _emit(response, as_json=as_json)
 
 
@@ -245,12 +273,16 @@ def start(
 @click.argument("code", required=False)
 @click.option("-f", "--file", "filepath", type=click.Path(path_type=Path, dir_okay=False))
 @click.option("--timeout", default=30.0, show_default=True, type=float)
+@click.option("--stdout-only", "output_selector", flag_value="stdout", default=None)
+@click.option("--stderr-only", "output_selector", flag_value="stderr")
+@click.option("--result-only", "output_selector", flag_value="result")
 @project_option
 @json_option
 def exec_cmd(
     code: str | None,
     filepath: Path | None,
     timeout: float,
+    output_selector: str | None,
     project: Path | None,
     as_json: bool,
 ) -> None:
@@ -284,7 +316,11 @@ def exec_cmd(
             code=source,
             timeout_s=timeout,
         )
-        return result.to_dict()
+        payload = result.to_dict()
+        if output_selector is not None:
+            payload["selected_output"] = output_selector
+            payload["selected_text"] = _select_exec_output(payload, output_selector)
+        return payload
 
     _execute_command("exec", project, as_json, handler)
 
@@ -349,15 +385,30 @@ def status(project: Path | None, as_json: bool) -> None:
 
 @main.command()
 @click.option("--errors", is_flag=True, help="Only show failed executions")
+@click.option("--latest", is_flag=True, help="Show only the most recent history entry")
+@click.option("--last", type=click.IntRange(min=1), default=None, help="Show the last N entries")
 @project_option
 @json_option
-def history(errors: bool, project: Path | None, as_json: bool) -> None:
+def history(
+    errors: bool,
+    latest: bool,
+    last: int | None,
+    project: Path | None,
+    as_json: bool,
+) -> None:
     """Show recent execution history recorded for the project."""
+
+    if latest and last is not None:
+        raise click.UsageError("Use either --latest or --last, not both.")
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         entries = runtime.history(
             project_root=project_root, session_id=session_id, errors_only=errors
         )
+        if latest:
+            entries = entries[-1:]
+        elif last is not None:
+            entries = entries[-last:]
         return {"entries": entries}
 
     _execute_command("history", project, as_json, handler)
@@ -447,3 +498,49 @@ def _resolve_code_input(code: str | None, filepath: Path | None) -> str:
         raise InvalidInputError("No code provided through stdin")
 
     raise InvalidInputError("No code provided. Use code argument, --file, or pipe via stdin")
+
+
+def _resolve_render_options(
+    *,
+    root_as_json: bool,
+    agent: bool,
+    quiet: bool,
+    no_suggestions: bool,
+) -> RenderOptions:
+    env_mode = os.getenv("AGENTNB_FORMAT", "").strip().lower()
+    env_as_json = env_mode in {"json", "agent"}
+    env_quiet = _env_flag("AGENTNB_QUIET")
+    env_no_suggestions = _env_flag("AGENTNB_NO_SUGGESTIONS")
+
+    options = RenderOptions(
+        as_json=root_as_json or env_as_json,
+        show_suggestions=not (no_suggestions or env_no_suggestions),
+        quiet=quiet or env_quiet,
+    )
+    if agent or env_mode == "agent":
+        options.as_json = True
+        options.show_suggestions = False
+        options.quiet = True
+    return options
+
+
+def _current_render_options(*, local_as_json: bool) -> RenderOptions:
+    ctx = click.get_current_context(silent=True)
+    root_options = ctx.find_root().obj if ctx is not None else None
+    options = root_options if isinstance(root_options, RenderOptions) else RenderOptions()
+    if local_as_json:
+        options = replace(options, as_json=True)
+    return options
+
+
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _select_exec_output(payload: dict[str, object], selector: str) -> str:
+    if selector == "result":
+        result = payload.get("result")
+        return "" if result is None else str(result)
+    value = payload.get(selector)
+    return "" if value is None else str(value)

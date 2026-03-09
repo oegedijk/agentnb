@@ -41,9 +41,19 @@ from IPython import get_ipython
 _max_len = 160
 _items = []
 _user_ns = get_ipython().user_ns if get_ipython() is not None else globals()
+_skip_names = {
+    "In",
+    "Out",
+    "exit",
+    "get_ipython",
+    "open",
+    "quit",
+}
 
 for _name, _value in sorted(_user_ns.items()):
     if _name.startswith("_"):
+        continue
+    if _name in _skip_names:
         continue
     if isinstance(_value, types.ModuleType):
         continue
@@ -74,6 +84,102 @@ print(json.dumps(_items))
 import json
 from IPython import get_ipython
 
+def _truncate_text(value, limit):
+    text = repr(value)
+    if len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text
+
+
+def _safe_head_rows(value, limit):
+    try:
+        head_value = value.head(limit)
+    except Exception:
+        return None
+
+    try:
+        if hasattr(head_value, "reset_index"):
+            head_value = head_value.reset_index()
+    except Exception:
+        pass
+
+    try:
+        rows = head_value.to_dict(orient="records")
+    except Exception:
+        return None
+
+    return rows if isinstance(rows, list) else None
+
+
+def _dtype_summary(value):
+    try:
+        dtypes = value.dtypes
+    except Exception:
+        return None
+
+    try:
+        if hasattr(dtypes, "astype"):
+            dtypes = dtypes.astype(str)
+    except Exception:
+        pass
+
+    try:
+        mapping = dtypes.to_dict()
+    except Exception:
+        return None
+
+    if not isinstance(mapping, dict):
+        return None
+    return {{str(key): str(item) for key, item in mapping.items()}}
+
+
+def _null_counts(value, limit):
+    try:
+        counts = value.isna().sum()
+    except Exception:
+        return None
+
+    try:
+        mapping = counts.to_dict()
+    except Exception:
+        return None
+
+    if not isinstance(mapping, dict):
+        return None
+
+    items = list(mapping.items())[:limit]
+    return {{str(key): int(item) for key, item in items}}
+
+
+def _dataframe_preview(value):
+    required_attrs = ("shape", "columns", "dtypes", "head")
+    if not all(hasattr(value, attr) for attr in required_attrs):
+        return None
+
+    try:
+        shape = tuple(value.shape)
+    except Exception:
+        return None
+
+    try:
+        columns = [str(column) for column in list(value.columns)[:20]]
+    except Exception:
+        columns = []
+
+    preview = {{
+        "kind": "dataframe-like",
+        "shape": list(shape),
+        "columns": columns,
+        "column_count": len(getattr(value, "columns", [])),
+        "dtypes": _dtype_summary(value),
+        "head": _safe_head_rows(value, 5),
+    }}
+    nulls = _null_counts(value, 20)
+    if nulls is not None:
+        preview["null_counts"] = nulls
+    return preview
+
+
 _user_ns = get_ipython().user_ns if get_ipython() is not None else globals()
 _name = {escaped_name}
 if _name not in _user_ns:
@@ -81,9 +187,7 @@ if _name not in _user_ns:
 
 _value = _user_ns[_name]
 _members = [member for member in dir(_value) if not member.startswith("_")]
-_repr_text = repr(_value)
-if len(_repr_text) > 500:
-    _repr_text = _repr_text[:497] + "..."
+_repr_text = _truncate_text(_value, 500)
 _doc = getattr(_value, "__doc__", None)
 if _doc is None:
     _doc = ""
@@ -96,6 +200,7 @@ _payload = {{
     "repr": _repr_text,
     "members": _members[:200],
     "doc": _doc,
+    "preview": _dataframe_preview(_value),
 }}
 print(json.dumps(_payload))
 """

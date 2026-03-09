@@ -7,7 +7,7 @@ from .provisioner import DoctorReport, KernelProvisioner, ProvisionResult
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID, resolve_project_root
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "CommandResponse",

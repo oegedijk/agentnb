@@ -33,17 +33,23 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PROJECT_VERSION="$(python - <<'PY'
+          uv run --with packaging python - <<'PY' "$TAG_VERSION"
+          import sys
           import tomllib
           from pathlib import Path
-          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-          print(data["project"]["version"])
+          from packaging.version import Version
+
+          tag_version = Version(sys.argv[1])
+          project_version = Version(
+              tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          )
+
+          if tag_version != project_version:
+              print(
+                  f"Tag version ({tag_version}) does not match pyproject version ({project_version})."
+              )
+              raise SystemExit(1)
           PY
-          )"
-          if [ "$TAG_VERSION" != "$PROJECT_VERSION" ]; then
-            echo "Tag version ($TAG_VERSION) does not match pyproject version ($PROJECT_VERSION)."
-            exit 1
-          fi
       - run: uv build
       - run: uvx twine check dist/*.tar.gz dist/*.whl
       - uses: pypa/gh-action-pypi-publish@release/v1

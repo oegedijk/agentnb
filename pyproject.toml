@@ -43,9 +43,9 @@ dev = [
 agentnb = "agentnb.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/oege/agentnb"
-Repository = "https://github.com/oege/agentnb"
-Issues = "https://github.com/oege/agentnb/issues"
+Homepage = "https://github.com/oegedijk/agentnb"
+Repository = "https://github.com/oegedijk/agentnb"
+Issues = "https://github.com/oegedijk/agentnb/issues"
 
 [build-system]
 requires = ["hatchling"]

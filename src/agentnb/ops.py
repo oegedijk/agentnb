@@ -85,14 +85,26 @@ def _container_summary(value):
     if isinstance(value, (list, tuple, set)):
         items = list(value)[:3]
         summary = f"{type(value).__name__} len={len(value)}"
-        if items and isinstance(items[0], dict):
-            keys = [str(key) for key in list(items[0].keys())[:5]]
+        _row_keys = _mapping_keys(items[0]) if items else None
+        if _row_keys is not None:
+            keys = [str(key) for key in _row_keys[:5]]
             suffix = ", ..." if len(items[0]) > len(keys) else ""
             return summary + " item_keys=" + ", ".join(keys) + suffix
         if items:
             return summary + " sample=" + _truncate_repr(items, 80)
         return summary
 
+    return None
+
+
+def _mapping_keys(value):
+    if isinstance(value, dict):
+        return list(value.keys())
+    if hasattr(value, "keys") and hasattr(value, "__getitem__"):
+        try:
+            return list(value.keys())
+        except Exception:
+            return None
     return None
 
 
@@ -115,7 +127,7 @@ def _external_object_summary(value):
     return " ".join(parts)
 
 
-for _name, _value in sorted(_user_ns.items()):
+for _name, _value in list(_user_ns.items()):
     if _name.startswith("_"):
         continue
     if _name in _skip_names:
@@ -265,6 +277,14 @@ def _json_safe(value, depth=0):
         return value
     if isinstance(value, str):
         return _simple_text(value, 80)
+    _mapping = _mapping_items(value)
+    if _mapping is not None:
+        _sample = {{}}
+        for _index, (_key, _item) in enumerate(_mapping):
+            if _index >= 5:
+                break
+            _sample[str(_key)] = _json_safe(_item, depth + 1)
+        return _sample
     if depth >= 2:
         return _truncate_text(value, 80)
     if isinstance(value, dict):
@@ -279,20 +299,33 @@ def _json_safe(value, depth=0):
     return _truncate_text(value, 80)
 
 
+def _mapping_items(value):
+    if isinstance(value, dict):
+        return list(value.items())
+    if hasattr(value, "keys") and hasattr(value, "__getitem__"):
+        try:
+            _keys = list(value.keys())
+            return [(_key, value[_key]) for _key in _keys]
+        except Exception:
+            return None
+    return None
+
+
 def _mapping_preview(value):
-    if not isinstance(value, dict):
+    _items = _mapping_items(value)
+    if _items is None:
         return None
 
-    _keys = [str(_key) for _key in list(value.keys())[:10]]
+    _keys = [str(_key) for _key, _ in _items[:10]]
     _sample = {{}}
-    for _index, (_key, _item) in enumerate(value.items()):
+    for _index, (_key, _item) in enumerate(_items):
         if _index >= 3:
             break
         _sample[str(_key)] = _json_safe(_item)
 
     return {{
         "kind": "mapping-like",
-        "length": len(value),
+        "length": len(_items),
         "keys": _keys,
         "sample": _sample,
     }}
@@ -311,8 +344,9 @@ def _sequence_preview(value):
     }}
     if _items:
         _preview["item_type"] = type(_items[0]).__name__
-        if isinstance(_items[0], dict):
-            _preview["sample_keys"] = [str(_key) for _key in list(_items[0].keys())[:10]]
+        _sample_keys = _mapping_items(_items[0])
+        if _sample_keys is not None:
+            _preview["sample_keys"] = [str(_key) for _key, _ in _sample_keys[:10]]
     return _preview
 
 

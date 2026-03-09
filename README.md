@@ -16,6 +16,11 @@ every execution; use `agentnb reload` after changing project-local code.
 
 `exec` follows normal IPython/Notebook semantics for output: if the final line
 of a snippet is an expression, its value is returned as the execution result.
+`print(...)` goes to `stdout`; a bare final expression goes to `result`.
+
+One session should be driven serially. Do not send multiple commands to the
+same project kernel at once; wait for one command to finish before sending the
+next.
 
 ## Install
 
@@ -60,6 +65,9 @@ In `--agent` mode, default payloads are compacted to reduce token usage:
 trimmed error tracebacks, compact history entries, compact dataframe previews,
 and structural summaries for common containers such as `list` and `dict`.
 
+You can place top-level flags such as `--agent` and `--json` before or after
+the subcommand, for example `agentnb --agent status` or `agentnb status --agent`.
+
 ## Recommended Workflow
 
 The normal agent loop is:
@@ -72,6 +80,11 @@ The normal agent loop is:
 6. `agentnb reload --json` after editing project-local modules
 7. `agentnb reload myapp.module --json` to target one imported module
 8. `agentnb history --json`
+
+Important:
+- Drive one session serially: wait for each command to finish before sending the next.
+- Prefer a final expression over `print(...)` when you want a compact `result` payload.
+- Use `vars --recent N` or `vars --match TEXT` once the namespace gets noisy.
 
 Use `agentnb doctor --json` if startup fails, `agentnb interrupt --json` if execution hangs, and `agentnb reset --json` if the namespace needs a clean slate.
 
@@ -98,7 +111,7 @@ It is not a notebook editing tool:
 - top-level flags: `agentnb [--json] [--agent] [--quiet] [--no-suggestions] <command>`
 - `agentnb status [--project PATH]`
 - `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--stdout-only|--stderr-only|--result-only] [--project PATH] [--json]`
-- `agentnb vars [--project PATH] [--json] [--types|--no-types]`
+- `agentnb vars [--project PATH] [--json] [--types|--no-types] [--match TEXT] [--recent N]`
 - `agentnb inspect NAME [--project PATH] [--json]`
 - `agentnb reload [MODULE] [--project PATH] [--json]`
 - `agentnb history [--project PATH] [--errors] [--latest|--last N] [--all] [--json]`
@@ -109,6 +122,7 @@ It is not a notebook editing tool:
 
 Notes:
 - `vars` includes type information by default.
+- `vars --recent N` shows the newest matching variables; `vars --match TEXT` filters by name.
 - `vars` hides imported helper routines and classes, and summarizes common containers compactly.
 - `history` shows semantic user-visible steps by default such as `exec`, `vars`, `inspect`, `reload`, and `reset`.
 - Use `history --all` to include internal helper executions sent to the kernel.
@@ -140,6 +154,12 @@ command exits non-zero. The execution payload is still included in `data`.
 Default JSON is intentionally compact for agent use: large event lists are
 omitted, tracebacks are trimmed, and inspection/history payloads prefer short
 previews over raw internal detail.
+
+For agents, the usual pattern is:
+- short `exec`
+- inspect the returned `result`
+- narrow further with another short `exec`
+- use `vars --recent` or `inspect NAME` only when needed
 
 If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORMAT=agent`.
 `agent` also suppresses suggestions and enables quiet mode.

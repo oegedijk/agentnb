@@ -5,7 +5,12 @@ from pathlib import Path
 
 from .backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
 from .contracts import ExecutionResult, KernelStatus
-from .errors import ExecutionTimedOutError, KernelNotReadyError, NoKernelRunningError
+from .errors import (
+    ExecutionTimedOutError,
+    KernelNotReadyError,
+    NoKernelRunningError,
+    SessionBusyError,
+)
 from .history import HistoryStore
 from .hooks import Hooks
 from .provisioner import KernelProvisioner
@@ -90,11 +95,14 @@ class KernelRuntime:
         error: Exception | None = None
         result: ExecutionResult | None = None
         try:
-            try:
-                result = self._backend.execute(session=session, code=code, timeout_s=timeout_s)
-            except BackendExecutionTimeout as exc:
-                self._backend.interrupt(session)
-                raise ExecutionTimedOutError(timeout_s) from exc
+            with store.acquire_command_lock() as lock_acquired:
+                if not lock_acquired:
+                    raise SessionBusyError()
+                try:
+                    result = self._backend.execute(session=session, code=code, timeout_s=timeout_s)
+                except BackendExecutionTimeout as exc:
+                    self._backend.interrupt(session)
+                    raise ExecutionTimedOutError(timeout_s) from exc
 
             return result
         except Exception as exc:
@@ -113,8 +121,11 @@ class KernelRuntime:
         timeout_s: float = 10.0,
         session_id: str = DEFAULT_SESSION_ID,
     ) -> ExecutionResult:
-        _, session = self._require_session(project_root=project_root, session_id=session_id)
-        return self._backend.reset(session=session, timeout_s=timeout_s)
+        store, session = self._require_session(project_root=project_root, session_id=session_id)
+        with store.acquire_command_lock() as lock_acquired:
+            if not lock_acquired:
+                raise SessionBusyError()
+            return self._backend.reset(session=session, timeout_s=timeout_s)
 
     def history(
         self,

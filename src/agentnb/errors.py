@@ -37,6 +37,18 @@ class KernelNotReadyError(AgentNBException):
         )
 
 
+class SessionBusyError(AgentNBException):
+    def __init__(self) -> None:
+        super().__init__(
+            code="SESSION_BUSY",
+            message=(
+                "Another agentnb command is already using this session. "
+                "Wait for the prior command to finish, then retry. "
+                "Use one command at a time per project session."
+            ),
+        )
+
+
 class InvalidInputError(AgentNBException):
     def __init__(self, message: str) -> None:
         super().__init__(code="INVALID_INPUT", message=message)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 DEFAULT_SESSION_ID = "default"
 STATE_DIR_NAME = ".agentnb"
 LEGACY_SESSION_FILE_NAME = "session.json"
+COMMAND_LOCK_FILE_NAME = "command.lock"
 
 
 @dataclass(slots=True)
@@ -67,6 +69,7 @@ class SessionStore:
         self.session_file = self.state_dir / _session_file_name(session_id)
         self.legacy_session_file = self.state_dir / LEGACY_SESSION_FILE_NAME
         self.connection_file = self.state_dir / f"kernel-{self.session_id}.json"
+        self.command_lock_file = self.state_dir / f"{COMMAND_LOCK_FILE_NAME}-{self.session_id}"
 
     def ensure_state_dir(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -130,6 +133,18 @@ class SessionStore:
             handle.write(f"{suffix}{entry}\n")
         return True
 
+    @contextmanager
+    def acquire_command_lock(self) -> Any:
+        self.ensure_state_dir()
+        lock_acquired = self._try_create_command_lock()
+        if not lock_acquired and self._clear_stale_command_lock():
+            lock_acquired = self._try_create_command_lock()
+        try:
+            yield lock_acquired
+        finally:
+            if lock_acquired:
+                self._safe_unlink(self.command_lock_file)
+
     def _session_paths(self) -> tuple[Path, ...]:
         if self.legacy_session_file == self.session_file:
             return (self.session_file,)
@@ -165,6 +180,37 @@ class SessionStore:
             pass
         except OSError:
             pass
+
+    def _try_create_command_lock(self) -> bool:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            fd = os.open(self.command_lock_file, flags)
+        except FileExistsError:
+            return False
+
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+
+    def _clear_stale_command_lock(self) -> bool:
+        try:
+            raw_pid = self.command_lock_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False
+
+        try:
+            lock_pid = int(raw_pid)
+        except ValueError:
+            self._safe_unlink(self.command_lock_file)
+            return True
+
+        if pid_exists(lock_pid):
+            return False
+
+        self._safe_unlink(self.command_lock_file)
+        return True
 
 
 def _session_file_name(session_id: str) -> str:

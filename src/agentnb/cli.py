@@ -24,9 +24,17 @@ from .session import DEFAULT_SESSION_ID, resolve_project_root
 
 runtime = KernelRuntime()
 ops = NotebookOps(runtime)
+_ROOT_FLAG_NAMES = {"--json", "--agent", "--quiet", "--no-suggestions"}
+
+
+class AgentGroup(click.Group):
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        normalized = _normalize_root_flags(args)
+        return super().parse_args(ctx, normalized)
 
 
 @click.group(
+    cls=AgentGroup,
     invoke_without_command=True,
     context_settings={"help_option_names": ["--help", "-h"]},
 )
@@ -55,12 +63,15 @@ def main(
     notebook editor. It preserves execution state and history, but does not
     edit notebook cells or manage .ipynb files.
 
+    One project session should be driven serially. Wait for each command to
+    finish before sending the next one to the same kernel.
+
     Recommended loop:
 
       1. agentnb start --json
       2. agentnb exec "from myapp import thing" --json
       3. agentnb exec --file analysis.py --json
-      4. agentnb vars --json
+      4. agentnb vars --recent 5 --json
       5. agentnb inspect thing --json
       6. agentnb reload myapp.module --json
       7. agentnb history --json
@@ -71,12 +82,14 @@ def main(
     internal helper executions. Module reloading is explicit: use `reload`
     after editing project-local modules. agentnb does not auto-reload modules
     on every execution. Like a regular IPython notebook, the final expression
-    in an exec block is returned as the result output. In `--agent` mode,
-    JSON payloads are compacted by default to reduce token usage.
+    in an exec block is returned as the result output while `print(...)` goes
+    to stdout. In `--agent` mode, JSON payloads are compacted by default to
+    reduce token usage.
 
     Prefer --json for agent integrations and machine-readable parsing. Startup
     does not install ipykernel unless you pass --auto-install or use agentnb
-    doctor --fix.
+    doctor --fix. Top-level flags such as --agent and --json can be placed
+    before or after the subcommand.
     """
     ctx.obj = _resolve_render_options(
         root_as_json=root_as_json,
@@ -133,14 +146,14 @@ def _suggestions(command_name: str, response_status: str, data: dict[str, object
     if command_name == "start":
         return [
             'Run `agentnb exec "..." --json` to execute code in the live kernel.',
-            "Run `agentnb vars --json` to inspect the current namespace.",
+            "Run `agentnb vars --recent 5 --json` to inspect the newest namespace changes.",
             "Run `agentnb status --json` to confirm the kernel is still alive.",
         ]
     if command_name == "status":
         if data.get("alive"):
             return [
                 'Run `agentnb exec "..." --json` to execute code.',
-                "Run `agentnb vars --json` to inspect current variables.",
+                "Run `agentnb vars --recent 5 --json` to inspect current variables.",
                 "Run `agentnb stop --json` when the session is no longer needed.",
             ]
         return [
@@ -150,7 +163,7 @@ def _suggestions(command_name: str, response_status: str, data: dict[str, object
     if command_name == "exec":
         if response_status == "ok":
             return [
-                "Run `agentnb vars --json` to inspect the updated namespace.",
+                "Run `agentnb vars --recent 5 --json` to inspect the updated namespace.",
                 "Run `agentnb inspect NAME --json` to inspect a specific variable.",
                 "Run `agentnb history --json` to review prior executions.",
             ]
@@ -162,11 +175,12 @@ def _suggestions(command_name: str, response_status: str, data: dict[str, object
     if command_name == "vars":
         return [
             "Run `agentnb inspect NAME --json` for details on a variable.",
+            "Run `agentnb vars --match TEXT --json` to filter noisy namespaces by name.",
             'Run `agentnb exec "..." --json` to add or modify live state.',
         ]
     if command_name == "inspect":
         return [
-            "Run `agentnb vars --json` to inspect more of the namespace.",
+            "Run `agentnb vars --recent 5 --json` to inspect more of the namespace.",
             'Run `agentnb exec "..." --json` to probe or transform that value.',
         ]
     if command_name == "reload":
@@ -309,7 +323,9 @@ def exec_cmd(
     Provide code as an argument, with --file, or through stdin. For multiline
     code, prefer --file or a stdin heredoc. The kernel must already be running
     for the target project. Like a notebook cell, the final expression is
-    returned as the execution result.
+    returned as the execution result, while `print(...)` writes to stdout.
+    Drive one project session serially: wait for each command to finish before
+    sending the next one to the same kernel.
 
     Examples:
 
@@ -363,11 +379,10 @@ def exec_cmd(
             code=source,
             execution=result,
         )
-        payload = result.to_dict()
+        payload = compact_execution_payload(result.to_dict())
         if output_selector is not None:
             payload["selected_output"] = output_selector
             payload["selected_text"] = _select_exec_output(payload, output_selector)
-        payload = compact_execution_payload(payload)
         if result.status == "error":
             raise AgentNBException(
                 code="EXECUTION_ERROR",
@@ -384,18 +399,37 @@ def exec_cmd(
 
 @main.command("vars")
 @click.option("--types/--no-types", "include_types", default=True, help="Show type information")
+@click.option("--match", "match_text", default=None, help="Only show variables whose names match")
+@click.option(
+    "--recent",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Show only the most recently created matching variables",
+)
 @project_option
 @json_option
-def vars_cmd(project: Path | None, as_json: bool, include_types: bool) -> None:
+def vars_cmd(
+    project: Path | None,
+    as_json: bool,
+    include_types: bool,
+    match_text: str | None,
+    recent: int | None,
+) -> None:
     """List user variables currently defined in the kernel namespace.
 
     Type information is included by default. Pass --no-types to hide it.
     Imported helper routines and classes are omitted, and common dataframe or
-    container values are summarized compactly.
+    container values are summarized compactly. Use --recent or --match when
+    the namespace gets noisy.
     """
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         values = ops.list_vars(project_root=project_root, session_id=session_id)
+        if match_text:
+            match_lower = match_text.lower()
+            values = [item for item in values if match_lower in str(item["name"]).lower()]
+        if recent is not None:
+            values = values[-recent:]
         if not include_types:
             values = [{"name": item["name"], "repr": item["repr"]} for item in values]
         return {"vars": values}
@@ -718,6 +752,37 @@ def _current_render_options(*, local_as_json: bool) -> RenderOptions:
 def _env_flag(name: str) -> bool:
     value = os.getenv(name, "").strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _normalize_root_flags(args: list[str]) -> list[str]:
+    if not args:
+        return args
+
+    boundary = args.index("--") if "--" in args else len(args)
+    command_index: int | None = None
+    for index, token in enumerate(args[:boundary]):
+        if not token.startswith("-"):
+            command_index = index
+            break
+
+    if command_index is None:
+        return args
+
+    leading = args[:command_index]
+    command = args[command_index]
+    tail = args[command_index + 1 : boundary]
+    suffix = args[boundary:]
+    moved_flags: list[str] = []
+    remaining_tail: list[str] = []
+    for token in tail:
+        if token in _ROOT_FLAG_NAMES:
+            moved_flags.append(token)
+        else:
+            remaining_tail.append(token)
+
+    if not moved_flags:
+        return args
+    return [*leading, *moved_flags, command, *remaining_tail, *suffix]
 
 
 def _select_exec_output(payload: dict[str, object], selector: str) -> str:

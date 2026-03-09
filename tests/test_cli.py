@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -8,6 +10,7 @@ from click.testing import CliRunner
 from pytest_mock import MockerFixture
 
 from agentnb.cli import main
+from agentnb.session import SessionStore
 
 pytest.importorskip("jupyter_client")
 pytest.importorskip("ipykernel")
@@ -189,6 +192,7 @@ def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None
     assert "Run `agentnb --help`" in result.output
     assert "Recommended loop:" in result.output
     assert "Prefer --json for agent integrations" in result.output
+    assert "One project session should be driven serially." in result.output
 
 
 def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
@@ -199,6 +203,7 @@ def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     assert "agentnb start --json" in result.output
     assert "--auto-install" in result.output
     assert "doctor --fix" in result.output
+    assert "--recent" in result.output
 
 
 def test_cli_json_response_includes_suggestions(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -226,6 +231,15 @@ def test_cli_agent_preset_enables_json_and_suppresses_suggestions(
 
     payload = _payload(result.output)
     assert payload["status"] == "ok"
+    assert payload["command"] == "status"
+    assert payload["suggestions"] == []
+
+
+def test_cli_root_flags_work_after_subcommand(cli_runner: CliRunner, project_dir: Path) -> None:
+    result = cli_runner.invoke(main, ["status", "--agent", "--project", str(project_dir)])
+    assert result.exit_code == 0
+
+    payload = _payload(result.output)
     assert payload["command"] == "status"
     assert payload["suggestions"] == []
 
@@ -339,6 +353,46 @@ def test_cli_vars_no_types_hides_types(cli_runner: CliRunner, project_dir: Path)
 
     payload = _payload(vars_res.output)
     assert payload["data"]["vars"][0] == {"name": "value", "repr": "42"}
+
+    stop_res = cli_runner.invoke(main, ["stop", "--project", str(project_dir), "--json"])
+    assert stop_res.exit_code == 0
+
+
+def test_cli_vars_match_and_recent_filter_namespace(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    start_res = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
+    assert start_res.exit_code == 0
+
+    cli_runner.invoke(
+        main,
+        [
+            "exec",
+            "--project",
+            str(project_dir),
+            "--json",
+            "alpha_value = 1\nbeta_value = 2\ngamma_value = 3",
+        ],
+    )
+
+    recent_res = cli_runner.invoke(
+        main,
+        ["vars", "--project", str(project_dir), "--recent", "2", "--json"],
+    )
+    assert recent_res.exit_code == 0
+    recent_payload = _payload(recent_res.output)
+    assert [item["name"] for item in recent_payload["data"]["vars"]] == [
+        "beta_value",
+        "gamma_value",
+    ]
+
+    match_res = cli_runner.invoke(
+        main,
+        ["vars", "--project", str(project_dir), "--match", "beta", "--json"],
+    )
+    assert match_res.exit_code == 0
+    match_payload = _payload(match_res.output)
+    assert [item["name"] for item in match_payload["data"]["vars"]] == ["beta_value"]
 
     stop_res = cli_runner.invoke(main, ["stop", "--project", str(project_dir), "--json"])
     assert stop_res.exit_code == 0
@@ -496,6 +550,26 @@ def greet() -> str:
     assert stop_res.exit_code == 0
 
 
+def test_cli_history_error_exec_label_is_semantic(cli_runner: CliRunner, project_dir: Path) -> None:
+    start_res = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
+    assert start_res.exit_code == 0
+
+    exec_res = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1 / 0"])
+    assert exec_res.exit_code == 1
+
+    history_res = cli_runner.invoke(
+        main,
+        ["history", "--project", str(project_dir), "--errors", "--latest", "--json"],
+    )
+    assert history_res.exit_code == 0
+
+    payload = _payload(history_res.output)
+    assert payload["data"]["entries"][0]["label"] == "exec error ZeroDivisionError"
+
+    stop_res = cli_runner.invoke(main, ["stop", "--project", str(project_dir), "--json"])
+    assert stop_res.exit_code == 0
+
+
 def test_cli_reset_is_recorded_as_visible_history_entry(
     cli_runner: CliRunner, project_dir: Path
 ) -> None:
@@ -583,6 +657,28 @@ def greet() -> str:
     assert stop_res.exit_code == 0
 
 
+def test_cli_exec_returns_session_busy_when_lock_exists(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    start_res = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
+    assert start_res.exit_code == 0
+
+    store = SessionStore(project_root=project_dir)
+    store.ensure_state_dir()
+    store.command_lock_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    exec_res = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1 + 1"])
+    assert exec_res.exit_code == 1
+
+    payload = _payload(exec_res.output)
+    assert payload["error"]["code"] == "SESSION_BUSY"
+    assert "Wait for the prior command to finish" in payload["error"]["message"]
+
+    store.command_lock_file.unlink()
+    stop_res = cli_runner.invoke(main, ["stop", "--project", str(project_dir), "--json"])
+    assert stop_res.exit_code == 0
+
+
 def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Path) -> None:
     start_res = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
     assert start_res.exit_code == 0
@@ -606,6 +702,52 @@ def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Pa
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
     payload = _payload(vars_res.output)
     assert payload["data"]["vars"][0]["repr"] == "DataFrame shape=(10, 3) columns=a, b, c"
+
+    stop_res = cli_runner.invoke(main, ["stop", "--project", str(project_dir), "--json"])
+    assert stop_res.exit_code == 0
+
+
+def test_cli_sqlite_rows_get_structural_previews(cli_runner: CliRunner, project_dir: Path) -> None:
+    db_path = project_dir / "rows.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("create table items (id integer primary key, title text)")
+    conn.executemany("insert into items (title) values (?)", [("a",), ("b",)])
+    conn.commit()
+    conn.close()
+
+    start_res = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
+    assert start_res.exit_code == 0
+
+    exec_res = cli_runner.invoke(
+        main,
+        [
+            "exec",
+            "--project",
+            str(project_dir),
+            "--json",
+            (
+                "import sqlite3\n"
+                f"conn = sqlite3.connect({str(db_path)!r})\n"
+                "conn.row_factory = sqlite3.Row\n"
+                "rows = conn.execute('select * from items order by id').fetchall()"
+            ),
+        ],
+    )
+    assert exec_res.exit_code == 0
+
+    vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
+    assert vars_res.exit_code == 0
+    vars_payload = _payload(vars_res.output)
+    row_entry = next(item for item in vars_payload["data"]["vars"] if item["name"] == "rows")
+    assert row_entry["repr"] == "list len=2 item_keys=id, title"
+
+    inspect_res = cli_runner.invoke(
+        main, ["inspect", "--project", str(project_dir), "--json", "rows"]
+    )
+    assert inspect_res.exit_code == 0
+    inspect_payload = _payload(inspect_res.output)["data"]["inspect"]["preview"]
+    assert inspect_payload["sample_keys"] == ["id", "title"]
+    assert inspect_payload["sample"][0]["title"] == "a"
 
     stop_res = cli_runner.invoke(main, ["stop", "--project", str(project_dir), "--json"])
     assert stop_res.exit_code == 0

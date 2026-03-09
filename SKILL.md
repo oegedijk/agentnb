@@ -14,9 +14,16 @@ automatically on each execution.
 
 `exec` follows normal IPython/Notebook behavior: if the final line of a code
 snippet is an expression, its value is returned as the result.
+`print(...)` goes to `stdout`; a bare final expression goes to `result`.
+
+Drive one project session serially. Do not issue multiple `agentnb` commands
+against the same live kernel at once; wait for one to finish before sending the next.
 
 When you need low-noise machine-readable output, prefer `agentnb --agent ...`.
 It returns compact JSON by default to reduce token usage.
+
+Top-level flags such as `--agent` and `--json` can be placed before or after
+the subcommand.
 
 Typical cases:
 - exploring a codebase or API incrementally
@@ -58,6 +65,7 @@ Notes:
 - By default, `agentnb` resolves the project from the current directory upward until it finds `pyproject.toml`.
 - `start` will reuse an already-alive kernel instead of spawning a duplicate.
 - Prefer `--json` when you need machine-readable output.
+- Use one command at a time per session.
 
 ## Core Loop
 
@@ -92,6 +100,13 @@ For multi-line code, prefer `--file` or stdin/heredoc over shell-escaped
 backslashes. A literal multi-line shell argument is fine if your shell passes
 it through, but `--file` and stdin are the reliable defaults.
 
+When the namespace gets noisy, use:
+
+```bash
+agentnb vars --recent 5 --json
+agentnb vars --match rows --json
+```
+
 ## Recovery
 
 If code hangs:
@@ -120,10 +135,12 @@ Use `history --errors --json` to inspect recent failures.
 - Check `status` or `start` before assuming a live kernel exists.
 - Prefer `exec` for real work and `vars` or `inspect` for observation.
 - Prefer short inline `exec` for one-liners and stdin or `--file` for multiline code.
+- Prefer a final expression over `print(...)` when you want a compact return value.
 - Use `reload` after editing importable project modules instead of assuming live definitions updated automatically.
 - Bare `reload` reloads all imported project-local modules. `reload MODULE` targets one imported project-local module.
 - If reload reports stale objects, recreate them or run `reset` when the whole namespace has become unreliable.
 - `vars` includes type information by default; pass `--no-types` only when you need less noise.
+- `vars --recent N` and `vars --match TEXT` are the fastest way to clean up a noisy namespace view.
 - `vars` hides imported helper routines and classes and summarizes common containers compactly.
 - `history` shows semantic user-visible steps by default; use `history --all --json` only when debugging internals.
 - `inspect` gives compact previews for pandas-like values and for common `list`/`dict` payloads.

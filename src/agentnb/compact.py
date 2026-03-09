@@ -129,8 +129,12 @@ def compact_history_entry(entry: dict[str, Any]) -> dict[str, Any]:
     label = entry.get("label")
     command_type = entry.get("command_type")
     if command_type == "exec":
-        preview = summarize_exec_label(str(entry.get("code") or entry.get("input") or ""))
-        label = "exec" if preview is None else f"exec {preview}"
+        if entry.get("status") == "error":
+            error_type = entry.get("error_type")
+            label = "exec error" if error_type is None else f"exec error {error_type}"
+        else:
+            preview = summarize_exec_label(str(entry.get("code") or entry.get("input") or ""))
+            label = "exec" if preview is None else f"exec {preview}"
 
     compacted: dict[str, Any] = {
         "kind": entry.get("kind"),

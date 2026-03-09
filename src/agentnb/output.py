@@ -14,87 +14,96 @@ def render_response(response: CommandResponse, *, as_json: bool) -> str:
 
 def render_human(response: CommandResponse) -> str:
     if response.status == "error":
-        return _render_error(response)
+        body = _render_error(response)
+    else:
+        command = response.command
+        data = response.data
 
-    command = response.command
-    data = response.data
+        if command == "start":
+            if data.get("alive"):
+                python = data.get("python")
+                if data.get("started_new"):
+                    if python:
+                        body = f"Kernel started (pid {data.get('pid')}) using {python}."
+                    else:
+                        body = f"Kernel started (pid {data.get('pid')})."
+                elif python:
+                    body = f"Kernel already running (pid {data.get('pid')}) using {python}."
+                else:
+                    body = f"Kernel already running (pid {data.get('pid')})."
+            else:
+                body = "Kernel is not running."
 
-    if command == "start":
-        if data.get("alive"):
-            python = data.get("python")
-            if data.get("started_new"):
-                if python:
-                    return f"Kernel started (pid {data.get('pid')}) using {python}."
-                return f"Kernel started (pid {data.get('pid')})."
-            if python:
-                return f"Kernel already running (pid {data.get('pid')}) using {python}."
-            return f"Kernel already running (pid {data.get('pid')})."
-        return "Kernel is not running."
+        elif command == "status":
+            if data.get("alive"):
+                body = f"Kernel is running (pid {data.get('pid')})."
+            else:
+                body = "Kernel is not running."
 
-    if command == "status":
-        if data.get("alive"):
-            return f"Kernel is running (pid {data.get('pid')})."
-        return "Kernel is not running."
+        elif command == "stop":
+            body = "Kernel stopped."
 
-    if command == "stop":
-        return "Kernel stopped."
+        elif command == "interrupt":
+            body = "Interrupt signal sent."
 
-    if command == "interrupt":
-        return "Interrupt signal sent."
+        elif command in {"exec", "reset"}:
+            body = _render_exec_like(data)
 
-    if command in {"exec", "reset"}:
-        return _render_exec_like(data)
+        elif command == "vars":
+            vars_data = data.get("vars", [])
+            if not vars_data:
+                body = "No user variables found."
+            else:
+                lines = [
+                    f"{item.get('name')}: {item.get('repr')} ({item.get('type')})"
+                    for item in vars_data
+                ]
+                body = "\n".join(lines)
 
-    if command == "vars":
-        vars_data = data.get("vars", [])
-        if not vars_data:
-            return "No user variables found."
-        lines = [
-            f"{item.get('name')}: {item.get('repr')} ({item.get('type')})" for item in vars_data
-        ]
-        return "\n".join(lines)
-
-    if command == "inspect":
-        inspect_data = data.get("inspect", {})
-        members = inspect_data.get("members", [])
-        members_text = ", ".join(members[:30]) if members else "(none)"
-        return (
-            f"name: {inspect_data.get('name')}\n"
-            f"type: {inspect_data.get('type')}\n"
-            f"repr: {inspect_data.get('repr')}\n"
-            f"members: {members_text}"
-        )
-
-    if command == "reload":
-        return f"Reloaded module: {data.get('module')}"
-
-    if command == "history":
-        entries = data.get("entries", [])
-        if not entries:
-            return "No history entries."
-        lines = [
-            (
-                f"{entry.get('ts')} [{entry.get('status')}] "
-                f"{entry.get('duration_ms')}ms {entry.get('code')}"
+        elif command == "inspect":
+            inspect_data = data.get("inspect", {})
+            members = inspect_data.get("members", [])
+            members_text = ", ".join(members[:30]) if members else "(none)"
+            body = (
+                f"name: {inspect_data.get('name')}\n"
+                f"type: {inspect_data.get('type')}\n"
+                f"repr: {inspect_data.get('repr')}\n"
+                f"members: {members_text}"
             )
-            for entry in entries
-        ]
-        return "\n".join(lines)
 
-    if command == "doctor":
-        checks = data.get("checks", [])
-        headline = "Doctor checks passed." if data.get("ready") else "Doctor found issues."
-        lines = [headline]
-        for check in checks:
-            status = str(check.get("status", "unknown")).upper()
-            message = check.get("message")
-            lines.append(f"[{status}] {check.get('name')}: {message}")
-            hint = check.get("fix_hint")
-            if hint:
-                lines.append(f"  fix: {hint}")
-        return "\n".join(lines)
+        elif command == "reload":
+            body = f"Reloaded module: {data.get('module')}"
 
-    return json.dumps(data, ensure_ascii=True, indent=2)
+        elif command == "history":
+            entries = data.get("entries", [])
+            if not entries:
+                body = "No history entries."
+            else:
+                lines = [
+                    (
+                        f"{entry.get('ts')} [{entry.get('status')}] "
+                        f"{entry.get('duration_ms')}ms {entry.get('code')}"
+                    )
+                    for entry in entries
+                ]
+                body = "\n".join(lines)
+
+        elif command == "doctor":
+            checks = data.get("checks", [])
+            headline = "Doctor checks passed." if data.get("ready") else "Doctor found issues."
+            lines = [headline]
+            for check in checks:
+                status = str(check.get("status", "unknown")).upper()
+                message = check.get("message")
+                lines.append(f"[{status}] {check.get('name')}: {message}")
+                hint = check.get("fix_hint")
+                if hint:
+                    lines.append(f"  fix: {hint}")
+            body = "\n".join(lines)
+        else:
+            body = json.dumps(data, ensure_ascii=True, indent=2)
+
+    return _append_suggestions(body, response.suggestions)
 
 
 def _render_exec_like(data: dict[str, Any]) -> str:
@@ -126,4 +135,12 @@ def _render_error(response: CommandResponse) -> str:
         lines.append(f"Detail: {response.error.evalue}")
     if response.error.traceback:
         lines.extend(response.error.traceback)
+    return "\n".join(lines)
+
+
+def _append_suggestions(body: str, suggestions: list[str]) -> str:
+    if not suggestions:
+        return body
+    lines = [body, "", "Next:"]
+    lines.extend(f"- {suggestion}" for suggestion in suggestions)
     return "\n".join(lines)

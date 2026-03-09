@@ -83,3 +83,37 @@ def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path
     assert payload["status"] == "ok"
     assert payload["command"] == "doctor"
     assert "checks" in payload["data"]
+
+
+def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(main, [])
+    assert result.exit_code == 0
+    assert "Run `agentnb --help`" in result.output
+    assert "Recommended loop:" in result.output
+    assert "Prefer --json for agent integrations" in result.output
+
+
+def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "Persistent project-scoped Python state for agent workflows." in result.output
+    assert "agentnb start --json" in result.output
+    assert "doctor" in result.output
+    assert "startup fails" in result.output
+
+
+def test_cli_json_response_includes_suggestions(cli_runner: CliRunner, project_dir: Path) -> None:
+    result = cli_runner.invoke(main, ["status", "--project", str(project_dir), "--json"])
+    assert result.exit_code == 0
+
+    payload = _payload(result.output)
+    assert payload["status"] == "ok"
+    assert payload["command"] == "status"
+    assert payload["suggestions"]
+
+
+def test_cli_human_output_shows_suggestions(cli_runner: CliRunner, project_dir: Path) -> None:
+    result = cli_runner.invoke(main, ["status", "--project", str(project_dir)])
+    assert result.exit_code == 0
+    assert "Kernel is not running." in result.output
+    assert "Next:" in result.output

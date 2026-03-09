@@ -82,6 +82,7 @@ class CommandResponse:
     project: str
     session_id: str
     data: dict[str, Any] = field(default_factory=dict)
+    suggestions: list[str] = field(default_factory=list)
     error: AgentNBError | None = None
     schema_version: str = SCHEMA_VERSION
     timestamp: str = field(default_factory=utc_now_iso)
@@ -95,6 +96,7 @@ class CommandResponse:
             "session_id": self.session_id,
             "timestamp": self.timestamp,
             "data": self.data,
+            "suggestions": self.suggestions,
             "error": self.error.to_dict() if self.error else None,
         }
 
@@ -105,6 +107,7 @@ def success_response(
     project: str,
     session_id: str,
     data: dict[str, Any] | None = None,
+    suggestions: list[str] | None = None,
 ) -> CommandResponse:
     return CommandResponse(
         status="ok",
@@ -112,6 +115,7 @@ def success_response(
         project=project,
         session_id=session_id,
         data=data or {},
+        suggestions=suggestions or [],
     )
 
 
@@ -126,6 +130,7 @@ def error_response(
     evalue: str | None = None,
     traceback: list[str] | None = None,
     data: dict[str, Any] | None = None,
+    suggestions: list[str] | None = None,
 ) -> CommandResponse:
     return CommandResponse(
         status="error",
@@ -133,6 +138,7 @@ def error_response(
         project=project,
         session_id=session_id,
         data=data or {},
+        suggestions=suggestions or [],
         error=AgentNBError(
             code=code,
             message=message,

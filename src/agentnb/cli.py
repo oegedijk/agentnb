@@ -17,9 +17,33 @@ runtime = KernelRuntime()
 ops = NotebookOps(runtime)
 
 
-@click.group()
-def main() -> None:
-    """agentnb - A persistent Python notebook for AI agents."""
+@click.group(
+    invoke_without_command=True,
+    context_settings={"help_option_names": ["--help", "-h"]},
+)
+@click.pass_context
+def main(ctx: click.Context) -> None:
+    """Persistent project-scoped Python state for agent workflows.
+
+    Start a long-running kernel for the current project, execute code against it,
+    inspect live variables, and recover without losing all state on every step.
+
+    Recommended loop:
+
+      1. agentnb start --json
+      2. agentnb exec "from myapp import thing" --json
+      3. agentnb vars --json
+      4. agentnb inspect thing --json
+      5. agentnb reload myapp.module --json
+      6. agentnb history --json
+
+    Prefer --json for agent integrations and machine-readable parsing.
+    Use agentnb doctor if kernel startup fails.
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo("No command provided. Run `agentnb --help` to see the full workflow and command guide.\n")
+        click.echo(ctx.get_help())
+        ctx.exit(0)
 
 
 def project_option(func: Callable[..., object]) -> Callable[..., object]:
@@ -51,6 +75,82 @@ def _emit(response: CommandResponse, *, as_json: bool) -> None:
         raise click.exceptions.Exit(1)
 
 
+def _suggestions(command_name: str, response_status: str, data: dict[str, object]) -> list[str]:
+    if command_name == "start":
+        return [
+            'Run `agentnb exec "..." --json` to execute code in the live kernel.',
+            "Run `agentnb vars --json` to inspect the current namespace.",
+            "Run `agentnb status --json` to confirm the kernel is still alive.",
+        ]
+    if command_name == "status":
+        if data.get("alive"):
+            return [
+                'Run `agentnb exec "..." --json` to execute code.',
+                "Run `agentnb vars --json` to inspect current variables.",
+                "Run `agentnb stop --json` when the session is no longer needed.",
+            ]
+        return [
+            "Run `agentnb start --json` to start a project-scoped kernel.",
+            "Run `agentnb doctor --json` if startup has been failing.",
+        ]
+    if command_name == "exec":
+        if response_status == "ok":
+            return [
+                "Run `agentnb vars --json` to inspect the updated namespace.",
+                "Run `agentnb inspect NAME --json` to inspect a specific variable.",
+                "Run `agentnb history --json` to review prior executions.",
+            ]
+        return [
+            "Run `agentnb history --errors --json` to review recent failures.",
+            "Run `agentnb interrupt --json` if execution may still be stuck.",
+            "Run `agentnb reset --json` if the namespace needs a clean slate.",
+        ]
+    if command_name == "vars":
+        return [
+            "Run `agentnb inspect NAME --json` for details on a variable.",
+            'Run `agentnb exec "..." --json` to add or modify live state.',
+        ]
+    if command_name == "inspect":
+        return [
+            "Run `agentnb vars --json` to inspect more of the namespace.",
+            'Run `agentnb exec "..." --json` to probe or transform that value.',
+        ]
+    if command_name == "reload":
+        return [
+            'Run `agentnb exec "..." --json` to verify the reloaded module behavior.',
+            "Run `agentnb reset --json` if stale state is still causing issues.",
+        ]
+    if command_name == "history":
+        return [
+            'Run `agentnb exec "..." --json` to continue iterating.',
+            "Run `agentnb history --errors --json` to focus on failures only.",
+        ]
+    if command_name == "interrupt":
+        return [
+            'Retry with `agentnb exec "..." --json` once the kernel is idle.',
+            "Run `agentnb reset --json` if interrupted code left partial state behind.",
+        ]
+    if command_name == "reset":
+        return [
+            'Run `agentnb exec "setup_code" --json` to rebuild required state.',
+            "Run `agentnb vars --json` to confirm the namespace is clean.",
+        ]
+    if command_name == "stop":
+        return [
+            "Run `agentnb start --json` to create a fresh kernel later.",
+        ]
+    if command_name == "doctor":
+        if data.get("ready"):
+            return [
+                "Run `agentnb start --json` to start the kernel.",
+            ]
+        return [
+            "Run `agentnb doctor --fix --json` to attempt automatic fixes.",
+            "Run `agentnb start --python /path/to/python --json` to try a specific interpreter.",
+        ]
+    return []
+
+
 def _execute_command(
     command_name: str,
     project: Path | None,
@@ -67,6 +167,7 @@ def _execute_command(
             project=str(project_root),
             session_id=session_id,
             data=data,
+            suggestions=_suggestions(command_name, "ok", data),
         )
     except AgentNBException as exc:
         response = error_response(
@@ -78,6 +179,7 @@ def _execute_command(
             ename=exc.ename,
             evalue=exc.evalue,
             traceback=exc.traceback,
+            suggestions=_suggestions(command_name, "error", {}),
         )
     except Exception as exc:
         response = error_response(
@@ -88,6 +190,7 @@ def _execute_command(
             message=str(exc),
             ename=type(exc).__name__,
             evalue=str(exc),
+            suggestions=_suggestions(command_name, "error", {}),
         )
 
     _emit(response, as_json=as_json)
@@ -104,7 +207,12 @@ def start(
     auto_install: bool,
     as_json: bool,
 ) -> None:
-    """Start a kernel for the project."""
+    """Start or reuse the project's persistent kernel.
+
+    The interpreter is selected from --python, .venv, VIRTUAL_ENV, or the
+    current Python executable. By default agentnb auto-installs ipykernel into
+    the chosen interpreter if needed.
+    """
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         status, started_new = runtime.start(
@@ -134,7 +242,11 @@ def exec_cmd(
     project: Path | None,
     as_json: bool,
 ) -> None:
-    """Execute code in the running kernel."""
+    """Execute code in the live kernel.
+
+    Provide code as an argument, with --file, or through stdin. The kernel must
+    already be running for the target project.
+    """
     try:
         source = _resolve_code_input(code=code, filepath=filepath)
     except AgentNBException as exc:
@@ -148,6 +260,7 @@ def exec_cmd(
             ename=exc.ename,
             evalue=exc.evalue,
             traceback=exc.traceback,
+            suggestions=_suggestions("exec", "error", {}),
         )
         _emit(response, as_json=as_json)
         return
@@ -169,7 +282,7 @@ def exec_cmd(
 @project_option
 @json_option
 def vars_cmd(project: Path | None, as_json: bool, include_types: bool) -> None:
-    """List variables in the kernel namespace."""
+    """List user variables currently defined in the kernel namespace."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         values = ops.list_vars(project_root=project_root, session_id=session_id)
@@ -185,7 +298,7 @@ def vars_cmd(project: Path | None, as_json: bool, include_types: bool) -> None:
 @project_option
 @json_option
 def inspect_cmd(name: str, project: Path | None, as_json: bool) -> None:
-    """Inspect a variable in the kernel namespace."""
+    """Inspect one variable in the kernel namespace."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         payload = ops.inspect_var(project_root=project_root, session_id=session_id, name=name)
@@ -199,7 +312,7 @@ def inspect_cmd(name: str, project: Path | None, as_json: bool) -> None:
 @project_option
 @json_option
 def reload_cmd(module: str, project: Path | None, as_json: bool) -> None:
-    """Reload a module (importlib.reload)."""
+    """Reload an imported module with importlib.reload."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         payload = ops.reload_module(
@@ -214,7 +327,7 @@ def reload_cmd(module: str, project: Path | None, as_json: bool) -> None:
 @project_option
 @json_option
 def status(project: Path | None, as_json: bool) -> None:
-    """Check if the kernel is running."""
+    """Check whether the project's kernel is currently running."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         return runtime.status(project_root=project_root, session_id=session_id).to_dict()
@@ -227,7 +340,7 @@ def status(project: Path | None, as_json: bool) -> None:
 @project_option
 @json_option
 def history(errors: bool, project: Path | None, as_json: bool) -> None:
-    """Show execution history."""
+    """Show recent execution history recorded for the project."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         entries = runtime.history(
@@ -242,7 +355,7 @@ def history(errors: bool, project: Path | None, as_json: bool) -> None:
 @project_option
 @json_option
 def interrupt(project: Path | None, as_json: bool) -> None:
-    """Interrupt the currently running code."""
+    """Interrupt the currently running execution without stopping the kernel."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         runtime.interrupt(project_root=project_root, session_id=session_id)
@@ -256,7 +369,7 @@ def interrupt(project: Path | None, as_json: bool) -> None:
 @project_option
 @json_option
 def reset(timeout: float, project: Path | None, as_json: bool) -> None:
-    """Clear the namespace but keep the kernel alive."""
+    """Clear user state from the kernel while keeping the process alive."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         result = runtime.reset(project_root=project_root, session_id=session_id, timeout_s=timeout)
@@ -269,7 +382,7 @@ def reset(timeout: float, project: Path | None, as_json: bool) -> None:
 @project_option
 @json_option
 def stop(project: Path | None, as_json: bool) -> None:
-    """Shut down the kernel."""
+    """Shut down the project's kernel and clear the saved session metadata."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         runtime.stop(project_root=project_root, session_id=session_id)
@@ -289,7 +402,11 @@ def doctor(
     fix: bool,
     as_json: bool,
 ) -> None:
-    """Run environment diagnostics for kernel startup."""
+    """Check interpreter and kernel prerequisites for startup.
+
+    Use this when start fails, the wrong interpreter is selected, or ipykernel
+    is missing. Pass --fix to attempt automatic remediation when supported.
+    """
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         return runtime.doctor(

@@ -16,21 +16,30 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 
 - Support multiple sessions per project without breaking default behavior.
 - Improve execution control for long-running workflows.
+- Make session targeting explicit and safe when multiple live contexts exist.
+- Introduce a structured execution model that can support streaming and background runs.
 
 ### Planned Features
 
 - Named sessions:
   - `--session <name>` across all kernel-dependent commands
   - `agentnb sessions list`, `agentnb sessions attach`, `agentnb sessions delete`
+  - explicit ambiguity errors when multiple sessions exist and no target is provided
+  - session metadata in listings (status, age, interpreter, last activity)
 - Background execution:
   - `agentnb exec --background` returning `execution_id`
   - `agentnb wait <execution_id>`, `agentnb cancel <execution_id>`
 - Streaming option:
   - `agentnb exec --stream` for incremental stdout/stderr updates
+- Execution event model:
+  - typed events for `stdout`, `stderr`, `result`, `display`, `error`, `status`
+  - stable `execution_id` across foreground, streaming, and background execution paths
+  - internal event persistence to support replay, export, and artifact capture later
 
 ### API/Contract Notes
 
 - Add `session_id` and `execution_id` consistently to execution payloads.
+- Add an event schema that remains stable across sync and streaming modes.
 - Keep existing `default` session behavior unchanged.
 
 ## v0.3 - Reproducibility and Debug Workflows
@@ -38,6 +47,7 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 ### Goals
 
 - Make iterative agent work easier to replay, diagnose, and promote to tests.
+- Make "clean verification" a first-class workflow instead of a manual sequence of commands.
 
 ### Planned Features
 
@@ -45,15 +55,23 @@ This roadmap captures planned work **after the current v0.1 baseline**.
   - `agentnb snapshot create|list|restore`
 - Replay/export:
   - replay history to new session
+  - `agentnb replay --to-session <name>`
+  - `agentnb verify` to restart a clean session and replay selected history or snapshot state
   - export to `.ipynb` and markdown transcript
 - Better debugging:
   - traceback enrichment
   - frame/locals inspection commands
   - optional profiling (`cProfile`) command paths
+- Safer inspection:
+  - bounded previews for large values
+  - structured previews for common containers (`list`, `dict`, `tuple`, dataframe-like objects)
+  - side-effect-aware inspection paths that avoid arbitrary `repr(...)` when possible
+  - richer history metadata (`tags`, labels, execution mode)
 
 ### API/Contract Notes
 
 - History entries gain optional `tags`, `command_type`, and `execution_id`.
+- Verification responses should identify the first failed step and the source execution that produced it.
 - Snapshot metadata tracked in `.agentnb/` with schema versioning.
 
 ## v0.4 - Rich Output and Artifacts
@@ -61,6 +79,7 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 ### Goals
 
 - Improve non-text outputs for data-heavy workflows.
+- Clarify which execution outputs are ephemeral versus persisted for later inspection.
 
 ### Planned Features
 
@@ -70,6 +89,10 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 - CLI helpers:
   - `agentnb artifacts list`
   - `agentnb artifacts open <id>`
+- Output persistence controls:
+  - recorded versus ephemeral execution modes
+  - artifact retention policy and cleanup commands
+  - optional promotion of prior execution results into saved artifacts
 
 ### API/Contract Notes
 

@@ -2,6 +2,9 @@
 
 A persistent project-scoped Python REPL for coding agents, exposed through a simple CLI.
 
+> Status: alpha. Expect rough edges and breaking changes. Use in local
+> development workflows at your own risk.
+
 ## Why
 
 Agents can run shell commands, but they lose state when using one-off `python -c` and script invocations. `agentnb` gives agents a long-running IPython kernel they can drive with CLI commands, so they can explore incrementally, keep expensive setup in memory, inspect live variables, and recover without restarting from scratch on every step.

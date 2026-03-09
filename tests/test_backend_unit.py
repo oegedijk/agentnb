@@ -7,7 +7,7 @@ from pathlib import Path
 from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 
-from agentnb.backend import LocalIPythonBackend
+from agentnb.backend import STARTUP_CODE, LocalIPythonBackend
 from agentnb.provisioner import _python_supports_module
 from agentnb.session import SessionInfo
 
@@ -73,3 +73,8 @@ def test_start_detaches_kernel_process(
     assert popen_mock.call_args.kwargs["start_new_session"] is True
     wait_mock.assert_called_once()
     execute_mock.assert_called_once()
+
+
+def test_startup_code_only_bootstraps_project_path() -> None:
+    assert "autoreload" not in STARTUP_CODE
+    assert "AGENTNB_PROJECT_ROOT" in STARTUP_CODE

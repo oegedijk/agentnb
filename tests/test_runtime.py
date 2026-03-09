@@ -8,6 +8,7 @@ import pytest
 
 from agentnb.contracts import KernelStatus
 from agentnb.errors import ExecutionTimedOutError, KernelNotReadyError
+from agentnb.history import HistoryStore
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, SessionStore
 
@@ -68,6 +69,18 @@ def test_runtime_reset_clears_namespace(started_runtime: tuple[KernelRuntime, Pa
 
     assert after_reset.status == "error"
     assert after_reset.ename in {"NameError", "KeyError"}
+
+
+def test_runtime_execute_does_not_append_history_by_itself(
+    started_runtime: tuple[KernelRuntime, Path],
+) -> None:
+    runtime, project_dir = started_runtime
+
+    runtime.execute(project_root=project_dir, code="1 + 1", timeout_s=5)
+    runtime.reset(project_root=project_dir, timeout_s=5)
+
+    history = HistoryStore(project_dir).read(include_internal=True)
+    assert history == []
 
 
 def test_runtime_execute_reports_kernel_not_ready_when_connection_exists_without_session(

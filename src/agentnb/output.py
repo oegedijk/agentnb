@@ -75,33 +75,40 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             inspect_data = data.get("inspect", {})
             members = inspect_data.get("members", [])
             members_text = ", ".join(members[:30]) if members else "(none)"
-            lines = [
-                f"name: {inspect_data.get('name')}",
-                f"type: {inspect_data.get('type')}",
-                f"repr: {inspect_data.get('repr')}",
-            ]
             preview = inspect_data.get("preview")
             if isinstance(preview, dict) and preview.get("kind") == "dataframe-like":
+                lines = [
+                    f"name: {inspect_data.get('name')}",
+                    f"type: {inspect_data.get('type')}",
+                ]
                 lines.extend(_render_dataframe_preview(preview))
+            elif isinstance(preview, dict) and preview.get("kind") in {
+                "sequence-like",
+                "mapping-like",
+            }:
+                lines = [
+                    f"name: {inspect_data.get('name')}",
+                    f"type: {inspect_data.get('type')}",
+                ]
+                lines.extend(_render_collection_preview(preview))
             else:
+                lines = [
+                    f"name: {inspect_data.get('name')}",
+                    f"type: {inspect_data.get('type')}",
+                    f"repr: {inspect_data.get('repr')}",
+                ]
                 lines.append(f"members: {members_text}")
             body = "\n".join(lines)
 
         elif command == "reload":
-            body = f"Reloaded module: {data.get('module')}"
+            body = _render_reload(data)
 
         elif command == "history":
             entries = data.get("entries", [])
             if not entries:
                 body = "No history entries."
             else:
-                lines = [
-                    (
-                        f"{entry.get('ts')} [{entry.get('status')}] "
-                        f"{entry.get('duration_ms')}ms {entry.get('code')}"
-                    )
-                    for entry in entries
-                ]
+                lines = [_render_history_entry(entry) for entry in entries]
                 body = "\n".join(lines)
 
         elif command == "doctor":
@@ -193,5 +200,96 @@ def _render_dataframe_preview(preview: dict[str, Any]) -> list[str]:
     head = preview.get("head")
     if isinstance(head, list):
         lines.append("head: " + json.dumps(head, ensure_ascii=True))
+
+    return lines
+
+
+def _render_history_entry(entry: dict[str, Any]) -> str:
+    label = _history_label(entry)
+    prefix = "[internal] " if entry.get("kind") == "kernel_execution" else ""
+    return f"{entry.get('ts')} [{entry.get('status')}] {entry.get('duration_ms')}ms {prefix}{label}"
+
+
+def _history_label(entry: dict[str, Any]) -> str:
+    label = entry.get("label")
+    if isinstance(label, str) and label:
+        return label
+
+    command_type = entry.get("command_type")
+    if command_type == "exec":
+        code = entry.get("code") or entry.get("input")
+        summarized = _summarize_history_text(code)
+        return "exec" if summarized is None else f"exec {summarized}"
+
+    code = entry.get("code")
+    summarized = _summarize_history_text(code)
+    if summarized is not None:
+        return summarized
+    return "history entry"
+
+
+def _summarize_history_text(value: object, limit: int = 100) -> str | None:
+    if not isinstance(value, str):
+        return None
+    compact = " ".join(value.strip().split())
+    if not compact:
+        return None
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _render_reload(data: dict[str, Any]) -> str:
+    reloaded_modules = data.get("reloaded_modules", [])
+    rebound_names = data.get("rebound_names", [])
+    stale_names = data.get("stale_names", [])
+    failed_modules = data.get("failed_modules", [])
+    notes = data.get("notes", [])
+    requested_module = data.get("requested_module")
+
+    if isinstance(reloaded_modules, list) and reloaded_modules:
+        if isinstance(requested_module, str) and len(reloaded_modules) == 1:
+            lines = [f"Reloaded module: {reloaded_modules[0]}"]
+        else:
+            modules = ", ".join(str(module) for module in reloaded_modules[:10])
+            lines = [f"Reloaded {len(reloaded_modules)} project modules: {modules}"]
+    else:
+        lines = ["No imported project-local modules were reloaded."]
+
+    if isinstance(rebound_names, list) and rebound_names:
+        lines.append("Rebound names: " + ", ".join(str(name) for name in rebound_names[:10]))
+    if isinstance(stale_names, list) and stale_names:
+        lines.append("Possible stale objects: " + ", ".join(str(name) for name in stale_names[:10]))
+        lines.append("Recreate them or run `agentnb reset` if stale state is widespread.")
+    if isinstance(failed_modules, list) and failed_modules:
+        failed_names = ", ".join(str(item.get("module")) for item in failed_modules[:10])
+        lines.append("Failed modules: " + failed_names)
+    if isinstance(notes, list):
+        lines.extend(str(note) for note in notes if isinstance(note, str) and note)
+    return "\n".join(lines)
+
+
+def _render_collection_preview(preview: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+
+    length = preview.get("length")
+    if isinstance(length, int):
+        lines.append(f"length: {length}")
+
+    item_type = preview.get("item_type")
+    if isinstance(item_type, str) and item_type:
+        lines.append(f"item_type: {item_type}")
+
+    keys = preview.get("keys")
+    if isinstance(keys, list) and keys:
+        lines.append("keys: " + ", ".join(str(key) for key in keys[:10]))
+
+    sample_keys = preview.get("sample_keys")
+    if isinstance(sample_keys, list) and sample_keys:
+        lines.append("sample_keys: " + ", ".join(str(key) for key in sample_keys[:10]))
+
+    sample = preview.get("sample")
+    if sample is not None:
+        lines.append("sample: " + json.dumps(sample, ensure_ascii=True))
 
     return lines

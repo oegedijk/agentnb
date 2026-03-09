@@ -10,7 +10,6 @@ from typing import Any
 DEFAULT_SESSION_ID = "default"
 STATE_DIR_NAME = ".agentnb"
 LEGACY_SESSION_FILE_NAME = "session.json"
-HISTORY_FILE_NAME = "history.jsonl"
 
 
 @dataclass(slots=True)
@@ -67,7 +66,6 @@ class SessionStore:
         self.state_dir = self.project_root / STATE_DIR_NAME
         self.session_file = self.state_dir / _session_file_name(session_id)
         self.legacy_session_file = self.state_dir / LEGACY_SESSION_FILE_NAME
-        self.history_file = self.state_dir / HISTORY_FILE_NAME
         self.connection_file = self.state_dir / f"kernel-{self.session_id}.json"
 
     def ensure_state_dir(self) -> None:
@@ -131,29 +129,6 @@ class SessionStore:
         with gitignore.open("a", encoding="utf-8") as handle:
             handle.write(f"{suffix}{entry}\n")
         return True
-
-    def append_history(self, entry: dict[str, Any]) -> None:
-        self.ensure_state_dir()
-        with self.history_file.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=True))
-            handle.write("\n")
-
-    def read_history(self, errors_only: bool = False) -> list[dict[str, Any]]:
-        if not self.history_file.exists():
-            return []
-
-        entries: list[dict[str, Any]] = []
-        for line in self.history_file.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if errors_only and entry.get("status") != "error":
-                continue
-            entries.append(entry)
-        return entries
 
     def _session_paths(self) -> tuple[Path, ...]:
         if self.legacy_session_file == self.session_file:

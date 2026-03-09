@@ -10,6 +10,7 @@ class AgentNBException(Exception):
         ename: str | None = None,
         evalue: str | None = None,
         traceback: list[str] | None = None,
+        data: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -17,6 +18,7 @@ class AgentNBException(Exception):
         self.ename = ename
         self.evalue = evalue
         self.traceback = traceback
+        self.data = data or {}
 
 
 class NoKernelRunningError(AgentNBException):

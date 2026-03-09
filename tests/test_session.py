@@ -131,16 +131,3 @@ def test_session_store_loads_legacy_file_and_migrates(project_dir: Path) -> None
     assert loaded.session_id == "default"
     assert store.session_file.exists()
     assert not store.legacy_session_file.exists()
-
-
-def test_history_append_and_filter(project_dir: Path) -> None:
-    store = SessionStore(project_dir)
-    store.append_history({"ts": "a", "code": "1+1", "status": "ok", "duration_ms": 1})
-    store.append_history({"ts": "b", "code": "1/0", "status": "error", "duration_ms": 2})
-
-    all_entries = store.read_history()
-    err_entries = store.read_history(errors_only=True)
-
-    assert len(all_entries) == 2
-    assert len(err_entries) == 1
-    assert err_entries[0]["code"] == "1/0"

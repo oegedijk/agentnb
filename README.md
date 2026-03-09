@@ -11,6 +11,12 @@ Agents can run shell commands, but they lose state when using one-off `python -c
 
 The right mental model is a persistent REPL for agents, or an append-only notebook without a notebook UI. `agentnb` keeps execution state and history, but it does not edit notebook cells or manage `.ipynb` files.
 
+Module reloading is explicit. `agentnb` does not auto-reload edited modules on
+every execution; use `agentnb reload` after changing project-local code.
+
+`exec` follows normal IPython/Notebook semantics for output: if the final line
+of a snippet is an expression, its value is returned as the execution result.
+
 ## Install
 
 ```bash
@@ -24,9 +30,20 @@ pip install agentnb
 ```bash
 agentnb start --project /path/to/project --json
 agentnb exec "from myapp.models import User" --json
-agentnb exec "u = User(name='test'); print(u)" --json
+agentnb exec --file analysis.py --json
 agentnb vars --json
+agentnb inspect User --json
 agentnb stop --json
+```
+
+For multiline code, prefer `--file` or stdin/heredoc:
+
+```bash
+agentnb exec --json <<'PY'
+import pandas as pd
+df = pd.read_csv("tips.csv")
+df.head()
+PY
 ```
 
 For lower-noise agent integrations, you can set defaults once per shell:
@@ -39,16 +56,22 @@ That enables JSON output and suppresses suggestions across commands. You can als
 top-level flags such as `agentnb --agent ...`, `agentnb --json ...`,
 `agentnb --no-suggestions ...`, and `agentnb --quiet ...`.
 
+In `--agent` mode, default payloads are compacted to reduce token usage:
+trimmed error tracebacks, compact history entries, compact dataframe previews,
+and structural summaries for common containers such as `list` and `dict`.
+
 ## Recommended Workflow
 
 The normal agent loop is:
 
 1. `agentnb start --json`
-2. `agentnb exec "..." --json`
-3. `agentnb vars --json`
-4. `agentnb inspect NAME --json`
-5. `agentnb reload MODULE --json` after source edits
-6. `agentnb history --json`
+2. `agentnb exec "..." --json` for short snippets
+3. `agentnb exec --file analysis.py --json` or pipe code through stdin for multiline work
+4. `agentnb vars --json`
+5. `agentnb inspect NAME --json`
+6. `agentnb reload --json` after editing project-local modules
+7. `agentnb reload myapp.module --json` to target one imported module
+8. `agentnb history --json`
 
 Use `agentnb doctor --json` if startup fails, `agentnb interrupt --json` if execution hangs, and `agentnb reset --json` if the namespace needs a clean slate.
 
@@ -75,14 +98,24 @@ It is not a notebook editing tool:
 - top-level flags: `agentnb [--json] [--agent] [--quiet] [--no-suggestions] <command>`
 - `agentnb status [--project PATH]`
 - `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--stdout-only|--stderr-only|--result-only] [--project PATH] [--json]`
-- `agentnb vars [--project PATH] [--json] [--types]`
+- `agentnb vars [--project PATH] [--json] [--types|--no-types]`
 - `agentnb inspect NAME [--project PATH] [--json]`
-- `agentnb reload MODULE [--project PATH] [--json]`
-- `agentnb history [--project PATH] [--errors] [--latest|--last N] [--json]`
+- `agentnb reload [MODULE] [--project PATH] [--json]`
+- `agentnb history [--project PATH] [--errors] [--latest|--last N] [--all] [--json]`
 - `agentnb interrupt [--project PATH] [--json]`
 - `agentnb reset [--project PATH] [--json]`
 - `agentnb stop [--project PATH] [--json]`
 - `agentnb doctor [--project PATH] [--python PATH] [--fix] [--json]`
+
+Notes:
+- `vars` includes type information by default.
+- `vars` hides imported helper routines and classes, and summarizes common containers compactly.
+- `history` shows semantic user-visible steps by default such as `exec`, `vars`, `inspect`, `reload`, and `reset`.
+- Use `history --all` to include internal helper executions sent to the kernel.
+- Module reloading is explicit. `reload MODULE` reloads one imported project-local module.
+- Bare `reload` reloads all currently imported project-local modules and reports rebound names and possible stale objects.
+- If reload reports stale objects, recreate them or run `agentnb reset` when stale state is widespread.
+- `inspect` gives compact previews for pandas-like dataframes and for common `list`/`dict` API payloads.
 
 ## Out-of-the-box startup
 
@@ -100,6 +133,13 @@ it for you, or use `agentnb doctor --fix --json`.
 ## JSON Mode
 
 Pass `--json` to emit a stable machine-readable envelope. This is the preferred mode for agent integrations.
+
+Command-level success and execution success now align: if `exec` or `reset`
+fails in the kernel, the top-level response has `"status": "error"` and the
+command exits non-zero. The execution payload is still included in `data`.
+Default JSON is intentionally compact for agent use: large event lists are
+omitted, tracebacks are trimmed, and inspection/history payloads prefer short
+previews over raw internal detail.
 
 If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORMAT=agent`.
 `agent` also suppresses suggestions and enables quiet mode.
@@ -135,7 +175,8 @@ If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORM
 
 ## Architecture
 
-- `SessionStore`: project/session metadata, stale cleanup, history
+- `SessionStore`: project/session metadata and stale cleanup
+- `HistoryStore`: typed JSONL history records for semantic and internal execution history
 - `KernelRuntime`: lifecycle + execution API
 - `RuntimeBackend`: backend interface, with local IPython backend for v0.1
 - `NotebookOps`: vars/inspect/reload semantic operations
@@ -158,6 +199,15 @@ uv run pytest
 - `AGENTNB_FORMAT`, `AGENTNB_NO_SUGGESTIONS`, and `AGENTNB_QUIET` environment defaults
 - `exec --stdout-only`, `--stderr-only`, and `--result-only` for script-friendly capture
 - `history --latest` and `history --last N` shortcuts
+
+## Current Ergonomics
+
+- `exec` accepts short inline code, `--file`, or stdin/heredoc for multiline snippets
+- `vars` includes type information by default
+- `vars` hides imported helper routines and classes and summarizes common containers compactly
+- `inspect` gives compact previews for pandas-like objects and common `list`/`dict` payloads
+- `history` defaults to semantic user-visible steps, with `--all` for internal kernel executions
+- `--agent` returns compact JSON by default to reduce token usage during iterative workflows
 
 ## License
 

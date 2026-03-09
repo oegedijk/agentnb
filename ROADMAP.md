@@ -26,6 +26,10 @@ This roadmap captures planned work **after the current v0.1 baseline**.
   - `agentnb sessions list`, `agentnb sessions attach`, `agentnb sessions delete`
   - explicit ambiguity errors when multiple sessions exist and no target is provided
   - session metadata in listings (status, age, interpreter, last activity)
+- First-use execution ergonomics:
+  - `agentnb exec --ensure-started` to auto-start a missing kernel for the default workflow
+  - `status --wait [--timeout]` to block until a kernel is ready for execution
+  - `--session` aliases that are short and consistent across commands
 - Background execution:
   - `agentnb exec --background` returning `execution_id`
   - `agentnb wait <execution_id>`, `agentnb cancel <execution_id>`
@@ -40,6 +44,7 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 
 - Add `session_id` and `execution_id` consistently to execution payloads.
 - Add an event schema that remains stable across sync and streaming modes.
+- Support top-level output-mode defaults so agents do not need to repeat `--json` on every command.
 - Keep existing `default` session behavior unchanged.
 
 ## v0.3 - Reproducibility and Debug Workflows
@@ -67,11 +72,19 @@ This roadmap captures planned work **after the current v0.1 baseline**.
   - structured previews for common containers (`list`, `dict`, `tuple`, dataframe-like objects)
   - side-effect-aware inspection paths that avoid arbitrary `repr(...)` when possible
   - richer history metadata (`tags`, labels, execution mode)
+- History/query ergonomics:
+  - `history --latest`, `history --last N`, and clearer failed-only flows
+  - optional flat JSON output for history-oriented shell pipelines
+  - direct selectors for the most recent failed or successful execution
+- Output shaping:
+  - `exec --stdout-only`, `--stderr-only`, and `--result-only` for script-friendly capture
+  - `--quiet` and `--no-suggestions` modes for reduced prose in human output
 
 ### API/Contract Notes
 
 - History entries gain optional `tags`, `command_type`, and `execution_id`.
 - Verification responses should identify the first failed step and the source execution that produced it.
+- JSON envelopes should keep machine-stable fields predictable across commands (`session_id`, `execution_id`, `duration_ms`, typed error codes).
 - Snapshot metadata tracked in `.agentnb/` with schema versioning.
 
 ## v0.4 - Rich Output and Artifacts
@@ -93,6 +106,10 @@ This roadmap captures planned work **after the current v0.1 baseline**.
   - recorded versus ephemeral execution modes
   - artifact retention policy and cleanup commands
   - optional promotion of prior execution results into saved artifacts
+- Agent-oriented output presets:
+  - deterministic output flags such as `--no-color` and `--no-suggestions`
+  - an `--agent` preset for machine-oriented defaults (`--json` plus deterministic output rules)
+  - shell/jq-oriented examples in help and docs for common extraction patterns
 
 ### API/Contract Notes
 
@@ -118,6 +135,9 @@ This roadmap captures planned work **after the current v0.1 baseline**.
   - kernel auto-restart on crash (opt-in)
   - health checks + structured diagnostics
   - improved cleanup for stale state
+- Alternate control surfaces:
+  - a uniform `call` / RPC-like command shape over existing operations
+  - stdin JSON request mode for tool wrappers and long-lived agent adapters
 
 ### API/Contract Notes
 
@@ -149,6 +169,7 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 - Documentation upgrades:
   - troubleshooting matrix by platform
   - “agent integration” examples for CLI-first tools
+  - examples optimized for machine consumers (`jq`, tool wrappers, low-noise output)
 - Contract hardening:
   - schema regression tests
   - explicit deprecation policy for JSON fields

@@ -8,6 +8,9 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 - CLI: `start`, `stop`, `status`, `exec`, `interrupt`, `reset`, `vars`, `inspect`, `reload`, `history`, `doctor`
 - JSON response envelope with stable top-level fields
 - Provisioning flow with interpreter selection + `ipykernel` auto-install
+- Top-level output defaults: `--agent`, `--json`, `--quiet`, `--no-suggestions`
+- Script-friendly output selectors: `exec --stdout-only`, `--stderr-only`, `--result-only`
+- History query shortcuts: `history --latest`, `history --last N`
 - Pytest/ruff/ty CI quality gates
 
 ## v0.2 - Session and Execution Ergonomics
@@ -23,27 +26,31 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 
 - Named sessions:
   - `--session <name>` across all kernel-dependent commands
-  - `agentnb sessions list`, `agentnb sessions attach`, `agentnb sessions delete`
+  - `agentnb sessions list`, `agentnb sessions delete`
+  - optional `agentnb sessions attach` only after the target/default-session UX is specified
   - explicit ambiguity errors when multiple sessions exist and no target is provided
   - session metadata in listings (status, age, interpreter, last activity)
 - First-use execution ergonomics:
   - `agentnb exec --ensure-started` to auto-start a missing kernel for the default workflow
   - `status --wait [--timeout]` to block until a kernel is ready for execution
   - `--session` aliases that are short and consistent across commands
-- Background execution:
-  - `agentnb exec --background` returning `execution_id`
-  - `agentnb wait <execution_id>`, `agentnb cancel <execution_id>`
-- Streaming option:
-  - `agentnb exec --stream` for incremental stdout/stderr updates
 - Execution event model:
   - typed events for `stdout`, `stderr`, `result`, `display`, `error`, `status`
   - stable `execution_id` across foreground, streaming, and background execution paths
   - internal event persistence to support replay, export, and artifact capture later
 
+### Delivery Order
+
+1. Expose the existing session model in the CLI with `--session` while preserving `default`.
+2. Add session discovery/deletion commands and ambiguity handling when multiple live sessions exist.
+3. Add `exec --ensure-started` and `status --wait`.
+4. Land the execution event schema and persisted execution records.
+5. Build background and streaming execution on top of that model.
+
 ### API/Contract Notes
 
-- Add `session_id` and `execution_id` consistently to execution payloads.
-- Add an event schema that remains stable across sync and streaming modes.
+- `session_id` is already present in top-level command envelopes; add `execution_id` consistently to execution payloads.
+- Extend the event schema to cover sync, streaming, and replay modes without changing event meaning by mode.
 - Support top-level output-mode defaults so agents do not need to repeat `--json` on every command.
 - Keep existing `default` session behavior unchanged.
 
@@ -73,12 +80,11 @@ This roadmap captures planned work **after the current v0.1 baseline**.
   - side-effect-aware inspection paths that avoid arbitrary `repr(...)` when possible
   - richer history metadata (`tags`, labels, execution mode)
 - History/query ergonomics:
-  - `history --latest`, `history --last N`, and clearer failed-only flows
+  - clearer failed-only flows
   - optional flat JSON output for history-oriented shell pipelines
   - direct selectors for the most recent failed or successful execution
 - Output shaping:
-  - `exec --stdout-only`, `--stderr-only`, and `--result-only` for script-friendly capture
-  - `--quiet` and `--no-suggestions` modes for reduced prose in human output
+  - additional low-noise modes beyond the current `--quiet` and `--no-suggestions`
 
 ### API/Contract Notes
 
@@ -179,7 +185,7 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 ## Near-Term Priority Queue
 
 1. Multi-session support (`--session`, list/attach/delete)
-2. Background execution IDs + cancel/wait commands
-3. Replay/export (history -> notebook/transcript)
-4. Artifact channel in JSON output
-5. Plugin API stabilization (hooks + op registry)
+2. First-use session ergonomics (`exec --ensure-started`, `status --wait`)
+3. Execution record model (`execution_id`, persisted events, stable event schema)
+4. Background execution IDs + cancel/wait commands
+5. Replay/export (history -> notebook/transcript)

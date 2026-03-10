@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import signal
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,9 @@ class TestLocalIPythonBackend(LocalIPythonBackend):
 
         if pid_exists(session.pid):
             os.kill(session.pid, signal.SIGTERM)
-            time.sleep(0.05)
+            term_deadline = time.monotonic() + 0.05
+            while pid_exists(session.pid) and time.monotonic() < term_deadline:
+                time.sleep(0.005)
 
         if pid_exists(session.pid):
             os.kill(session.pid, _hard_kill_signal())
@@ -81,7 +84,7 @@ def started_runtime(runtime: KernelRuntime, project_dir: Path) -> tuple[KernelRu
     try:
         yield runtime, project_dir
     finally:
-        if runtime.status(project_dir).alive:
+        with suppress(Exception):
             runtime.stop(project_dir)
 
 

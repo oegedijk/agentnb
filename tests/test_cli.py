@@ -11,9 +11,6 @@ from agentnb.cli import main
 from agentnb.contracts import ExecutionResult
 from agentnb.errors import SessionBusyError
 
-pytest.importorskip("jupyter_client")
-pytest.importorskip("ipykernel")
-
 
 def _payload(output: str) -> dict[str, object]:
     return json.loads(output)
@@ -146,6 +143,17 @@ def test_cli_returns_kernel_not_ready_error_when_connection_exists_without_sessi
 
 
 def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.doctor = lambda **_: {  # type: ignore[method-assign]
+        "ready": True,
+        "checks": [{"name": "python", "status": "ok", "message": "ok"}],
+        "selected_python": "python",
+        "python_source": "current",
+        "session_exists": False,
+        "stale_session_cleaned": False,
+    }
+
     result = cli_runner.invoke(main, ["doctor", "--project", str(project_dir), "--json"])
     assert result.exit_code == 0
 

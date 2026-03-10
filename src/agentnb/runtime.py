@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from .errors import (
     AmbiguousSessionError,
     ExecutionTimedOutError,
     KernelNotReadyError,
+    KernelWaitTimedOutError,
     NoKernelRunningError,
     SessionBusyError,
     SessionNotFoundError,
@@ -84,6 +86,13 @@ class KernelRuntime:
         store.clear_session()
         self._hooks.on_kernel_stop(store.project_root, session_id, session)
 
+    def ensure_started(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+    ) -> tuple[KernelStatus, bool]:
+        return self.start(project_root=project_root, session_id=session_id)
+
     def list_sessions(self, project_root: Path) -> list[dict[str, object]]:
         entries: list[dict[str, object]] = []
         for session in SessionStore.list_sessions(project_root):
@@ -148,6 +157,23 @@ class KernelRuntime:
         if len(sessions) == 1:
             return str(sessions[0]["session_id"])
         raise AmbiguousSessionError([str(session["session_id"]) for session in sessions])
+
+    def wait_for_ready(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+    ) -> KernelStatus:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            status = self.status(project_root=project_root, session_id=session_id)
+            if status.alive:
+                return status
+            if time.monotonic() >= deadline:
+                raise KernelWaitTimedOutError(timeout_s)
+            time.sleep(poll_interval_s)
 
     def execute(
         self,

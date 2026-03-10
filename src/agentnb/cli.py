@@ -346,6 +346,11 @@ def start(
 @click.argument("code", required=False)
 @click.option("-f", "--file", "filepath", type=click.Path(path_type=Path, dir_okay=False))
 @click.option("--timeout", default=30.0, show_default=True, type=float)
+@click.option(
+    "--ensure-started",
+    is_flag=True,
+    help="Start the target session first if it is not already running.",
+)
 @click.option("--stdout-only", "output_selector", flag_value="stdout", default=None)
 @click.option("--stderr-only", "output_selector", flag_value="stderr")
 @click.option("--result-only", "output_selector", flag_value="result")
@@ -356,6 +361,7 @@ def exec_cmd(
     code: str | None,
     filepath: Path | None,
     timeout: float,
+    ensure_started: bool,
     output_selector: str | None,
     project: Path | None,
     session_id: str | None,
@@ -400,6 +406,12 @@ def exec_cmd(
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         history_store = HistoryStore(project_root=project_root, session_id=session_id)
+        started_new = False
+        if ensure_started:
+            _, started_new = runtime.ensure_started(
+                project_root=project_root,
+                session_id=session_id,
+            )
         try:
             result = runtime.execute(
                 project_root=project_root,
@@ -423,6 +435,9 @@ def exec_cmd(
             execution=result,
         )
         payload = compact_execution_payload(result.to_dict())
+        if ensure_started:
+            payload["ensured_started"] = True
+            payload["started_new_session"] = started_new
         if output_selector is not None:
             payload["selected_output"] = output_selector
             payload["selected_text"] = _select_exec_output(payload, output_selector)
@@ -526,13 +541,39 @@ def reload_cmd(
 
 
 @main.command()
+@click.option(
+    "--wait",
+    is_flag=True,
+    help="Wait until the target session is ready instead of returning immediately.",
+)
+@click.option(
+    "--timeout",
+    default=30.0,
+    show_default=True,
+    type=float,
+    help="Maximum seconds to wait when --wait is used.",
+)
 @project_option
 @session_option
 @json_option
-def status(project: Path | None, session_id: str | None, as_json: bool) -> None:
+def status(
+    wait: bool,
+    timeout: float,
+    project: Path | None,
+    session_id: str | None,
+    as_json: bool,
+) -> None:
     """Check whether the project's kernel is currently running."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
+        if wait:
+            payload = runtime.wait_for_ready(
+                project_root=project_root,
+                session_id=session_id,
+                timeout_s=timeout,
+            ).to_dict()
+            payload["waited"] = True
+            return payload
         return runtime.status(project_root=project_root, session_id=session_id).to_dict()
 
     _execute_command("status", project, as_json, session_id, True, handler)

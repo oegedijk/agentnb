@@ -186,6 +186,31 @@ def test_cli_status_uses_only_live_session_when_implicit(
     assert status_calls[0]["session_id"] == "analysis"
 
 
+def test_cli_status_wait_uses_runtime_wait_for_ready(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    wait_calls: list[dict[str, object]] = []
+
+    def wait_stub(**kwargs: object) -> object:
+        wait_calls.append(dict(kwargs))
+        return type("Status", (), {"to_dict": lambda self: {"alive": True, "pid": 321}})()
+
+    cli.runtime.wait_for_ready = wait_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["status", "--project", str(project_dir), "--wait", "--timeout", "5", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["alive"] is True
+    assert payload["data"]["waited"] is True
+    assert wait_calls[0]["timeout_s"] == 5.0
+
+
 def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
@@ -410,6 +435,32 @@ def test_cli_exec_passes_named_session(cli_runner: CliRunner, project_dir: Path)
     payload = _payload(exec_res.output)
     assert payload["session_id"] == "analysis"
     assert execute_calls[0]["session_id"] == "analysis"
+
+
+def test_cli_exec_ensure_started_starts_missing_session(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    ensure_calls: list[dict[str, object]] = []
+
+    def ensure_stub(**kwargs: object) -> tuple[object, bool]:
+        ensure_calls.append(dict(kwargs))
+        return object(), True
+
+    cli.runtime.ensure_started = ensure_stub  # type: ignore[method-assign]
+    cli.runtime.execute = lambda **_: _ok_execution(result="2")  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--ensure-started", "--json", "1 + 1"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["ensured_started"] is True
+    assert payload["data"]["started_new_session"] is True
+    assert ensure_calls[0]["session_id"] == "default"
 
 
 def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: Path) -> None:

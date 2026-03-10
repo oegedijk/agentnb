@@ -12,6 +12,7 @@ from agentnb.errors import (
     AmbiguousSessionError,
     ExecutionTimedOutError,
     KernelNotReadyError,
+    KernelWaitTimedOutError,
     SessionNotFoundError,
 )
 from agentnb.history import HistoryStore
@@ -296,4 +297,40 @@ def test_runtime_resolve_session_id_raises_when_multiple_live_sessions_exist(
             project_root=project_dir,
             requested_session_id=None,
             require_live_session=True,
+        )
+
+
+def test_runtime_wait_for_ready_returns_when_status_becomes_alive(project_dir: Path) -> None:
+    backend = Mock()
+    runtime = KernelRuntime(backend=backend)
+
+    status_calls = [
+        KernelStatus(alive=False),
+        KernelStatus(alive=False),
+        KernelStatus(alive=True, pid=123),
+    ]
+    runtime.status = Mock(side_effect=status_calls)  # type: ignore[method-assign]
+
+    ready = runtime.wait_for_ready(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )
+
+    assert ready.alive is True
+    assert ready.pid == 123
+
+
+def test_runtime_wait_for_ready_times_out(project_dir: Path) -> None:
+    backend = Mock()
+    runtime = KernelRuntime(backend=backend)
+    runtime.status = Mock(return_value=KernelStatus(alive=False))  # type: ignore[method-assign]
+
+    with pytest.raises(KernelWaitTimedOutError):
+        runtime.wait_for_ready(
+            project_root=project_dir,
+            session_id="default",
+            timeout_s=0.0,
+            poll_interval_s=0.0,
         )

@@ -159,6 +159,10 @@ def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
     assert payload["error"]["code"] == "AMBIGUOUS_SESSION"
     assert payload["error"]["message"].startswith("Multiple live sessions exist")
     assert payload["data"]["available_sessions"] == ["default", "analysis"]
+    assert payload["suggestions"] == [
+        "Run `agentnb sessions list --json` to see the live session names.",
+        "Retry with `agentnb status --session NAME --json` to target one explicitly.",
+    ]
 
 
 def test_cli_status_uses_only_live_session_when_implicit(
@@ -789,6 +793,24 @@ def test_cli_sessions_list_returns_runtime_entries(
     assert [session["session_id"] for session in payload["data"]["sessions"]] == [
         "default",
         "analysis",
+    ]
+
+
+def test_cli_sessions_list_empty_has_actionable_suggestions(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: []  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["sessions", "list", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["sessions"] == []
+    assert payload["suggestions"] == [
+        "Run `agentnb start --json` to start the default session.",
+        'Run `agentnb exec --ensure-started --json "..."` to start and execute in one step.',
     ]
 
 

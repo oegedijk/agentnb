@@ -164,7 +164,18 @@ def _emit(response: CommandResponse, *, as_json: bool) -> None:
         raise click.exceptions.Exit(1)
 
 
-def _suggestions(command_name: str, response_status: str, data: dict[str, object]) -> list[str]:
+def _suggestions(
+    command_name: str,
+    response_status: str,
+    data: dict[str, object],
+    *,
+    error_code: str | None = None,
+) -> list[str]:
+    if error_code == "AMBIGUOUS_SESSION":
+        return [
+            "Run `agentnb sessions list --json` to see the live session names.",
+            f"Retry with `agentnb {command_name} --session NAME --json` to target one explicitly.",
+        ]
     if command_name == "start":
         return [
             'Run `agentnb exec "..." --json` to execute code in the live kernel.',
@@ -239,6 +250,14 @@ def _suggestions(command_name: str, response_status: str, data: dict[str, object
             "Run `agentnb start --python /path/to/python --json` to try a specific interpreter.",
         ]
     if command_name == "sessions-list":
+        if not data.get("sessions"):
+            return [
+                "Run `agentnb start --json` to start the default session.",
+                (
+                    'Run `agentnb exec --ensure-started --json "..."` '
+                    "to start and execute in one step."
+                ),
+            ]
         return [
             "Run `agentnb start --session NAME --json` to start another named session.",
             "Run `agentnb status --session NAME --json` to inspect one session.",
@@ -287,7 +306,12 @@ def _execute_command(
             evalue=exc.evalue,
             traceback=compact_traceback(exc.traceback),
             data=exc.data,
-            suggestions=_suggestions(command_name, "error", {}),
+            suggestions=_suggestions(
+                command_name,
+                "error",
+                exc.data,
+                error_code=exc.code,
+            ),
         )
     except Exception as exc:
         response = error_response(
@@ -298,7 +322,7 @@ def _execute_command(
             message=str(exc),
             ename=type(exc).__name__,
             evalue=str(exc),
-            suggestions=_suggestions(command_name, "error", {}),
+            suggestions=_suggestions(command_name, "error", {}, error_code="INTERNAL_ERROR"),
         )
     _emit(response, as_json=as_json)
 

@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from agentnb.backend import LocalIPythonBackend, _close_client, _hard_kill_signal
+from agentnb.execution import ExecutionService
 from agentnb.ops import NotebookOps
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, pid_exists
@@ -76,6 +77,7 @@ def patch_cli_runtime(runtime: KernelRuntime, monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(cli, "runtime", runtime)
     monkeypatch.setattr(cli, "ops", NotebookOps(runtime))
+    monkeypatch.setattr(cli, "executions", ExecutionService(runtime))
 
 
 @pytest.fixture

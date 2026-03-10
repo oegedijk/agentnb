@@ -12,11 +12,12 @@ from .compact import (
     compact_execution_payload,
     compact_history_entry,
     compact_inspect_payload,
+    compact_run_entry,
     compact_traceback,
 )
-from .contracts import CommandResponse, ExecutionResult, error_response, success_response
-from .errors import AgentNBException, InvalidInputError, KernelNotReadyError, NoKernelRunningError
-from .history import HistoryStore, kernel_execution_record, user_command_record
+from .contracts import CommandResponse, error_response, success_response
+from .errors import AgentNBException, InvalidInputError
+from .execution import ExecutionService
 from .ops import NotebookOps
 from .output import RenderOptions, render_response
 from .runtime import KernelRuntime
@@ -24,6 +25,7 @@ from .session import DEFAULT_SESSION_ID, resolve_project_root, validate_session_
 
 runtime = KernelRuntime()
 ops = NotebookOps(runtime)
+executions = ExecutionService(runtime)
 _ROOT_FLAG_NAMES = {"--json", "--agent", "--quiet", "--no-suggestions"}
 
 
@@ -266,6 +268,15 @@ def _suggestions(
         return [
             "Run `agentnb sessions list --json` to confirm the remaining sessions.",
         ]
+    if command_name == "runs-list":
+        return [
+            "Run `agentnb runs show EXECUTION_ID --json` to inspect one run in detail.",
+            "Run `agentnb history --json` to review the semantic session history view.",
+        ]
+    if command_name == "runs-show":
+        return [
+            "Run `agentnb runs list --json` to inspect more recorded runs.",
+        ]
     return []
 
 
@@ -429,49 +440,27 @@ def exec_cmd(
         return
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        history_store = HistoryStore(project_root=project_root, session_id=session_id)
-        started_new = False
-        if ensure_started:
-            _, started_new = runtime.ensure_started(
-                project_root=project_root,
-                session_id=session_id,
-            )
-        try:
-            result = runtime.execute(
-                project_root=project_root,
-                session_id=session_id,
-                code=source,
-                timeout_s=timeout,
-            )
-        except Exception as exc:
-            _record_exec_history(
-                history_store=history_store,
-                session_id=session_id,
-                code=source,
-                error=exc,
-            )
-            raise
-
-        _record_exec_history(
-            history_store=history_store,
+        managed = executions.execute_code(
+            project_root=project_root,
             session_id=session_id,
             code=source,
-            execution=result,
+            timeout_s=timeout,
+            ensure_started=ensure_started,
         )
-        payload = compact_execution_payload(result.to_dict())
+        payload = compact_execution_payload(managed.record.to_execution_payload())
         if ensure_started:
             payload["ensured_started"] = True
-            payload["started_new_session"] = started_new
+            payload["started_new_session"] = managed.started_new_session
         if output_selector is not None:
             payload["selected_output"] = output_selector
             payload["selected_text"] = _select_exec_output(payload, output_selector)
-        if result.status == "error":
+        if managed.record.status == "error":
             raise AgentNBException(
                 code="EXECUTION_ERROR",
                 message="Execution failed",
-                ename=result.ename,
-                evalue=result.evalue,
-                traceback=result.traceback,
+                ename=managed.record.ename,
+                evalue=managed.record.evalue,
+                traceback=managed.record.traceback,
                 data=payload,
             )
         return payload
@@ -670,34 +659,19 @@ def reset(timeout: float, project: Path | None, session_id: str | None, as_json:
     """Clear user state from the kernel while keeping the process alive."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        history_store = HistoryStore(project_root=project_root, session_id=session_id)
-        try:
-            result = runtime.reset(
-                project_root=project_root,
-                session_id=session_id,
-                timeout_s=timeout,
-            )
-        except Exception as exc:
-            _record_reset_history(
-                history_store=history_store,
-                session_id=session_id,
-                error=exc,
-            )
-            raise
-
-        _record_reset_history(
-            history_store=history_store,
+        managed = executions.reset_session(
+            project_root=project_root,
             session_id=session_id,
-            execution=result,
+            timeout_s=timeout,
         )
-        payload = compact_execution_payload(result.to_dict())
-        if result.status == "error":
+        payload = compact_execution_payload(managed.record.to_execution_payload())
+        if managed.record.status == "error":
             raise AgentNBException(
                 code="EXECUTION_ERROR",
                 message="Reset failed",
-                ename=result.ename,
-                evalue=result.evalue,
-                traceback=result.traceback,
+                ename=managed.record.ename,
+                evalue=managed.record.evalue,
+                traceback=managed.record.traceback,
                 data=payload,
             )
         return payload
@@ -781,75 +755,53 @@ def sessions_delete(session_name: str, project: Path | None, as_json: bool) -> N
     _execute_command("sessions-delete", project, as_json, session_name, False, handler)
 
 
-def _record_exec_history(
-    *,
-    history_store: HistoryStore,
-    session_id: str,
-    code: str,
-    execution: ExecutionResult | None = None,
-    error: Exception | None = None,
+@main.group("runs")
+def runs_group() -> None:
+    """Inspect persisted execution records for exec and reset commands."""
+
+
+@runs_group.command("list")
+@click.option("--errors", is_flag=True, help="Only show failed runs")
+@click.option("--last", type=click.IntRange(min=1), default=None, help="Show the last N runs")
+@project_option
+@session_option
+@json_option
+def runs_list(
+    errors: bool,
+    last: int | None,
+    project: Path | None,
+    session_id: str | None,
+    as_json: bool,
 ) -> None:
-    if _should_skip_history(error):
-        return
-    history_store.append(
-        kernel_execution_record(
-            session_id=session_id,
-            command_type="exec",
-            label="exec kernel execution",
-            code=code,
-            origin="cli",
-            execution=execution,
-            error=error,
+    """List persisted exec/reset runs for the current project."""
+
+    def handler(project_root: Path, resolved_session_id: str) -> dict[str, object]:
+        session_filter = session_id if session_id is not None else None
+        entries = executions.list_runs(
+            project_root=project_root,
+            session_id=session_filter,
+            errors_only=errors,
         )
-    )
-    history_store.append(
-        user_command_record(
-            session_id=session_id,
-            command_type="exec",
-            label="exec",
-            input_text=code,
-            code=code,
-            origin="cli",
-            execution=execution,
-            error=error,
-        )
-    )
+        entries = [compact_run_entry(entry) for entry in entries]
+        if last is not None:
+            entries = entries[-last:]
+        return {"runs": entries}
+
+    _execute_command("runs-list", project, as_json, session_id, False, handler)
 
 
-def _record_reset_history(
-    *,
-    history_store: HistoryStore,
-    session_id: str,
-    execution: ExecutionResult | None = None,
-    error: Exception | None = None,
-) -> None:
-    if _should_skip_history(error):
-        return
-    history_store.append(
-        kernel_execution_record(
-            session_id=session_id,
-            command_type="reset",
-            label="reset kernel state",
-            code=None,
-            origin="cli",
-            execution=execution,
-            error=error,
-        )
-    )
-    history_store.append(
-        user_command_record(
-            session_id=session_id,
-            command_type="reset",
-            label="reset",
-            origin="cli",
-            execution=execution,
-            error=error,
-        )
-    )
+@runs_group.command("show")
+@click.argument("execution_id")
+@project_option
+@json_option
+def runs_show(execution_id: str, project: Path | None, as_json: bool) -> None:
+    """Show one persisted exec/reset run in detail."""
 
+    def handler(project_root: Path, session_id: str) -> dict[str, object]:
+        del session_id
+        return {"run": executions.get_run(project_root=project_root, execution_id=execution_id)}
 
-def _should_skip_history(error: Exception | None) -> bool:
-    return isinstance(error, (NoKernelRunningError, KernelNotReadyError))
+    _execute_command("runs-show", project, as_json, DEFAULT_SESSION_ID, False, handler)
 
 
 def _resolve_code_input(code: str | None, filepath: Path | None) -> str:

@@ -15,6 +15,7 @@ from .errors import (
     SessionBusyError,
     SessionNotFoundError,
 )
+from .execution import ExecutionService
 from .history import HistoryStore
 from .hooks import Hooks
 from .provisioner import KernelProvisioner
@@ -228,13 +229,23 @@ class KernelRuntime:
         include_internal: bool = False,
     ) -> list[dict[str, object]]:
         history_store = HistoryStore(project_root=project_root, session_id=session_id)
-        return [
+        ops_entries = [
             entry.to_dict()
             for entry in history_store.read(
                 errors_only=errors_only,
                 include_internal=include_internal,
             )
         ]
+        execution_entries = ExecutionService(self).history_entries(
+            project_root=project_root,
+            session_id=session_id,
+            include_internal=include_internal,
+            errors_only=errors_only,
+        )
+        return sorted(
+            [*ops_entries, *execution_entries],
+            key=lambda entry: str(entry.get("ts", "")),
+        )
 
     def doctor(
         self,

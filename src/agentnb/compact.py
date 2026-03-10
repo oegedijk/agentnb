@@ -39,6 +39,10 @@ def compact_execution_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "duration_ms": payload.get("duration_ms", 0),
     }
 
+    execution_id = payload.get("execution_id")
+    if execution_id is not None:
+        compacted["execution_id"] = execution_id
+
     execution_count = payload.get("execution_count")
     if execution_count is not None:
         compacted["execution_count"] = execution_count
@@ -148,6 +152,34 @@ def compact_history_entry(entry: dict[str, Any]) -> dict[str, Any]:
     error_type = entry.get("error_type")
     if error_type is not None:
         compacted["error_type"] = error_type
+    execution_id = entry.get("execution_id")
+    if execution_id is not None:
+        compacted["execution_id"] = execution_id
+    return compacted
+
+
+def compact_run_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    compacted = {
+        "execution_id": entry.get("execution_id"),
+        "ts": entry.get("ts"),
+        "session_id": entry.get("session_id"),
+        "command_type": entry.get("command_type"),
+        "status": entry.get("status"),
+        "duration_ms": entry.get("duration_ms"),
+    }
+
+    result = entry.get("result")
+    if isinstance(result, str) and result:
+        compacted["result_preview"] = summarize_history_text(result, limit=_RESULT_LIMIT)
+
+    stdout = entry.get("stdout")
+    if isinstance(stdout, str) and stdout:
+        compacted["stdout_preview"] = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
+
+    ename = entry.get("ename")
+    if ename is not None:
+        compacted["error_type"] = ename
+
     return compacted
 
 

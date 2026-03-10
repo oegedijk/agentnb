@@ -57,6 +57,7 @@ def test_cli_json_envelope_for_exec_roundtrip(cli_runner: CliRunner, project_dir
     assert payload["command"] == "exec"
     assert payload["session_id"] == "default"
     assert payload["data"]["result"] == "2"
+    assert isinstance(payload["data"]["execution_id"], str)
     assert "events" not in payload["data"]
 
 
@@ -839,6 +840,65 @@ def test_cli_sessions_delete_calls_runtime_delete(cli_runner: CliRunner, project
     assert payload["command"] == "sessions-delete"
     assert payload["session_id"] == "analysis"
     assert delete_calls[0]["session_id"] == "analysis"
+
+
+def test_cli_runs_list_returns_compacted_runs(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.list_runs = lambda **_: [  # type: ignore[method-assign]
+        {
+            "execution_id": "run-1",
+            "ts": "2026-03-10T00:00:00+00:00",
+            "session_id": "default",
+            "command_type": "exec",
+            "status": "ok",
+            "duration_ms": 12,
+            "stdout": "",
+            "stderr": "",
+            "result": "42",
+            "ename": None,
+        }
+    ]
+
+    result = cli_runner.invoke(main, ["runs", "list", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "runs-list"
+    assert payload["data"]["runs"][0]["execution_id"] == "run-1"
+    assert payload["data"]["runs"][0]["result_preview"] == "42"
+
+
+def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "ts": "2026-03-10T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "ok",
+        "duration_ms": 12,
+        "code": "1 + 1",
+        "stdout": "",
+        "stderr": "",
+        "result": "2",
+        "execution_count": 1,
+        "ename": None,
+        "evalue": None,
+        "traceback": None,
+        "events": [],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "runs-show"
+    assert payload["data"]["run"]["execution_id"] == "run-1"
 
 
 def test_cli_invalid_session_name_is_rejected(cli_runner: CliRunner, project_dir: Path) -> None:

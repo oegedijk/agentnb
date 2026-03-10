@@ -139,6 +139,20 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         elif command == "sessions-delete":
             stopped = " and stopped its kernel" if data.get("stopped_running_kernel") else ""
             body = f"Deleted session {data.get('session_id')}{stopped}."
+        elif command == "runs-list":
+            runs = data.get("runs", [])
+            if not runs:
+                body = "No runs found."
+            else:
+                lines = []
+                for run in runs:
+                    lines.append(
+                        f"{run.get('ts')} [{run.get('status')}] {run.get('execution_id')} "
+                        f"{run.get('command_type')} {run.get('duration_ms')}ms"
+                    )
+                body = "\n".join(lines)
+        elif command == "runs-show":
+            body = json.dumps(data.get("run", {}), ensure_ascii=True, indent=2)
         else:
             body = json.dumps(data, ensure_ascii=True, indent=2)
 

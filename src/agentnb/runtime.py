@@ -6,6 +6,7 @@ from pathlib import Path
 from .backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
 from .contracts import ExecutionResult, KernelStatus
 from .errors import (
+    AmbiguousSessionError,
     ExecutionTimedOutError,
     KernelNotReadyError,
     NoKernelRunningError,
@@ -128,6 +129,25 @@ class KernelRuntime:
             "session_id": session_id,
             "stopped_running_kernel": stopped,
         }
+
+    def resolve_session_id(
+        self,
+        project_root: Path,
+        requested_session_id: str | None,
+        *,
+        require_live_session: bool,
+    ) -> str:
+        if requested_session_id is not None:
+            return requested_session_id
+        if not require_live_session:
+            return DEFAULT_SESSION_ID
+
+        sessions = self.list_sessions(project_root=project_root)
+        if not sessions:
+            return DEFAULT_SESSION_ID
+        if len(sessions) == 1:
+            return str(sessions[0]["session_id"])
+        raise AmbiguousSessionError([str(session["session_id"]) for session in sessions])
 
     def execute(
         self,

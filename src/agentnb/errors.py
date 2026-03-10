@@ -62,6 +62,15 @@ class SessionNotFoundError(AgentNBException):
         )
 
 
+class AmbiguousSessionError(AgentNBException):
+    def __init__(self, session_ids: list[str]) -> None:
+        super().__init__(
+            code="AMBIGUOUS_SESSION",
+            message="Multiple live sessions exist; pass --session to select one explicitly.",
+            data={"available_sessions": session_ids},
+        )
+
+
 class ExecutionTimedOutError(AgentNBException):
     def __init__(self, timeout_s: float) -> None:
         super().__init__(

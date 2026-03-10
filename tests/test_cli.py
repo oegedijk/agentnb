@@ -142,6 +142,50 @@ def test_cli_returns_kernel_not_ready_error_when_connection_exists_without_sessi
     assert payload["error"]["code"] == "KERNEL_NOT_READY"
 
 
+def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {"session_id": "default"},
+        {"session_id": "analysis"},
+    ]
+
+    result = cli_runner.invoke(main, ["status", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert payload["error"]["code"] == "AMBIGUOUS_SESSION"
+    assert payload["error"]["message"].startswith("Multiple live sessions exist")
+    assert payload["data"]["available_sessions"] == ["default", "analysis"]
+
+
+def test_cli_status_uses_only_live_session_when_implicit(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    status_calls: list[dict[str, object]] = []
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {"session_id": "analysis"}
+    ]
+
+    def status_stub(**kwargs: object) -> object:
+        status_calls.append(dict(kwargs))
+        return type("Status", (), {"to_dict": lambda self: {"alive": True, "pid": 123}})()
+
+    cli.runtime.status = status_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["status", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["session_id"] == "analysis"
+    assert status_calls[0]["session_id"] == "analysis"
+
+
 def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 

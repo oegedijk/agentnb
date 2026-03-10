@@ -8,7 +8,12 @@ from unittest.mock import Mock
 import pytest
 
 from agentnb.contracts import KernelStatus
-from agentnb.errors import ExecutionTimedOutError, KernelNotReadyError, SessionNotFoundError
+from agentnb.errors import (
+    AmbiguousSessionError,
+    ExecutionTimedOutError,
+    KernelNotReadyError,
+    SessionNotFoundError,
+)
 from agentnb.history import HistoryStore
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, SessionStore
@@ -230,3 +235,65 @@ def test_runtime_delete_session_raises_for_missing_session(project_dir: Path) ->
 
     with pytest.raises(SessionNotFoundError):
         runtime.delete_session(project_root=project_dir, session_id="missing")
+
+
+def test_runtime_resolve_session_id_uses_only_live_session(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="analysis")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.return_value = KernelStatus(alive=True, pid=123)
+    runtime = KernelRuntime(backend=backend)
+
+    resolved = runtime.resolve_session_id(
+        project_root=project_dir,
+        requested_session_id=None,
+        require_live_session=True,
+    )
+
+    assert resolved == "analysis"
+
+
+def test_runtime_resolve_session_id_raises_when_multiple_live_sessions_exist(
+    project_dir: Path,
+) -> None:
+    default_store = SessionStore(project_dir, session_id="default")
+    analysis_store = SessionStore(project_dir, session_id="analysis")
+    default_store.ensure_state_dir()
+    for store in (default_store, analysis_store):
+        store.save_session(
+            SessionInfo(
+                session_id=store.session_id,
+                pid=os.getpid(),
+                connection_file=str(store.connection_file),
+                python_executable="python",
+                project_root=str(project_dir),
+                started_at="2026-03-09T00:00:00+00:00",
+            )
+        )
+        store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.side_effect = [
+        KernelStatus(alive=True, pid=111),
+        KernelStatus(alive=True, pid=222),
+    ]
+    runtime = KernelRuntime(backend=backend)
+
+    with pytest.raises(AmbiguousSessionError):
+        runtime.resolve_session_id(
+            project_root=project_dir,
+            requested_session_id=None,
+            require_live_session=True,
+        )

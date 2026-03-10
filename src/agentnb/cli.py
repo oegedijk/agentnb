@@ -123,10 +123,9 @@ def session_option(func: Callable[..., object]) -> Callable[..., object]:
     return click.option(
         "--session",
         "session_id",
-        default=DEFAULT_SESSION_ID,
-        show_default=True,
+        default=None,
         callback=_session_option_callback,
-        help="Session name",
+        help="Session name. If omitted, agentnb uses the only live session or `default`.",
     )(func)
 
 
@@ -140,8 +139,12 @@ def python_option(func: Callable[..., object]) -> Callable[..., object]:
     )(func)
 
 
-def _session_option_callback(ctx: click.Context, param: click.Parameter, value: str) -> str:
+def _session_option_callback(
+    ctx: click.Context, param: click.Parameter, value: str | None
+) -> str | None:
     del ctx, param
+    if value is None:
+        return None
     try:
         return validate_session_id(value)
     except AgentNBException as exc:
@@ -251,17 +254,25 @@ def _execute_command(
     command_name: str,
     project: Path | None,
     as_json: bool,
-    session_id: str,
+    session_id: str | None,
+    require_live_session: bool,
     handler: Callable[[Path, str], dict[str, object]],
 ) -> None:
     project_root = resolve_project_root(cwd=Path.cwd(), override=project)
+    response_session_id = session_id or DEFAULT_SESSION_ID
 
     try:
-        data = handler(project_root, session_id)
+        resolved_session_id = runtime.resolve_session_id(
+            project_root=project_root,
+            requested_session_id=session_id,
+            require_live_session=require_live_session,
+        )
+        response_session_id = resolved_session_id
+        data = handler(project_root, resolved_session_id)
         response = success_response(
             command=command_name,
             project=str(project_root),
-            session_id=session_id,
+            session_id=response_session_id,
             data=data,
             suggestions=_suggestions(command_name, "ok", data),
         )
@@ -269,7 +280,7 @@ def _execute_command(
         response = error_response(
             command=command_name,
             project=str(project_root),
-            session_id=session_id,
+            session_id=response_session_id,
             code=exc.code,
             message=exc.message,
             ename=exc.ename,
@@ -282,7 +293,7 @@ def _execute_command(
         response = error_response(
             command=command_name,
             project=str(project_root),
-            session_id=session_id,
+            session_id=response_session_id,
             code="INTERNAL_ERROR",
             message=str(exc),
             ename=type(exc).__name__,
@@ -304,7 +315,7 @@ def _execute_command(
 @json_option
 def start(
     project: Path | None,
-    session_id: str,
+    session_id: str | None,
     python_executable: Path | None,
     auto_install: bool,
     as_json: bool,
@@ -328,7 +339,7 @@ def start(
         payload["auto_install"] = auto_install
         return payload
 
-    _execute_command("start", project, as_json, session_id, handler)
+    _execute_command("start", project, as_json, session_id, False, handler)
 
 
 @main.command("exec")
@@ -347,7 +358,7 @@ def exec_cmd(
     timeout: float,
     output_selector: str | None,
     project: Path | None,
-    session_id: str,
+    session_id: str | None,
     as_json: bool,
 ) -> None:
     """Execute code in the live kernel.
@@ -376,7 +387,7 @@ def exec_cmd(
         response = error_response(
             command="exec",
             project=str(project_root),
-            session_id=session_id,
+            session_id=session_id or DEFAULT_SESSION_ID,
             code=exc.code,
             message=exc.message,
             ename=exc.ename,
@@ -426,7 +437,7 @@ def exec_cmd(
             )
         return payload
 
-    _execute_command("exec", project, as_json, session_id, handler)
+    _execute_command("exec", project, as_json, session_id, True, handler)
 
 
 @main.command("vars")
@@ -443,7 +454,7 @@ def exec_cmd(
 @json_option
 def vars_cmd(
     project: Path | None,
-    session_id: str,
+    session_id: str | None,
     as_json: bool,
     include_types: bool,
     match_text: str | None,
@@ -468,7 +479,7 @@ def vars_cmd(
             values = [{"name": item["name"], "repr": item["repr"]} for item in values]
         return {"vars": values}
 
-    _execute_command("vars", project, as_json, session_id, handler)
+    _execute_command("vars", project, as_json, session_id, True, handler)
 
 
 @main.command("inspect")
@@ -476,7 +487,7 @@ def vars_cmd(
 @project_option
 @session_option
 @json_option
-def inspect_cmd(name: str, project: Path | None, session_id: str, as_json: bool) -> None:
+def inspect_cmd(name: str, project: Path | None, session_id: str | None, as_json: bool) -> None:
     """Inspect one variable in the kernel namespace.
 
     Dataframe-like values get a compact tabular preview. Lists, tuples, sets,
@@ -487,7 +498,7 @@ def inspect_cmd(name: str, project: Path | None, session_id: str, as_json: bool)
         payload = ops.inspect_var(project_root=project_root, session_id=session_id, name=name)
         return {"inspect": compact_inspect_payload(payload)}
 
-    _execute_command("inspect", project, as_json, session_id, handler)
+    _execute_command("inspect", project, as_json, session_id, True, handler)
 
 
 @main.command("reload")
@@ -495,7 +506,9 @@ def inspect_cmd(name: str, project: Path | None, session_id: str, as_json: bool)
 @project_option
 @session_option
 @json_option
-def reload_cmd(module: str | None, project: Path | None, session_id: str, as_json: bool) -> None:
+def reload_cmd(
+    module: str | None, project: Path | None, session_id: str | None, as_json: bool
+) -> None:
     """Reload project-local modules in the live kernel.
 
     Pass a module name to reload one imported project-local module. Omit the
@@ -509,20 +522,20 @@ def reload_cmd(module: str | None, project: Path | None, session_id: str, as_jso
         )
         return payload
 
-    _execute_command("reload", project, as_json, session_id, handler)
+    _execute_command("reload", project, as_json, session_id, True, handler)
 
 
 @main.command()
 @project_option
 @session_option
 @json_option
-def status(project: Path | None, session_id: str, as_json: bool) -> None:
+def status(project: Path | None, session_id: str | None, as_json: bool) -> None:
     """Check whether the project's kernel is currently running."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         return runtime.status(project_root=project_root, session_id=session_id).to_dict()
 
-    _execute_command("status", project, as_json, session_id, handler)
+    _execute_command("status", project, as_json, session_id, True, handler)
 
 
 @main.command()
@@ -539,7 +552,7 @@ def history(
     last: int | None,
     include_internal: bool,
     project: Path | None,
-    session_id: str,
+    session_id: str | None,
     as_json: bool,
 ) -> None:
     """Show recent execution history recorded for the project.
@@ -566,21 +579,21 @@ def history(
             entries = entries[-last:]
         return {"entries": entries}
 
-    _execute_command("history", project, as_json, session_id, handler)
+    _execute_command("history", project, as_json, session_id, True, handler)
 
 
 @main.command()
 @project_option
 @session_option
 @json_option
-def interrupt(project: Path | None, session_id: str, as_json: bool) -> None:
+def interrupt(project: Path | None, session_id: str | None, as_json: bool) -> None:
     """Interrupt the currently running execution without stopping the kernel."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         runtime.interrupt(project_root=project_root, session_id=session_id)
         return {"interrupted": True}
 
-    _execute_command("interrupt", project, as_json, session_id, handler)
+    _execute_command("interrupt", project, as_json, session_id, True, handler)
 
 
 @main.command()
@@ -588,7 +601,7 @@ def interrupt(project: Path | None, session_id: str, as_json: bool) -> None:
 @project_option
 @session_option
 @json_option
-def reset(timeout: float, project: Path | None, session_id: str, as_json: bool) -> None:
+def reset(timeout: float, project: Path | None, session_id: str | None, as_json: bool) -> None:
     """Clear user state from the kernel while keeping the process alive."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
@@ -624,21 +637,21 @@ def reset(timeout: float, project: Path | None, session_id: str, as_json: bool) 
             )
         return payload
 
-    _execute_command("reset", project, as_json, session_id, handler)
+    _execute_command("reset", project, as_json, session_id, True, handler)
 
 
 @main.command()
 @project_option
 @session_option
 @json_option
-def stop(project: Path | None, session_id: str, as_json: bool) -> None:
+def stop(project: Path | None, session_id: str | None, as_json: bool) -> None:
     """Shut down the project's kernel and clear the saved session metadata."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         runtime.stop(project_root=project_root, session_id=session_id)
         return {"stopped": True}
 
-    _execute_command("stop", project, as_json, session_id, handler)
+    _execute_command("stop", project, as_json, session_id, True, handler)
 
 
 @main.command()
@@ -649,7 +662,7 @@ def stop(project: Path | None, session_id: str, as_json: bool) -> None:
 @json_option
 def doctor(
     project: Path | None,
-    session_id: str,
+    session_id: str | None,
     python_executable: Path | None,
     fix: bool,
     as_json: bool,
@@ -668,7 +681,7 @@ def doctor(
             auto_fix=fix,
         )
 
-    _execute_command("doctor", project, as_json, session_id, handler)
+    _execute_command("doctor", project, as_json, session_id, False, handler)
 
 
 @main.group("sessions")
@@ -686,7 +699,7 @@ def sessions_list(project: Path | None, as_json: bool) -> None:
         del session_id
         return {"sessions": runtime.list_sessions(project_root=project_root)}
 
-    _execute_command("sessions-list", project, as_json, DEFAULT_SESSION_ID, handler)
+    _execute_command("sessions-list", project, as_json, DEFAULT_SESSION_ID, False, handler)
 
 
 @sessions_group.command("delete")
@@ -700,7 +713,7 @@ def sessions_delete(session_name: str, project: Path | None, as_json: bool) -> N
         del session_id
         return runtime.delete_session(project_root=project_root, session_id=session_name)
 
-    _execute_command("sessions-delete", project, as_json, session_name, handler)
+    _execute_command("sessions-delete", project, as_json, session_name, False, handler)
 
 
 def _record_exec_history(

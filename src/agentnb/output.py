@@ -123,6 +123,22 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 if hint:
                     lines.append(f"  fix: {hint}")
             body = "\n".join(lines)
+        elif command == "sessions-list":
+            sessions = data.get("sessions", [])
+            if not sessions:
+                body = "No sessions found."
+            else:
+                lines = []
+                for session in sessions:
+                    marker = " (default)" if session.get("is_default") else ""
+                    python = session.get("python")
+                    python_text = f" using {python}" if python else ""
+                    session_label = session.get("session_id")
+                    lines.append(f"{session_label}{marker}: pid {session.get('pid')}{python_text}")
+                body = "\n".join(lines)
+        elif command == "sessions-delete":
+            stopped = " and stopped its kernel" if data.get("stopped_running_kernel") else ""
+            body = f"Deleted session {data.get('session_id')}{stopped}."
         else:
             body = json.dumps(data, ensure_ascii=True, indent=2)
 

@@ -10,6 +10,7 @@ from .errors import (
     KernelNotReadyError,
     NoKernelRunningError,
     SessionBusyError,
+    SessionNotFoundError,
 )
 from .history import HistoryStore
 from .hooks import Hooks
@@ -81,6 +82,52 @@ class KernelRuntime:
         self._backend.stop(session)
         store.clear_session()
         self._hooks.on_kernel_stop(store.project_root, session_id, session)
+
+    def list_sessions(self, project_root: Path) -> list[dict[str, object]]:
+        entries: list[dict[str, object]] = []
+        for session in SessionStore.list_sessions(project_root):
+            store = SessionStore(project_root=project_root, session_id=session.session_id)
+            store.cleanup_stale()
+            current = store.load_session()
+            if current is None:
+                continue
+            status = self._backend.status(current)
+            if not status.alive:
+                store.delete_session()
+                continue
+            entries.append(
+                {
+                    "session_id": current.session_id,
+                    "alive": status.alive,
+                    "pid": status.pid,
+                    "connection_file": status.connection_file,
+                    "started_at": status.started_at,
+                    "uptime_s": status.uptime_s,
+                    "python": status.python,
+                    "last_activity": self._last_activity(project_root, current.session_id),
+                    "is_default": current.session_id == DEFAULT_SESSION_ID,
+                }
+            )
+        return entries
+
+    def delete_session(self, project_root: Path, session_id: str) -> dict[str, object]:
+        store = SessionStore(project_root=project_root, session_id=session_id)
+        store.cleanup_stale()
+        session = store.load_session()
+        if session is None:
+            raise SessionNotFoundError(session_id)
+
+        status = self._backend.status(session)
+        stopped = status.alive
+        if status.alive:
+            self._backend.stop(session)
+
+        store.delete_session()
+        return {
+            "deleted": True,
+            "session_id": session_id,
+            "stopped_running_kernel": stopped,
+        }
 
     def execute(
         self,
@@ -181,3 +228,11 @@ class KernelRuntime:
             raise NoKernelRunningError()
 
         return store, session
+
+    def _last_activity(self, project_root: Path, session_id: str) -> str | None:
+        history = HistoryStore(project_root=project_root, session_id=session_id).read(
+            include_internal=True
+        )
+        if not history:
+            return None
+        return history[-1].ts

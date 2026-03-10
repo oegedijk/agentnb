@@ -217,6 +217,37 @@ def test_cli_start_auto_install_flag_enables_installs(
     assert start_mock.call_args.kwargs["auto_install"] is True
 
 
+def test_cli_start_passes_named_session(
+    cli_runner: CliRunner,
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    start_mock = mocker.patch("agentnb.cli.runtime.start")
+    start_mock.return_value = (
+        mocker.Mock(
+            to_dict=lambda: {
+                "alive": True,
+                "pid": 1234,
+                "connection_file": str(project_dir / ".agentnb" / "kernel-analysis.json"),
+                "started_at": "2026-03-09T00:00:00+00:00",
+                "uptime_s": 0.0,
+                "python": "python",
+            }
+        ),
+        True,
+    )
+
+    result = cli_runner.invoke(
+        main,
+        ["start", "--project", str(project_dir), "--session", "analysis", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["session_id"] == "analysis"
+    assert start_mock.call_args.kwargs["session_id"] == "analysis"
+
+
 def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(main, [])
     assert result.exit_code == 0
@@ -235,6 +266,7 @@ def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     assert "--auto-install" in result.output
     assert "doctor --fix" in result.output
     assert "--recent" in result.output
+    assert "sessions" in result.output
 
 
 def test_cli_json_response_includes_suggestions(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -312,6 +344,28 @@ def test_cli_exec_result_only_returns_selected_text(
     )
     assert exec_res.exit_code == 0
     assert exec_res.output.strip() == "2"
+
+
+def test_cli_exec_passes_named_session(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    execute_calls: list[dict[str, object]] = []
+
+    def execute_stub(**kwargs: object) -> ExecutionResult:
+        execute_calls.append(dict(kwargs))
+        return _ok_execution(result="2")
+
+    cli.runtime.execute = execute_stub  # type: ignore[method-assign]
+
+    exec_res = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--session", "analysis", "--json", "1 + 1"],
+    )
+
+    assert exec_res.exit_code == 0
+    payload = _payload(exec_res.output)
+    assert payload["session_id"] == "analysis"
+    assert execute_calls[0]["session_id"] == "analysis"
 
 
 def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -606,6 +660,78 @@ def test_cli_history_error_exec_label_is_semantic(cli_runner: CliRunner, project
 
     payload = _payload(history_res.output)
     assert payload["data"]["entries"][0]["label"] == "exec error ZeroDivisionError"
+
+
+def test_cli_sessions_list_returns_runtime_entries(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {
+            "session_id": "default",
+            "alive": True,
+            "pid": 111,
+            "python": "python",
+            "is_default": True,
+            "last_activity": "2026-03-09T00:00:00+00:00",
+        },
+        {
+            "session_id": "analysis",
+            "alive": True,
+            "pid": 222,
+            "python": "python",
+            "is_default": False,
+            "last_activity": None,
+        },
+    ]
+
+    result = cli_runner.invoke(main, ["sessions", "list", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "sessions-list"
+    assert [session["session_id"] for session in payload["data"]["sessions"]] == [
+        "default",
+        "analysis",
+    ]
+
+
+def test_cli_sessions_delete_calls_runtime_delete(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    delete_calls: list[dict[str, object]] = []
+
+    def delete_stub(**kwargs: object) -> dict[str, object]:
+        delete_calls.append(dict(kwargs))
+        return {
+            "deleted": True,
+            "session_id": "analysis",
+            "stopped_running_kernel": True,
+        }
+
+    cli.runtime.delete_session = delete_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["sessions", "delete", "analysis", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "sessions-delete"
+    assert payload["session_id"] == "analysis"
+    assert delete_calls[0]["session_id"] == "analysis"
+
+
+def test_cli_invalid_session_name_is_rejected(cli_runner: CliRunner, project_dir: Path) -> None:
+    result = cli_runner.invoke(
+        main,
+        ["status", "--project", str(project_dir), "--session", "../bad", "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert "Invalid session name" in result.output
 
 
 def test_cli_reset_is_recorded_as_visible_history_entry(

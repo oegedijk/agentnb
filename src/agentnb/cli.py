@@ -20,7 +20,7 @@ from .history import HistoryStore, kernel_execution_record, user_command_record
 from .ops import NotebookOps
 from .output import RenderOptions, render_response
 from .runtime import KernelRuntime
-from .session import DEFAULT_SESSION_ID, resolve_project_root
+from .session import DEFAULT_SESSION_ID, resolve_project_root, validate_session_id
 
 runtime = KernelRuntime()
 ops = NotebookOps(runtime)
@@ -119,6 +119,17 @@ def json_option(func: Callable[..., object]) -> Callable[..., object]:
     return click.option("--json", "as_json", is_flag=True, help="Output as JSON")(func)
 
 
+def session_option(func: Callable[..., object]) -> Callable[..., object]:
+    return click.option(
+        "--session",
+        "session_id",
+        default=DEFAULT_SESSION_ID,
+        show_default=True,
+        callback=_session_option_callback,
+        help="Session name",
+    )(func)
+
+
 def python_option(func: Callable[..., object]) -> Callable[..., object]:
     return click.option(
         "--python",
@@ -127,6 +138,14 @@ def python_option(func: Callable[..., object]) -> Callable[..., object]:
         default=None,
         help="Python interpreter for the kernel",
     )(func)
+
+
+def _session_option_callback(ctx: click.Context, param: click.Parameter, value: str) -> str:
+    del ctx, param
+    try:
+        return validate_session_id(value)
+    except AgentNBException as exc:
+        raise click.BadParameter(exc.message) from exc
 
 
 def _emit(response: CommandResponse, *, as_json: bool) -> None:
@@ -216,6 +235,15 @@ def _suggestions(command_name: str, response_status: str, data: dict[str, object
             "Run `agentnb doctor --fix --json` to attempt automatic fixes.",
             "Run `agentnb start --python /path/to/python --json` to try a specific interpreter.",
         ]
+    if command_name == "sessions-list":
+        return [
+            "Run `agentnb start --session NAME --json` to start another named session.",
+            "Run `agentnb status --session NAME --json` to inspect one session.",
+        ]
+    if command_name == "sessions-delete":
+        return [
+            "Run `agentnb sessions list --json` to confirm the remaining sessions.",
+        ]
     return []
 
 
@@ -223,10 +251,10 @@ def _execute_command(
     command_name: str,
     project: Path | None,
     as_json: bool,
+    session_id: str,
     handler: Callable[[Path, str], dict[str, object]],
 ) -> None:
     project_root = resolve_project_root(cwd=Path.cwd(), override=project)
-    session_id = DEFAULT_SESSION_ID
 
     try:
         data = handler(project_root, session_id)
@@ -266,6 +294,7 @@ def _execute_command(
 
 @main.command()
 @project_option
+@session_option
 @python_option
 @click.option(
     "--auto-install",
@@ -275,6 +304,7 @@ def _execute_command(
 @json_option
 def start(
     project: Path | None,
+    session_id: str,
     python_executable: Path | None,
     auto_install: bool,
     as_json: bool,
@@ -298,7 +328,7 @@ def start(
         payload["auto_install"] = auto_install
         return payload
 
-    _execute_command("start", project, as_json, handler)
+    _execute_command("start", project, as_json, session_id, handler)
 
 
 @main.command("exec")
@@ -309,6 +339,7 @@ def start(
 @click.option("--stderr-only", "output_selector", flag_value="stderr")
 @click.option("--result-only", "output_selector", flag_value="result")
 @project_option
+@session_option
 @json_option
 def exec_cmd(
     code: str | None,
@@ -316,6 +347,7 @@ def exec_cmd(
     timeout: float,
     output_selector: str | None,
     project: Path | None,
+    session_id: str,
     as_json: bool,
 ) -> None:
     """Execute code in the live kernel.
@@ -344,7 +376,7 @@ def exec_cmd(
         response = error_response(
             command="exec",
             project=str(project_root),
-            session_id=DEFAULT_SESSION_ID,
+            session_id=session_id,
             code=exc.code,
             message=exc.message,
             ename=exc.ename,
@@ -394,7 +426,7 @@ def exec_cmd(
             )
         return payload
 
-    _execute_command("exec", project, as_json, handler)
+    _execute_command("exec", project, as_json, session_id, handler)
 
 
 @main.command("vars")
@@ -407,9 +439,11 @@ def exec_cmd(
     help="Show only the most recently created matching variables",
 )
 @project_option
+@session_option
 @json_option
 def vars_cmd(
     project: Path | None,
+    session_id: str,
     as_json: bool,
     include_types: bool,
     match_text: str | None,
@@ -434,14 +468,15 @@ def vars_cmd(
             values = [{"name": item["name"], "repr": item["repr"]} for item in values]
         return {"vars": values}
 
-    _execute_command("vars", project, as_json, handler)
+    _execute_command("vars", project, as_json, session_id, handler)
 
 
 @main.command("inspect")
 @click.argument("name")
 @project_option
+@session_option
 @json_option
-def inspect_cmd(name: str, project: Path | None, as_json: bool) -> None:
+def inspect_cmd(name: str, project: Path | None, session_id: str, as_json: bool) -> None:
     """Inspect one variable in the kernel namespace.
 
     Dataframe-like values get a compact tabular preview. Lists, tuples, sets,
@@ -452,14 +487,15 @@ def inspect_cmd(name: str, project: Path | None, as_json: bool) -> None:
         payload = ops.inspect_var(project_root=project_root, session_id=session_id, name=name)
         return {"inspect": compact_inspect_payload(payload)}
 
-    _execute_command("inspect", project, as_json, handler)
+    _execute_command("inspect", project, as_json, session_id, handler)
 
 
 @main.command("reload")
 @click.argument("module", required=False)
 @project_option
+@session_option
 @json_option
-def reload_cmd(module: str | None, project: Path | None, as_json: bool) -> None:
+def reload_cmd(module: str | None, project: Path | None, session_id: str, as_json: bool) -> None:
     """Reload project-local modules in the live kernel.
 
     Pass a module name to reload one imported project-local module. Omit the
@@ -473,19 +509,20 @@ def reload_cmd(module: str | None, project: Path | None, as_json: bool) -> None:
         )
         return payload
 
-    _execute_command("reload", project, as_json, handler)
+    _execute_command("reload", project, as_json, session_id, handler)
 
 
 @main.command()
 @project_option
+@session_option
 @json_option
-def status(project: Path | None, as_json: bool) -> None:
+def status(project: Path | None, session_id: str, as_json: bool) -> None:
     """Check whether the project's kernel is currently running."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         return runtime.status(project_root=project_root, session_id=session_id).to_dict()
 
-    _execute_command("status", project, as_json, handler)
+    _execute_command("status", project, as_json, session_id, handler)
 
 
 @main.command()
@@ -494,6 +531,7 @@ def status(project: Path | None, as_json: bool) -> None:
 @click.option("--last", type=click.IntRange(min=1), default=None, help="Show the last N entries")
 @click.option("--all", "include_internal", is_flag=True, help="Include internal kernel executions")
 @project_option
+@session_option
 @json_option
 def history(
     errors: bool,
@@ -501,6 +539,7 @@ def history(
     last: int | None,
     include_internal: bool,
     project: Path | None,
+    session_id: str,
     as_json: bool,
 ) -> None:
     """Show recent execution history recorded for the project.
@@ -527,27 +566,29 @@ def history(
             entries = entries[-last:]
         return {"entries": entries}
 
-    _execute_command("history", project, as_json, handler)
+    _execute_command("history", project, as_json, session_id, handler)
 
 
 @main.command()
 @project_option
+@session_option
 @json_option
-def interrupt(project: Path | None, as_json: bool) -> None:
+def interrupt(project: Path | None, session_id: str, as_json: bool) -> None:
     """Interrupt the currently running execution without stopping the kernel."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         runtime.interrupt(project_root=project_root, session_id=session_id)
         return {"interrupted": True}
 
-    _execute_command("interrupt", project, as_json, handler)
+    _execute_command("interrupt", project, as_json, session_id, handler)
 
 
 @main.command()
 @click.option("--timeout", default=10.0, show_default=True, type=float)
 @project_option
+@session_option
 @json_option
-def reset(timeout: float, project: Path | None, as_json: bool) -> None:
+def reset(timeout: float, project: Path | None, session_id: str, as_json: bool) -> None:
     """Clear user state from the kernel while keeping the process alive."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
@@ -583,29 +624,32 @@ def reset(timeout: float, project: Path | None, as_json: bool) -> None:
             )
         return payload
 
-    _execute_command("reset", project, as_json, handler)
+    _execute_command("reset", project, as_json, session_id, handler)
 
 
 @main.command()
 @project_option
+@session_option
 @json_option
-def stop(project: Path | None, as_json: bool) -> None:
+def stop(project: Path | None, session_id: str, as_json: bool) -> None:
     """Shut down the project's kernel and clear the saved session metadata."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         runtime.stop(project_root=project_root, session_id=session_id)
         return {"stopped": True}
 
-    _execute_command("stop", project, as_json, handler)
+    _execute_command("stop", project, as_json, session_id, handler)
 
 
 @main.command()
 @project_option
+@session_option
 @python_option
 @click.option("--fix", is_flag=True, help="Attempt to auto-fix issues when possible")
 @json_option
 def doctor(
     project: Path | None,
+    session_id: str,
     python_executable: Path | None,
     fix: bool,
     as_json: bool,
@@ -624,7 +668,39 @@ def doctor(
             auto_fix=fix,
         )
 
-    _execute_command("doctor", project, as_json, handler)
+    _execute_command("doctor", project, as_json, session_id, handler)
+
+
+@main.group("sessions")
+def sessions_group() -> None:
+    """Inspect and manage named sessions for the current project."""
+
+
+@sessions_group.command("list")
+@project_option
+@json_option
+def sessions_list(project: Path | None, as_json: bool) -> None:
+    """List live sessions recorded for the current project."""
+
+    def handler(project_root: Path, session_id: str) -> dict[str, object]:
+        del session_id
+        return {"sessions": runtime.list_sessions(project_root=project_root)}
+
+    _execute_command("sessions-list", project, as_json, DEFAULT_SESSION_ID, handler)
+
+
+@sessions_group.command("delete")
+@click.argument("session_name", callback=_session_option_callback)
+@project_option
+@json_option
+def sessions_delete(session_name: str, project: Path | None, as_json: bool) -> None:
+    """Delete one named session and stop its kernel if it is still running."""
+
+    def handler(project_root: Path, session_id: str) -> dict[str, object]:
+        del session_id
+        return runtime.delete_session(project_root=project_root, session_id=session_name)
+
+    _execute_command("sessions-delete", project, as_json, session_name, handler)
 
 
 def _record_exec_history(

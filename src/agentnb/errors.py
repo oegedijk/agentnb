@@ -54,6 +54,14 @@ class InvalidInputError(AgentNBException):
         super().__init__(code="INVALID_INPUT", message=message)
 
 
+class SessionNotFoundError(AgentNBException):
+    def __init__(self, session_id: str) -> None:
+        super().__init__(
+            code="SESSION_NOT_FOUND",
+            message=f"Session not found: {session_id}",
+        )
+
+
 class ExecutionTimedOutError(AgentNBException):
     def __init__(self, timeout_s: float) -> None:
         super().__init__(

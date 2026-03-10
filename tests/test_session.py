@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from agentnb.session import SessionInfo, SessionStore, resolve_project_root
+from agentnb.errors import InvalidInputError
+from agentnb.session import SessionInfo, SessionStore, resolve_project_root, validate_session_id
 
 
 @pytest.mark.parametrize("use_override", [False, True])
@@ -131,3 +132,39 @@ def test_session_store_loads_legacy_file_and_migrates(project_dir: Path) -> None
     assert loaded.session_id == "default"
     assert store.session_file.exists()
     assert not store.legacy_session_file.exists()
+
+
+def test_validate_session_id_rejects_pathlike_names() -> None:
+    with pytest.raises(InvalidInputError):
+        validate_session_id("../danger")
+
+
+def test_session_store_lists_multiple_sessions(project_dir: Path) -> None:
+    primary = SessionStore(project_dir, session_id="default")
+    secondary = SessionStore(project_dir, session_id="analysis")
+    primary.ensure_state_dir()
+
+    primary.save_session(
+        SessionInfo(
+            session_id="default",
+            pid=111,
+            connection_file=str(primary.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    secondary.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=222,
+            connection_file=str(secondary.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+
+    sessions = SessionStore.list_sessions(project_dir)
+
+    assert [session.session_id for session in sessions] == ["default", "analysis"]

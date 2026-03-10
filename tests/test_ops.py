@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ from agentnb.errors import AgentNBException
 from agentnb.ops import NotebookOps
 from agentnb.runtime import KernelRuntime
 from tests.conftest import TestLocalIPythonBackend
-from tests.helpers import cleanup_integration_project, create_project_dir
+from tests.helpers import create_project_dir, reset_integration_kernel
 
 pytest.importorskip("jupyter_client")
 pytest.importorskip("ipykernel")
@@ -33,15 +34,15 @@ def started_runtime_module(
     try:
         yield integration_runtime, integration_project_dir
     finally:
-        if integration_runtime.status(integration_project_dir).alive:
+        with suppress(Exception):
             integration_runtime.stop(integration_project_dir)
 
 
 @pytest.fixture(autouse=True)
 def clean_started_runtime(started_runtime_module: tuple[KernelRuntime, Path]) -> None:
-    yield
     runtime, project_dir = started_runtime_module
-    cleanup_integration_project(runtime, project_dir)
+    reset_integration_kernel(runtime, project_dir, clear_project_modules=True)
+    yield
 
 
 def _write_module(project_dir: Path, name: str, body: str) -> None:
@@ -327,6 +328,8 @@ def test_ops_sqlite_rows_get_structural_previews(
 ) -> None:
     runtime, project_dir = started_runtime_module
     db_path = project_dir / "rows.db"
+    if db_path.exists():
+        db_path.unlink()
     runtime.execute(
         project_root=project_dir,
         timeout_s=5,

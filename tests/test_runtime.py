@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -12,7 +13,7 @@ from agentnb.history import HistoryStore
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, SessionStore
 from tests.conftest import TestLocalIPythonBackend
-from tests.helpers import cleanup_integration_project, create_project_dir
+from tests.helpers import create_project_dir, reset_integration_kernel
 
 pytest.importorskip("jupyter_client")
 pytest.importorskip("ipykernel")
@@ -37,7 +38,7 @@ def started_runtime_module(
     try:
         yield integration_runtime, integration_project_dir
     finally:
-        if integration_runtime.status(integration_project_dir).alive:
+        with suppress(Exception):
             integration_runtime.stop(integration_project_dir)
 
 
@@ -46,9 +47,8 @@ def started_runtime(
     started_runtime_module: tuple[KernelRuntime, Path],
 ) -> tuple[KernelRuntime, Path]:
     runtime, project_dir = started_runtime_module
-    cleanup_integration_project(runtime, project_dir)
+    reset_integration_kernel(runtime, project_dir)
     yield started_runtime_module
-    cleanup_integration_project(runtime, project_dir)
 
 
 def test_runtime_start_status_stop(runtime: KernelRuntime, project_dir: Path) -> None:

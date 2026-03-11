@@ -20,6 +20,7 @@ Status as of March 11, 2026:
 - completed: persisted execution records with `execution_id`
 - completed: background execution with `runs list|show|wait|cancel`
 - remaining: streaming execution on top of the same execution model
+- next up: real-time event delivery without changing `execution_id` or the persisted run schema
 
 ### Goals
 
@@ -51,7 +52,7 @@ Status as of March 11, 2026:
 2. Completed: add session discovery/deletion commands and ambiguity handling when multiple live sessions exist.
 3. Completed: add `exec --ensure-started` and `status --wait`.
 4. Completed: land the execution event schema and persisted execution records.
-5. In progress: build background and streaming execution on top of that model.
+5. Completed for background execution; remaining work is streaming execution on top of the same model.
 
 ### API/Contract Notes
 

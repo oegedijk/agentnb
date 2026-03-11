@@ -15,6 +15,12 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 
 ## v0.2 - Session and Execution Ergonomics
 
+Status as of March 11, 2026:
+- completed: named sessions, ambiguity handling, `exec --ensure-started`, `status --wait`
+- completed: persisted execution records with `execution_id`
+- completed: background execution with `runs list|show|wait|cancel`
+- remaining: streaming execution on top of the same execution model
+
 ### Goals
 
 - Support multiple sessions per project without breaking default behavior.
@@ -41,11 +47,11 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 
 ### Delivery Order
 
-1. Expose the existing session model in the CLI with `--session` while preserving `default`.
-2. Add session discovery/deletion commands and ambiguity handling when multiple live sessions exist.
-3. Add `exec --ensure-started` and `status --wait`.
-4. Land the execution event schema and persisted execution records.
-5. Build background and streaming execution on top of that model.
+1. Completed: expose the existing session model in the CLI with `--session` while preserving `default`.
+2. Completed: add session discovery/deletion commands and ambiguity handling when multiple live sessions exist.
+3. Completed: add `exec --ensure-started` and `status --wait`.
+4. Completed: land the execution event schema and persisted execution records.
+5. In progress: build background and streaming execution on top of that model.
 
 ### API/Contract Notes
 

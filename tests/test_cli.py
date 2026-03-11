@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from pytest_mock import MockerFixture
 
 from agentnb.cli import main
-from agentnb.contracts import ExecutionResult
+from agentnb.contracts import ExecutionEvent, ExecutionResult
 from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
 
@@ -122,6 +122,162 @@ def test_cli_exec_returns_top_level_error_when_execution_fails(
     assert len(payload["error"]["traceback"]) <= 6
 
 
+def test_cli_exec_stream_json_emits_start_events_and_final(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.resolve_session_id = lambda **_: "default"  # type: ignore[method-assign]
+
+    def execute_code_stub(**kwargs: object) -> ManagedExecution:
+        sink = kwargs["event_sink"]
+        assert sink is not None
+        sink.started(execution_id="run-123", session_id="default")
+        sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
+        sink.accept(ExecutionEvent(kind="display", content="2"))
+        return ManagedExecution(
+            record=ExecutionRecord(
+                execution_id="run-123",
+                ts="2026-03-11T00:00:00+00:00",
+                session_id="default",
+                command_type="exec",
+                status="ok",
+                duration_ms=5,
+                code="print('hello')\n1 + 1",
+                stdout="hello\n",
+                result="2",
+                events=[
+                    ExecutionEvent(kind="stdout", content="hello\n"),
+                    ExecutionEvent(kind="display", content="2"),
+                ],
+            )
+        )
+
+    cli.executions.execute_code = execute_code_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--stream", "--json", "print('hello')\n1 + 1"],
+    )
+
+    assert result.exit_code == 0
+    frames = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    assert frames[0] == {"type": "start", "execution_id": "run-123", "session_id": "default"}
+    assert frames[1]["type"] == "event"
+    assert frames[1]["event"]["kind"] == "stdout"
+    assert frames[2]["event"]["kind"] == "display"
+    assert frames[-1]["type"] == "final"
+    assert frames[-1]["response"]["status"] == "ok"
+    assert frames[-1]["response"]["data"]["execution_id"] == "run-123"
+
+
+def test_cli_exec_stream_human_prints_live_output(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.resolve_session_id = lambda **_: "default"  # type: ignore[method-assign]
+
+    def execute_code_stub(**kwargs: object) -> ManagedExecution:
+        sink = kwargs["event_sink"]
+        assert sink is not None
+        sink.started(execution_id="run-456", session_id="default")
+        sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
+        sink.accept(ExecutionEvent(kind="result", content="2"))
+        return ManagedExecution(
+            record=ExecutionRecord(
+                execution_id="run-456",
+                ts="2026-03-11T00:00:00+00:00",
+                session_id="default",
+                command_type="exec",
+                status="ok",
+                duration_ms=5,
+                code="print('hello')\n1 + 1",
+                stdout="hello\n",
+                result="2",
+                events=[
+                    ExecutionEvent(kind="stdout", content="hello\n"),
+                    ExecutionEvent(kind="result", content="2"),
+                ],
+            )
+        )
+
+    cli.executions.execute_code = execute_code_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        [
+            "--no-suggestions",
+            "exec",
+            "--project",
+            str(project_dir),
+            "--stream",
+            "print('hello')\n1 + 1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "hello\n2\n"
+
+
+def test_cli_exec_stream_json_returns_error_final_frame_on_execution_failure(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.resolve_session_id = lambda **_: "default"  # type: ignore[method-assign]
+
+    def execute_code_stub(**kwargs: object) -> ManagedExecution:
+        sink = kwargs["event_sink"]
+        assert sink is not None
+        sink.started(execution_id="run-789", session_id="default")
+        sink.accept(
+            ExecutionEvent(
+                kind="error",
+                content="division by zero",
+                metadata={"ename": "ZeroDivisionError", "traceback": ["tb"]},
+            )
+        )
+        return ManagedExecution(
+            record=ExecutionRecord(
+                execution_id="run-789",
+                ts="2026-03-11T00:00:00+00:00",
+                session_id="default",
+                command_type="exec",
+                status="error",
+                duration_ms=5,
+                code="1 / 0",
+                ename="ZeroDivisionError",
+                evalue="division by zero",
+                traceback=["tb"],
+                events=[
+                    ExecutionEvent(
+                        kind="error",
+                        content="division by zero",
+                        metadata={"ename": "ZeroDivisionError", "traceback": ["tb"]},
+                    )
+                ],
+            )
+        )
+
+    cli.executions.execute_code = execute_code_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--stream", "--json", "1 / 0"],
+    )
+
+    assert result.exit_code == 1
+    frames = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    assert frames[-1]["type"] == "final"
+    assert frames[-1]["response"]["status"] == "error"
+    assert frames[-1]["response"]["error"]["code"] == "EXECUTION_ERROR"
+    assert frames[-1]["response"]["data"]["status"] == "error"
+
+
 def test_cli_returns_no_kernel_error(cli_runner: CliRunner, project_dir: Path) -> None:
     result = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1+1"])
     assert result.exit_code == 1
@@ -217,6 +373,58 @@ def test_cli_status_wait_uses_runtime_wait_for_ready(
     assert payload["data"]["alive"] is True
     assert payload["data"]["waited"] is True
     assert wait_calls[0]["timeout_s"] == 5.0
+
+
+def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    wait_calls: list[dict[str, object]] = []
+
+    def wait_stub(**kwargs: object) -> object:
+        wait_calls.append(dict(kwargs))
+        return type(
+            "Status",
+            (),
+            {"to_dict": lambda self: {"alive": True, "pid": 321, "busy": False}},
+        )()
+
+    cli.runtime.wait_for_idle = wait_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["status", "--project", str(project_dir), "--wait-idle", "--timeout", "5", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["alive"] is True
+    assert payload["data"]["waited"] is True
+    assert payload["data"]["waited_for"] == "idle"
+    assert wait_calls[0]["timeout_s"] == 5.0
+
+
+def test_cli_quiet_suppresses_status_body_and_suggestions(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.status = lambda **_: type(  # type: ignore[method-assign]
+        "Status",
+        (),
+        {"to_dict": lambda self: {"alive": True, "pid": 123}},
+    )()
+
+    result = cli_runner.invoke(
+        main,
+        ["status", "--project", str(project_dir), "--quiet"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == ""
 
 
 def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -938,6 +1146,36 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
     assert payload["data"]["run"]["execution_id"] == "run-1"
 
 
+def test_cli_runs_show_human_clarifies_snapshot_for_running_run(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "ts": "2026-03-10T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "running",
+        "duration_ms": 12,
+        "stdout": "tick 1\ntick 2\n",
+        "stderr": "",
+        "result": None,
+        "events": [{"kind": "stdout", "content": "tick 1\n", "metadata": {}}],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "run-1", "--project", str(project_dir)],
+    )
+
+    assert result.exit_code == 0
+    assert "Run run-1 [running] exec on session default." in result.output
+    assert (
+        "snapshot: persisted state only; use `agentnb runs follow` for live events" in result.output
+    )
+
+
 def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
@@ -958,13 +1196,56 @@ def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir:
     assert payload["data"]["run"]["execution_id"] == "run-1"
 
 
+def test_cli_runs_follow_stream_json_emits_events_and_final(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    def follow_stub(**kwargs: object) -> dict[str, object]:
+        sink = kwargs["event_sink"]
+        assert sink is not None
+        sink.started(execution_id="run-1", session_id="default")
+        sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
+        sink.accept(ExecutionEvent(kind="result", content="2"))
+        return {
+            "execution_id": "run-1",
+            "session_id": "default",
+            "status": "ok",
+            "result": "2",
+            "events": [
+                {"kind": "stdout", "content": "hello\n", "metadata": {}},
+                {"kind": "result", "content": "2", "metadata": {}},
+            ],
+        }
+
+    cli.executions.follow_run = follow_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "follow", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    frames = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    assert frames[0] == {"type": "start", "execution_id": "run-1", "session_id": "default"}
+    assert frames[1]["event"]["kind"] == "stdout"
+    assert frames[2]["event"]["kind"] == "result"
+    assert frames[-1]["type"] == "final"
+    assert frames[-1]["response"]["command"] == "runs-follow"
+    assert frames[-1]["response"]["data"]["run"]["execution_id"] == "run-1"
+
+
 def test_cli_runs_cancel_requests_interrupt(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
     cli.executions.cancel_run = lambda **_: {  # type: ignore[method-assign]
         "execution_id": "run-1",
+        "session_id": "analysis",
         "cancel_requested": True,
-        "status": "running",
+        "status": "error",
+        "run_status": "error",
+        "session_outcome": "preserved",
     }
 
     result = cli_runner.invoke(
@@ -976,6 +1257,7 @@ def test_cli_runs_cancel_requests_interrupt(cli_runner: CliRunner, project_dir: 
     payload = _payload(result.output)
     assert payload["command"] == "runs-cancel"
     assert payload["data"]["cancel_requested"] is True
+    assert payload["data"]["session_outcome"] == "preserved"
 
 
 def test_cli_module_entrypoint_invokes_main(project_dir: Path) -> None:

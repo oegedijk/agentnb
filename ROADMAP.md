@@ -19,8 +19,10 @@ Status as of March 11, 2026:
 - completed: named sessions, ambiguity handling, `exec --ensure-started`, `status --wait`
 - completed: persisted execution records with `execution_id`
 - completed: background execution with `runs list|show|wait|cancel`
-- remaining: streaming execution on top of the same execution model
-- next up: real-time event delivery without changing `execution_id` or the persisted run schema
+- completed: real-time streaming execution on top of the same execution model
+- completed: foreground interrupt reliability, active-execution `status`, consistent session `last_activity`, `status --wait-idle`, and live `runs follow`
+- completed: explicit cancel semantics plus a clear snapshot/live split between `runs show` and `runs follow`
+- v0.2 status: complete
 
 ### Goals
 
@@ -40,11 +42,20 @@ Status as of March 11, 2026:
 - First-use execution ergonomics:
   - `agentnb exec --ensure-started` to auto-start a missing kernel for the default workflow
   - `status --wait [--timeout]` to block until a kernel is ready for execution
+  - `status --wait-idle [--timeout]` or equivalent to block until a session is safe for the next command
   - `--session` aliases that are short and consistent across commands
 - Execution event model:
   - typed events for `stdout`, `stderr`, `result`, `display`, `error`, `status`
   - stable `execution_id` across foreground, streaming, and background execution paths
   - internal event persistence to support replay, export, and artifact capture later
+- Execution control stabilization:
+  - foreground `interrupt` must reliably reach a running execution
+  - `status` must accurately report live-versus-not-ready state while commands are in flight
+  - session listings should reflect recent execution activity consistently
+  - completed: cancellation reports whether the session was preserved or stopped
+- Run observation ergonomics:
+  - completed: live follow for background runs on top of the persisted event model
+  - completed: `runs show` is a snapshot view and `runs follow` is the live observation path
 
 ### Delivery Order
 
@@ -52,7 +63,9 @@ Status as of March 11, 2026:
 2. Completed: add session discovery/deletion commands and ambiguity handling when multiple live sessions exist.
 3. Completed: add `exec --ensure-started` and `status --wait`.
 4. Completed: land the execution event schema and persisted execution records.
-5. Completed for background execution; remaining work is streaming execution on top of the same model.
+5. Completed: land real-time streaming execution on top of the same execution model.
+6. Completed: clarify cancel semantics and session lifecycle after cancellation.
+7. Completed: tighten `runs show` versus `runs follow` so snapshot and live observation stay distinct.
 
 ### API/Contract Notes
 
@@ -60,6 +73,7 @@ Status as of March 11, 2026:
 - Extend the event schema to cover sync, streaming, and replay modes without changing event meaning by mode.
 - Support top-level output-mode defaults so agents do not need to repeat `--json` on every command.
 - Keep existing `default` session behavior unchanged.
+- Control-plane commands need stable semantics during active execution, especially `status`, `interrupt`, and `cancel`.
 
 ## v0.3 - Reproducibility and Debug Workflows
 
@@ -183,16 +197,17 @@ Status as of March 11, 2026:
   - troubleshooting matrix by platform
   - “agent integration” examples for CLI-first tools
   - examples optimized for machine consumers (`jq`, tool wrappers, low-noise output)
+  - maintain an agent-focused smoke-scenario catalog for deep iterative workflows
 - Contract hardening:
   - schema regression tests
   - explicit deprecation policy for JSON fields
 - Performance:
   - benchmark startup latency, round-trip execution latency, and memory overhead
+- Output/noise control:
+  - keep machine-oriented modes predictable during streaming and control-plane errors
 
 ## Near-Term Priority Queue
 
-1. Multi-session support (`--session`, list/attach/delete)
-2. First-use session ergonomics (`exec --ensure-started`, `status --wait`)
-3. Execution record model (`execution_id`, persisted events, stable event schema)
-4. Background execution IDs + cancel/wait commands
-5. Replay/export (history -> notebook/transcript)
+1. Replay/export (history -> notebook/transcript)
+2. Snapshot workflows (`snapshot create|list|restore`)
+3. Verification/replay workflows (`replay`, `verify`)

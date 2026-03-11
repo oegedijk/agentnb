@@ -124,6 +124,11 @@ class SessionStore:
     def has_connection_file(self) -> bool:
         return self.connection_file.exists()
 
+    def has_active_command_lock(self) -> bool:
+        if not self.command_lock_file.exists():
+            return False
+        return not self._clear_stale_command_lock()
+
     def cleanup_stale(self) -> bool:
         session = self.load_session()
         if session is None:

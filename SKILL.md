@@ -81,13 +81,14 @@ Notes:
 Use this order for normal work:
 
 1. `agentnb exec --ensure-started ... --json` for short inline snippets
-2. `agentnb status --wait --json` if the target session is still starting
+2. `agentnb status --wait-idle --json` when you need to know the session is safe for the next command
 3. `agentnb exec --file ... --json` or pipe code through stdin for multiline work
 4. `agentnb vars --json` or `agentnb inspect NAME --json`
 5. `agentnb reload --json` after editing project-local source files
 6. `agentnb reload myapp.models --json` when you want to target one imported module
 7. `agentnb history --json` when you need the semantic transcript
 8. `agentnb runs list --json` when you need durable exec/reset records
+9. `agentnb runs follow EXECUTION_ID --json` when you need live background progress
 
 Examples:
 
@@ -122,8 +123,9 @@ For background work:
 
 ```bash
 agentnb exec --background --json "long_running_call()"
-agentnb runs wait EXECUTION_ID --json
 agentnb runs show EXECUTION_ID --json
+agentnb runs follow EXECUTION_ID --json
+agentnb runs wait EXECUTION_ID --json
 agentnb runs cancel EXECUTION_ID --json
 ```
 
@@ -160,7 +162,8 @@ Use `runs show EXECUTION_ID --json` when you need the exact stored record for on
 - Use `--session NAME` explicitly once multiple live sessions exist; do not rely on guessing.
 - Use `sessions list` to discover live session names before targeting one.
 - Use `runs` for durable execution lookup, background control, and exact `execution_id` queries.
-- `exec --background` returns immediately; follow it with `runs wait`, `runs show`, or `runs cancel`.
+- `exec --background` returns immediately; use `runs show` for the latest snapshot, `runs follow` for live progress, `runs wait` for the final snapshot, and `runs cancel` to stop the run.
+- Use `status --wait-idle` when the important question is "can I safely send the next command yet?"
 - Prefer a final expression over `print(...)` when you want a compact return value.
 - Use `reload` after editing importable project modules instead of assuming live definitions updated automatically.
 - Bare `reload` reloads all imported project-local modules. `reload MODULE` targets one imported project-local module.

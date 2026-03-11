@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from agentnb.contracts import ExecutionEvent, ExecutionResult
+from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink
 from agentnb.errors import KernelNotReadyError, RunWaitTimedOutError
 from agentnb.execution import ExecutionRecord, ExecutionService, ExecutionStore
 from agentnb.runtime import KernelRuntime
@@ -94,6 +94,57 @@ def test_execution_service_persists_exec_runs(project_dir: Path) -> None:
     assert stored[0].execution_id == managed.record.execution_id
     assert stored[0].command_type == "exec"
     assert stored[0].result == "2"
+
+
+def test_execution_service_stream_sink_reuses_execution_id(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+
+    class Sink(ExecutionSink):
+        def __init__(self) -> None:
+            self.started_execution_id: str | None = None
+            self.started_session_id: str | None = None
+            self.events: list[ExecutionEvent] = []
+
+        def started(self, *, execution_id: str, session_id: str) -> None:
+            self.started_execution_id = execution_id
+            self.started_session_id = session_id
+
+        def accept(self, event: ExecutionEvent) -> None:
+            self.events.append(event)
+
+    def execute_stub(**kwargs: object) -> ExecutionResult:
+        before_backend = kwargs["before_backend"]
+        sink = kwargs["event_sink"]
+        assert callable(before_backend)
+        assert isinstance(sink, Sink)
+        before_backend()
+        sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
+        return ExecutionResult(
+            status="ok",
+            stdout="hello\n",
+            duration_ms=5,
+            events=[ExecutionEvent(kind="stdout", content="hello\n")],
+        )
+
+    runtime.execute = Mock(side_effect=execute_stub)  # type: ignore[method-assign]
+    service = ExecutionService(runtime)
+    sink = Sink()
+
+    managed = service.execute_code(
+        project_root=project_dir,
+        session_id="default",
+        code="print('hello')",
+        timeout_s=5,
+        event_sink=sink,
+    )
+
+    stored = ExecutionStore(project_dir).get(managed.record.execution_id)
+    assert sink.started_execution_id == managed.record.execution_id
+    assert sink.started_session_id == "default"
+    assert sink.events == [ExecutionEvent(kind="stdout", content="hello\n")]
+    assert stored is not None
+    assert stored.execution_id == managed.record.execution_id
+    assert stored.stdout == "hello\n"
 
 
 def test_execution_service_history_projection_uses_execution_ids(project_dir: Path) -> None:
@@ -189,6 +240,60 @@ def test_execution_service_wait_for_run_times_out(project_dir: Path, mocker) -> 
         )
 
 
+def test_execution_service_follow_run_replays_incremental_events(project_dir: Path) -> None:
+    class Sink(ExecutionSink):
+        def __init__(self) -> None:
+            self.started_calls: list[tuple[str, str]] = []
+            self.events: list[ExecutionEvent] = []
+
+        def started(self, *, execution_id: str, session_id: str) -> None:
+            self.started_calls.append((execution_id, session_id))
+
+        def accept(self, event: ExecutionEvent) -> None:
+            self.events.append(event)
+
+    service = ExecutionService(KernelRuntime())
+    sink = Sink()
+    running = ExecutionRecord(
+        execution_id="run-1",
+        ts="2026-03-10T00:00:00+00:00",
+        session_id="default",
+        command_type="exec",
+        status="running",
+        duration_ms=0,
+        events=[ExecutionEvent(kind="stdout", content="hello\n")],
+    )
+    finished = ExecutionRecord(
+        execution_id="run-1",
+        ts="2026-03-10T00:00:01+00:00",
+        session_id="default",
+        command_type="exec",
+        status="ok",
+        duration_ms=10,
+        result="2",
+        events=[
+            ExecutionEvent(kind="stdout", content="hello\n"),
+            ExecutionEvent(kind="result", content="2"),
+        ],
+    )
+    service._load_run = Mock(side_effect=[running, finished])  # type: ignore[method-assign]
+
+    run = service.follow_run(
+        project_root=project_dir,
+        execution_id="run-1",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+        event_sink=sink,
+    )
+
+    assert run["status"] == "ok"
+    assert sink.started_calls == [("run-1", "default")]
+    assert sink.events == [
+        ExecutionEvent(kind="stdout", content="hello\n"),
+        ExecutionEvent(kind="result", content="2"),
+    ]
+
+
 def test_execution_service_cancel_run_interrupts_session(project_dir: Path, mocker) -> None:
     mocker.patch("agentnb.execution.pid_exists", return_value=True)
     kill = mocker.patch("agentnb.execution.os.kill")
@@ -211,6 +316,8 @@ def test_execution_service_cancel_run_interrupts_session(project_dir: Path, mock
 
     assert payload["cancel_requested"] is True
     assert payload["status"] == "error"
+    assert payload["session_id"] == "analysis"
+    assert payload["session_outcome"] == "preserved"
     runtime.interrupt.assert_called_once_with(project_root=project_dir, session_id="analysis")
     kill.assert_called_once()
     assert stored is not None
@@ -244,6 +351,8 @@ def test_execution_service_cancel_run_stops_starting_session(project_dir: Path, 
 
     assert payload["cancel_requested"] is True
     assert payload["status"] == "error"
+    assert payload["session_id"] == "analysis"
+    assert payload["session_outcome"] == "stopped"
     runtime.stop_starting.assert_called_once_with(project_root=project_dir, session_id="analysis")
     kill.assert_called_once()
     assert stored is not None

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .contracts import ExecutionEvent, ExecutionResult, utc_now_iso
+from .contracts import ExecutionEvent, ExecutionResult, ExecutionSink, utc_now_iso
 from .errors import (
     AgentNBException,
     KernelNotReadyError,
@@ -201,6 +201,73 @@ class ManagedExecution:
     started_new_session: bool = False
 
 
+@dataclass(slots=True)
+class ExecutionRun:
+    store: ExecutionStore
+    record: ExecutionRecord
+    started: bool = False
+
+    def start(self, sink: ExecutionSink | None = None) -> None:
+        if self.started:
+            return
+        self.store.append(self.record)
+        self.started = True
+        if sink is not None:
+            sink.started(
+                execution_id=self.record.execution_id,
+                session_id=self.record.session_id,
+            )
+
+    def replace(self, **changes: object) -> ExecutionRecord:
+        updated = replace(self.record, **changes)
+        self.store.append(updated)
+        self.record = updated
+        return updated
+
+    def result_record(self, execution: ExecutionResult) -> ExecutionRecord:
+        return replace(
+            self.record,
+            status=execution.status,
+            duration_ms=execution.duration_ms,
+            stdout=execution.stdout,
+            stderr=execution.stderr,
+            result=execution.result,
+            execution_count=execution.execution_count,
+            ename=execution.ename,
+            evalue=execution.evalue,
+            traceback=execution.traceback,
+            events=execution.events,
+        )
+
+    def finalize_result(self, execution: ExecutionResult) -> ExecutionRecord:
+        updated = self.result_record(execution)
+        self.store.append(updated)
+        self.record = updated
+        return updated
+
+    def error_record(self, error: Exception) -> ExecutionRecord:
+        ename = type(error).__name__
+        evalue = str(error)
+        traceback = None
+        if isinstance(error, AgentNBException):
+            ename = error.ename or ename
+            evalue = error.evalue or error.message
+            traceback = error.traceback
+        return replace(
+            self.record,
+            status="error",
+            ename=ename,
+            evalue=evalue,
+            traceback=traceback,
+        )
+
+    def finalize_error(self, error: Exception) -> ExecutionRecord:
+        updated = self.error_record(error)
+        self.store.append(updated)
+        self.record = updated
+        return updated
+
+
 class ExecutionService:
     def __init__(self, runtime: KernelRuntime) -> None:
         self.runtime = runtime
@@ -213,6 +280,7 @@ class ExecutionService:
         code: str,
         timeout_s: float,
         ensure_started: bool = False,
+        event_sink: ExecutionSink | None = None,
     ) -> ManagedExecution:
         started_new_session = False
         if ensure_started:
@@ -221,23 +289,27 @@ class ExecutionService:
                 session_id=session_id,
             )
 
+        run = self._new_run(
+            project_root=project_root,
+            session_id=session_id,
+            command_type="exec",
+            code=code,
+            worker_pid=os.getpid(),
+        )
+
         try:
             execution = self.runtime.execute(
                 project_root=project_root,
                 session_id=session_id,
                 code=code,
                 timeout_s=timeout_s,
+                before_backend=lambda: run.start(event_sink),
+                event_sink=event_sink,
             )
         except Exception as exc:
             if isinstance(exc, (NoKernelRunningError, KernelNotReadyError)):
                 raise
-            record = self._record_from_exception(
-                session_id=session_id,
-                command_type="exec",
-                code=code,
-                error=exc,
-            )
-            self._store(project_root).append(record)
+            record = run.finalize_error(exc)
             if isinstance(exc, AgentNBException):
                 raise AgentNBException(
                     code=exc.code,
@@ -249,13 +321,7 @@ class ExecutionService:
                 ) from exc
             raise
 
-        record = self._record_from_result(
-            session_id=session_id,
-            command_type="exec",
-            code=code,
-            execution=execution,
-        )
-        self._store(project_root).append(record)
+        record = run.finalize_result(execution)
         return ManagedExecution(record=record, started_new_session=started_new_session)
 
     def start_background_code(
@@ -273,17 +339,13 @@ class ExecutionService:
                 session_id=session_id,
             )
 
-        record = ExecutionRecord(
-            execution_id=_new_execution_id(),
-            ts=utc_now_iso(),
+        run = self._new_run(
+            project_root=project_root,
             session_id=session_id,
             command_type="exec",
-            status="running",
-            duration_ms=0,
             code=code,
         )
-        store = self._store(project_root)
-        store.append(record)
+        run.start()
 
         try:
             process = subprocess.Popen(
@@ -294,7 +356,7 @@ class ExecutionService:
                     "_background-run",
                     "--project",
                     str(project_root),
-                    record.execution_id,
+                    run.record.execution_id,
                 ],
                 cwd=str(project_root),
                 stdin=subprocess.DEVNULL,
@@ -303,18 +365,11 @@ class ExecutionService:
                 start_new_session=True,
             )
         except Exception as exc:
-            updated = replace(
-                record,
-                status="error",
-                ename=type(exc).__name__,
-                evalue=str(exc),
-            )
-            store.append(updated)
+            run.finalize_error(exc)
             raise
 
-        updated = replace(record, worker_pid=process.pid)
-        store.append(updated)
-        return ManagedExecution(record=updated, started_new_session=started_new_session)
+        record = run.replace(worker_pid=process.pid)
+        return ManagedExecution(record=record, started_new_session=started_new_session)
 
     def reset_session(
         self,
@@ -407,6 +462,41 @@ class ExecutionService:
                 raise RunWaitTimedOutError(timeout_s)
             time.sleep(poll_interval_s)
 
+    def follow_run(
+        self,
+        *,
+        project_root: Path,
+        execution_id: str,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+        event_sink: ExecutionSink | None = None,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_s
+        emitted_events = 0
+        started_sink = False
+        while True:
+            record = self._load_run(project_root=project_root, execution_id=execution_id)
+            if record is None:
+                raise AgentNBException(
+                    code="EXECUTION_NOT_FOUND",
+                    message=f"Execution not found: {execution_id}",
+                )
+            if event_sink is not None and not started_sink:
+                event_sink.started(
+                    execution_id=record.execution_id,
+                    session_id=record.session_id,
+                )
+                started_sink = True
+            if event_sink is not None:
+                for event in record.events[emitted_events:]:
+                    event_sink.accept(event)
+                emitted_events = len(record.events)
+            if record.status != "running":
+                return record.to_dict()
+            if time.monotonic() >= deadline:
+                raise RunWaitTimedOutError(timeout_s)
+            time.sleep(poll_interval_s)
+
     def cancel_run(
         self,
         *,
@@ -426,16 +516,27 @@ class ExecutionService:
             if record.status != "running":
                 return {
                     "execution_id": execution_id,
+                    "session_id": record.session_id,
                     "cancel_requested": False,
                     "status": record.status,
+                    "run_status": record.status,
+                    "session_outcome": "unchanged",
                 }
 
             try:
                 self.runtime.interrupt(project_root=project_root, session_id=record.session_id)
-                return self._finalize_cancelled_run(project_root=project_root, record=record)
+                return self._finalize_cancelled_run(
+                    project_root=project_root,
+                    record=record,
+                    session_outcome="preserved",
+                )
             except KernelNotReadyError:
                 self.runtime.stop_starting(project_root=project_root, session_id=record.session_id)
-                return self._finalize_cancelled_run(project_root=project_root, record=record)
+                return self._finalize_cancelled_run(
+                    project_root=project_root,
+                    record=record,
+                    session_outcome="stopped",
+                )
             except NoKernelRunningError:
                 if time.monotonic() >= deadline:
                     raise
@@ -446,46 +547,36 @@ class ExecutionService:
         if record is None or record.code is None or record.status != "running":
             return
 
+        run = ExecutionRun(store=self._store(project_root), record=record, started=True)
+        progress_sink = _ExecutionProgressSink(run)
+
         try:
             execution = self.runtime.execute(
                 project_root=project_root,
                 session_id=record.session_id,
                 code=record.code,
                 timeout_s=30.0,
+                event_sink=progress_sink,
             )
-            updated = replace(
-                record,
-                status=execution.status,
-                duration_ms=execution.duration_ms,
-                stdout=execution.stdout,
-                stderr=execution.stderr,
-                result=execution.result,
-                execution_count=execution.execution_count,
-                ename=execution.ename,
-                evalue=execution.evalue,
-                traceback=execution.traceback,
-                events=execution.events,
-            )
+            updated = run.result_record(execution)
         except Exception as exc:
-            ename = type(exc).__name__
-            evalue = str(exc)
-            traceback = None
-            if isinstance(exc, AgentNBException):
-                ename = exc.ename or ename
-                evalue = exc.evalue or exc.message
-                traceback = exc.traceback
-            updated = replace(
-                record,
-                status="error",
-                ename=ename,
-                evalue=evalue,
-                traceback=traceback,
-            )
+            updated = run.error_record(exc)
 
         latest = self._load_run(project_root=project_root, execution_id=execution_id)
         if latest is None or latest.status != "running":
             return
-        self._store(project_root).append(updated)
+        run.replace(
+            status=updated.status,
+            duration_ms=updated.duration_ms,
+            stdout=updated.stdout,
+            stderr=updated.stderr,
+            result=updated.result,
+            execution_count=updated.execution_count,
+            ename=updated.ename,
+            evalue=updated.evalue,
+            traceback=updated.traceback,
+            events=updated.events,
+        )
 
     def history_entries(
         self,
@@ -568,11 +659,35 @@ class ExecutionService:
     def _store(self, project_root: Path) -> ExecutionStore:
         return ExecutionStore(project_root)
 
+    def _new_run(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        command_type: str,
+        code: str | None,
+        worker_pid: int | None = None,
+    ) -> ExecutionRun:
+        return ExecutionRun(
+            store=self._store(project_root),
+            record=ExecutionRecord(
+                execution_id=_new_execution_id(),
+                ts=utc_now_iso(),
+                session_id=session_id,
+                command_type=command_type,
+                status="running",
+                duration_ms=0,
+                code=code,
+                worker_pid=worker_pid,
+            ),
+        )
+
     def _finalize_cancelled_run(
         self,
         *,
         project_root: Path,
         record: ExecutionRecord,
+        session_outcome: str,
     ) -> dict[str, Any]:
         if record.worker_pid is not None:
             _terminate_process(record.worker_pid)
@@ -585,8 +700,11 @@ class ExecutionService:
         self._store(project_root).append(updated)
         return {
             "execution_id": record.execution_id,
+            "session_id": record.session_id,
             "cancel_requested": True,
             "status": updated.status,
+            "run_status": updated.status,
+            "session_outcome": session_outcome,
         }
 
     def _read_runs(
@@ -636,6 +754,52 @@ class ExecutionService:
 
 def _new_execution_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+class _ExecutionProgressSink(ExecutionSink):
+    def __init__(self, run: ExecutionRun) -> None:
+        self._run = run
+        self._stdout = ""
+        self._stderr = ""
+        self._result: str | None = None
+        self._events: list[ExecutionEvent] = []
+        self._ename: str | None = None
+        self._evalue: str | None = None
+        self._traceback: list[str] | None = None
+
+    def started(self, *, execution_id: str, session_id: str) -> None:
+        del execution_id, session_id
+
+    def accept(self, event: ExecutionEvent) -> None:
+        self._events.append(event)
+        if event.kind == "stdout":
+            self._stdout += event.content or ""
+        elif event.kind == "stderr":
+            self._stderr += event.content or ""
+        elif event.kind == "result":
+            self._result = event.content
+        elif event.kind == "display" and event.content:
+            self._result = f"{self._result}\n{event.content}" if self._result else event.content
+        elif event.kind == "error":
+            metadata = event.metadata
+            ename = metadata.get("ename")
+            if isinstance(ename, str):
+                self._ename = ename
+            if event.content is not None:
+                self._evalue = event.content
+            traceback = metadata.get("traceback")
+            if isinstance(traceback, list) and all(isinstance(item, str) for item in traceback):
+                self._traceback = list(traceback)
+
+        self._run.replace(
+            stdout=self._stdout,
+            stderr=self._stderr,
+            result=self._result,
+            ename=self._ename,
+            evalue=self._evalue,
+            traceback=self._traceback,
+            events=list(self._events),
+        )
 
 
 def _terminate_process(pid: int) -> None:

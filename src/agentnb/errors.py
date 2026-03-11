@@ -82,6 +82,17 @@ class KernelWaitTimedOutError(AgentNBException):
         )
 
 
+class RunWaitTimedOutError(AgentNBException):
+    def __init__(self, timeout_s: float) -> None:
+        super().__init__(
+            code="TIMEOUT",
+            message=f"Run did not finish within {timeout_s:g}s.",
+            ename="TimeoutError",
+            evalue=f"Run wait exceeded timeout of {timeout_s:g}s",
+            data={"timeout_s": timeout_s},
+        )
+
+
 class ExecutionTimedOutError(AgentNBException):
     def __init__(self, timeout_s: float) -> None:
         super().__init__(

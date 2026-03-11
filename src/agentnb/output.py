@@ -151,8 +151,13 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                         f"{run.get('command_type')} {run.get('duration_ms')}ms"
                     )
                 body = "\n".join(lines)
-        elif command == "runs-show":
+        elif command == "runs-show" or command == "runs-wait":
             body = json.dumps(data.get("run", {}), ensure_ascii=True, indent=2)
+        elif command == "runs-cancel":
+            if data.get("cancel_requested"):
+                body = f"Cancel requested for run {data.get('execution_id')}."
+            else:
+                body = f"Run {data.get('execution_id')} is already {data.get('status')}."
         else:
             body = json.dumps(data, ensure_ascii=True, indent=2)
 

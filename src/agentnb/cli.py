@@ -277,6 +277,14 @@ def _suggestions(
         return [
             "Run `agentnb runs list --json` to inspect more recorded runs.",
         ]
+    if command_name == "runs-wait":
+        return [
+            "Run `agentnb runs show EXECUTION_ID --json` to inspect the completed run.",
+        ]
+    if command_name == "runs-cancel":
+        return [
+            "Run `agentnb runs wait EXECUTION_ID --json` to watch for the final run result.",
+        ]
     return []
 
 
@@ -386,6 +394,11 @@ def start(
     is_flag=True,
     help="Start the target session first if it is not already running.",
 )
+@click.option(
+    "--background",
+    is_flag=True,
+    help="Run the execution in the background and return an execution_id immediately.",
+)
 @click.option("--stdout-only", "output_selector", flag_value="stdout", default=None)
 @click.option("--stderr-only", "output_selector", flag_value="stderr")
 @click.option("--result-only", "output_selector", flag_value="result")
@@ -397,6 +410,7 @@ def exec_cmd(
     filepath: Path | None,
     timeout: float,
     ensure_started: bool,
+    background: bool,
     output_selector: str | None,
     project: Path | None,
     session_id: str | None,
@@ -439,22 +453,45 @@ def exec_cmd(
         _emit(response, as_json=as_json)
         return
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        managed = executions.execute_code(
-            project_root=project_root,
-            session_id=session_id,
-            code=source,
-            timeout_s=timeout,
-            ensure_started=ensure_started,
+    if background and output_selector is not None:
+        project_root = resolve_project_root(cwd=Path.cwd(), override=project)
+        response = error_response(
+            command="exec",
+            project=str(project_root),
+            session_id=session_id or DEFAULT_SESSION_ID,
+            code="INVALID_INPUT",
+            message="Output selectors are not supported with --background.",
+            suggestions=_suggestions("exec", "error", {}, error_code="INVALID_INPUT"),
         )
+        _emit(response, as_json=as_json)
+        return
+
+    def handler(project_root: Path, session_id: str) -> dict[str, object]:
+        if background:
+            managed = executions.start_background_code(
+                project_root=project_root,
+                session_id=session_id,
+                code=source,
+                ensure_started=ensure_started,
+            )
+        else:
+            managed = executions.execute_code(
+                project_root=project_root,
+                session_id=session_id,
+                code=source,
+                timeout_s=timeout,
+                ensure_started=ensure_started,
+            )
         payload = compact_execution_payload(managed.record.to_execution_payload())
+        if background:
+            payload["background"] = True
         if ensure_started:
             payload["ensured_started"] = True
             payload["started_new_session"] = managed.started_new_session
         if output_selector is not None:
             payload["selected_output"] = output_selector
             payload["selected_text"] = _select_exec_output(payload, output_selector)
-        if managed.record.status == "error":
+        if not background and managed.record.status == "error":
             raise AgentNBException(
                 code="EXECUTION_ERROR",
                 message="Execution failed",
@@ -804,6 +841,51 @@ def runs_show(execution_id: str, project: Path | None, as_json: bool) -> None:
     _execute_command("runs-show", project, as_json, DEFAULT_SESSION_ID, False, handler)
 
 
+@runs_group.command("wait")
+@click.argument("execution_id")
+@click.option("--timeout", default=30.0, show_default=True, type=float)
+@project_option
+@json_option
+def runs_wait(execution_id: str, timeout: float, project: Path | None, as_json: bool) -> None:
+    """Wait for one background run to finish."""
+
+    def handler(project_root: Path, session_id: str) -> dict[str, object]:
+        del session_id
+        return {
+            "run": executions.wait_for_run(
+                project_root=project_root,
+                execution_id=execution_id,
+                timeout_s=timeout,
+            )
+        }
+
+    _execute_command("runs-wait", project, as_json, DEFAULT_SESSION_ID, False, handler)
+
+
+@runs_group.command("cancel")
+@click.argument("execution_id")
+@project_option
+@json_option
+def runs_cancel(execution_id: str, project: Path | None, as_json: bool) -> None:
+    """Interrupt the session for one running background run."""
+
+    def handler(project_root: Path, session_id: str) -> dict[str, object]:
+        del session_id
+        return executions.cancel_run(project_root=project_root, execution_id=execution_id)
+
+    _execute_command("runs-cancel", project, as_json, DEFAULT_SESSION_ID, False, handler)
+
+
+@main.command("_background-run", hidden=True)
+@click.argument("execution_id")
+@project_option
+def background_run(execution_id: str, project: Path | None) -> None:
+    """Internal helper to execute one persisted background run."""
+
+    project_root = resolve_project_root(cwd=Path.cwd(), override=project)
+    executions.complete_background_run(project_root=project_root, execution_id=execution_id)
+
+
 def _resolve_code_input(code: str | None, filepath: Path | None) -> str:
     if filepath is not None:
         if not filepath.exists():
@@ -897,3 +979,7 @@ def _select_exec_output(payload: dict[str, object], selector: str) -> str:
         return "" if result is None else str(result)
     value = payload.get(selector)
     return "" if value is None else str(value)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .contracts import ExecutionEvent, ExecutionResult, utc_now_iso
-from .errors import AgentNBException, KernelNotReadyError, NoKernelRunningError
+from .errors import (
+    AgentNBException,
+    KernelNotReadyError,
+    NoKernelRunningError,
+    RunWaitTimedOutError,
+)
 from .history import HistoryRecord, kernel_execution_record, user_command_record
-from .session import DEFAULT_SESSION_ID, STATE_DIR_NAME
+from .session import DEFAULT_SESSION_ID, STATE_DIR_NAME, pid_exists
 
 if TYPE_CHECKING:
     from .runtime import KernelRuntime
@@ -26,6 +36,7 @@ class ExecutionRecord:
     status: str
     duration_ms: int
     code: str | None = None
+    worker_pid: int | None = None
     stdout: str = ""
     stderr: str = ""
     result: str | None = None
@@ -44,6 +55,7 @@ class ExecutionRecord:
             "status": self.status,
             "duration_ms": self.duration_ms,
             "code": self.code,
+            "worker_pid": self.worker_pid,
             "stdout": self.stdout,
             "stderr": self.stderr,
             "result": self.result,
@@ -81,6 +93,7 @@ class ExecutionRecord:
             status=_require_str(payload, "status"),
             duration_ms=_require_int(payload, "duration_ms"),
             code=_optional_str(payload, "code"),
+            worker_pid=_optional_int(payload, "worker_pid"),
             stdout=_optional_str(payload, "stdout") or "",
             stderr=_optional_str(payload, "stderr") or "",
             result=_optional_str(payload, "result"),
@@ -155,7 +168,7 @@ class ExecutionStore:
         if not self.executions_file.exists():
             return []
 
-        entries: list[ExecutionRecord] = []
+        entries_by_id: dict[str, ExecutionRecord] = {}
         for line in self.executions_file.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -170,8 +183,10 @@ class ExecutionStore:
                 continue
             if errors_only and record.status != "error":
                 continue
-            entries.append(record)
-        return entries
+            if record.execution_id in entries_by_id:
+                del entries_by_id[record.execution_id]
+            entries_by_id[record.execution_id] = record
+        return list(entries_by_id.values())
 
     def get(self, execution_id: str) -> ExecutionRecord | None:
         for record in reversed(self.read()):
@@ -243,6 +258,64 @@ class ExecutionService:
         self._store(project_root).append(record)
         return ManagedExecution(record=record, started_new_session=started_new_session)
 
+    def start_background_code(
+        self,
+        *,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        code: str,
+        ensure_started: bool = False,
+    ) -> ManagedExecution:
+        started_new_session = False
+        if ensure_started:
+            _, started_new_session = self.runtime.ensure_started(
+                project_root=project_root,
+                session_id=session_id,
+            )
+
+        record = ExecutionRecord(
+            execution_id=_new_execution_id(),
+            ts=utc_now_iso(),
+            session_id=session_id,
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            code=code,
+        )
+        store = self._store(project_root)
+        store.append(record)
+
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "agentnb.cli",
+                    "_background-run",
+                    "--project",
+                    str(project_root),
+                    record.execution_id,
+                ],
+                cwd=str(project_root),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            updated = replace(
+                record,
+                status="error",
+                ename=type(exc).__name__,
+                evalue=str(exc),
+            )
+            store.append(updated)
+            raise
+
+        updated = replace(record, worker_pid=process.pid)
+        store.append(updated)
+        return ManagedExecution(record=updated, started_new_session=started_new_session)
+
     def reset_session(
         self,
         *,
@@ -295,7 +368,8 @@ class ExecutionService:
     ) -> list[dict[str, Any]]:
         return [
             record.to_dict()
-            for record in self._store(project_root).read(
+            for record in self._read_runs(
+                project_root=project_root,
                 session_id=session_id,
                 command_types={"exec", "reset"},
                 errors_only=errors_only,
@@ -303,13 +377,115 @@ class ExecutionService:
         ]
 
     def get_run(self, *, project_root: Path, execution_id: str) -> dict[str, Any]:
-        record = self._store(project_root).get(execution_id)
+        record = self._load_run(project_root=project_root, execution_id=execution_id)
         if record is None:
             raise AgentNBException(
                 code="EXECUTION_NOT_FOUND",
                 message=f"Execution not found: {execution_id}",
             )
         return record.to_dict()
+
+    def wait_for_run(
+        self,
+        *,
+        project_root: Path,
+        execution_id: str,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            record = self._load_run(project_root=project_root, execution_id=execution_id)
+            if record is None:
+                raise AgentNBException(
+                    code="EXECUTION_NOT_FOUND",
+                    message=f"Execution not found: {execution_id}",
+                )
+            if record.status != "running":
+                return record.to_dict()
+            if time.monotonic() >= deadline:
+                raise RunWaitTimedOutError(timeout_s)
+            time.sleep(poll_interval_s)
+
+    def cancel_run(
+        self,
+        *,
+        project_root: Path,
+        execution_id: str,
+        timeout_s: float = 10.0,
+        poll_interval_s: float = 0.1,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            record = self._load_run(project_root=project_root, execution_id=execution_id)
+            if record is None:
+                raise AgentNBException(
+                    code="EXECUTION_NOT_FOUND",
+                    message=f"Execution not found: {execution_id}",
+                )
+            if record.status != "running":
+                return {
+                    "execution_id": execution_id,
+                    "cancel_requested": False,
+                    "status": record.status,
+                }
+
+            try:
+                self.runtime.interrupt(project_root=project_root, session_id=record.session_id)
+                return self._finalize_cancelled_run(project_root=project_root, record=record)
+            except KernelNotReadyError:
+                self.runtime.stop_starting(project_root=project_root, session_id=record.session_id)
+                return self._finalize_cancelled_run(project_root=project_root, record=record)
+            except NoKernelRunningError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(poll_interval_s)
+
+    def complete_background_run(self, *, project_root: Path, execution_id: str) -> None:
+        record = self._load_run(project_root=project_root, execution_id=execution_id)
+        if record is None or record.code is None or record.status != "running":
+            return
+
+        try:
+            execution = self.runtime.execute(
+                project_root=project_root,
+                session_id=record.session_id,
+                code=record.code,
+                timeout_s=30.0,
+            )
+            updated = replace(
+                record,
+                status=execution.status,
+                duration_ms=execution.duration_ms,
+                stdout=execution.stdout,
+                stderr=execution.stderr,
+                result=execution.result,
+                execution_count=execution.execution_count,
+                ename=execution.ename,
+                evalue=execution.evalue,
+                traceback=execution.traceback,
+                events=execution.events,
+            )
+        except Exception as exc:
+            ename = type(exc).__name__
+            evalue = str(exc)
+            traceback = None
+            if isinstance(exc, AgentNBException):
+                ename = exc.ename or ename
+                evalue = exc.evalue or exc.message
+                traceback = exc.traceback
+            updated = replace(
+                record,
+                status="error",
+                ename=ename,
+                evalue=evalue,
+                traceback=traceback,
+            )
+
+        latest = self._load_run(project_root=project_root, execution_id=execution_id)
+        if latest is None or latest.status != "running":
+            return
+        self._store(project_root).append(updated)
 
     def history_entries(
         self,
@@ -320,11 +496,14 @@ class ExecutionService:
         errors_only: bool,
     ) -> list[dict[str, Any]]:
         entries: list[HistoryRecord] = []
-        for record in self._store(project_root).read(
+        for record in self._read_runs(
             session_id=session_id,
             command_types={"exec", "reset"},
             errors_only=errors_only,
+            project_root=project_root,
         ):
+            if record.status not in {"ok", "error"}:
+                continue
             projections = record.to_history_records()
             if include_internal:
                 entries.extend(projections)
@@ -389,9 +568,83 @@ class ExecutionService:
     def _store(self, project_root: Path) -> ExecutionStore:
         return ExecutionStore(project_root)
 
+    def _finalize_cancelled_run(
+        self,
+        *,
+        project_root: Path,
+        record: ExecutionRecord,
+    ) -> dict[str, Any]:
+        if record.worker_pid is not None:
+            _terminate_process(record.worker_pid)
+        updated = replace(
+            record,
+            status="error",
+            ename="CancelledError",
+            evalue="Run was cancelled by user.",
+        )
+        self._store(project_root).append(updated)
+        return {
+            "execution_id": record.execution_id,
+            "cancel_requested": True,
+            "status": updated.status,
+        }
+
+    def _read_runs(
+        self,
+        *,
+        project_root: Path,
+        session_id: str | None,
+        command_types: set[str],
+        errors_only: bool,
+    ) -> list[ExecutionRecord]:
+        records = self._store(project_root).read(
+            session_id=session_id,
+            command_types=command_types,
+            errors_only=errors_only,
+        )
+        return [
+            self._normalize_run_state(project_root=project_root, record=record)
+            for record in records
+        ]
+
+    def _load_run(self, *, project_root: Path, execution_id: str) -> ExecutionRecord | None:
+        record = self._store(project_root).get(execution_id)
+        if record is None:
+            return None
+        return self._normalize_run_state(project_root=project_root, record=record)
+
+    def _normalize_run_state(
+        self,
+        *,
+        project_root: Path,
+        record: ExecutionRecord,
+    ) -> ExecutionRecord:
+        if record.status != "running":
+            return record
+        if record.worker_pid is not None and pid_exists(record.worker_pid):
+            return record
+
+        updated = replace(
+            record,
+            status="error",
+            ename="WorkerExitedError",
+            evalue="Background worker exited before recording a result.",
+        )
+        self._store(project_root).append(updated)
+        return updated
+
 
 def _new_execution_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def _terminate_process(pid: int) -> None:
+    if not pid_exists(pid):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
 
 
 def _require_str(payload: dict[str, Any], key: str) -> str:

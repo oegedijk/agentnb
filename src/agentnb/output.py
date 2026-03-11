@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .compact import summarize_history_text
 from .contracts import CommandResponse
 
 
@@ -47,7 +48,10 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
 
         elif command == "status":
             if data.get("alive"):
-                body = f"Kernel is running (pid {data.get('pid')})."
+                if data.get("busy"):
+                    body = f"Kernel is running (pid {data.get('pid')}, busy)."
+                else:
+                    body = f"Kernel is running (pid {data.get('pid')})."
             else:
                 body = "Kernel is not running."
 
@@ -152,10 +156,18 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     )
                 body = "\n".join(lines)
         elif command == "runs-show" or command == "runs-wait":
-            body = json.dumps(data.get("run", {}), ensure_ascii=True, indent=2)
+            body = _render_run_snapshot(data.get("run", {}), snapshot_only=(command == "runs-show"))
         elif command == "runs-cancel":
             if data.get("cancel_requested"):
-                body = f"Cancel requested for run {data.get('execution_id')}."
+                if data.get("session_outcome") == "preserved":
+                    body = f"Cancelled run {data.get('execution_id')}. The session was preserved."
+                elif data.get("session_outcome") == "stopped":
+                    body = (
+                        f"Cancelled run {data.get('execution_id')}. "
+                        "The still-starting session was stopped."
+                    )
+                else:
+                    body = f"Cancel requested for run {data.get('execution_id')}."
             else:
                 body = f"Run {data.get('execution_id')} is already {data.get('status')}."
         else:
@@ -207,6 +219,51 @@ def _append_suggestions(body: str, suggestions: list[str]) -> str:
         return body
     lines = [body, "", "Next:"]
     lines.extend(f"- {suggestion}" for suggestion in suggestions)
+    return "\n".join(lines)
+
+
+def _render_run_snapshot(run: dict[str, Any], *, snapshot_only: bool) -> str:
+    if not isinstance(run, dict) or not run:
+        return "{}"
+
+    execution_id = run.get("execution_id", "(unknown)")
+    status = run.get("status", "unknown")
+    command_type = run.get("command_type", "exec")
+    session_id = run.get("session_id", "default")
+    duration_ms = run.get("duration_ms")
+
+    lines = [f"Run {execution_id} [{status}] {command_type} on session {session_id}."]
+    if isinstance(duration_ms, int):
+        lines.append(f"duration: {duration_ms}ms")
+    if snapshot_only and status == "running":
+        lines.append("snapshot: persisted state only; use `agentnb runs follow` for live events")
+
+    stdout = run.get("stdout")
+    if isinstance(stdout, str) and stdout:
+        lines.append(f"stdout: {summarize_history_text(stdout, limit=200) or stdout[:200]}")
+
+    stderr = run.get("stderr")
+    if isinstance(stderr, str) and stderr:
+        lines.append(f"stderr: {summarize_history_text(stderr, limit=200) or stderr[:200]}")
+
+    result = run.get("result")
+    if isinstance(result, str) and result:
+        lines.append(f"result: {summarize_history_text(result, limit=240) or result[:240]}")
+
+    ename = run.get("ename")
+    evalue = run.get("evalue")
+    if ename or evalue:
+        if ename and evalue:
+            lines.append(f"error: {ename}: {evalue}")
+        elif ename:
+            lines.append(f"error: {ename}")
+        else:
+            lines.append(f"error: {evalue}")
+
+    events = run.get("events")
+    if isinstance(events, list):
+        lines.append(f"events: {len(events)} recorded")
+
     return "\n".join(lines)
 
 

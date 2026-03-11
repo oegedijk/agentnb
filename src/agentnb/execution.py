@@ -462,6 +462,41 @@ class ExecutionService:
                 raise RunWaitTimedOutError(timeout_s)
             time.sleep(poll_interval_s)
 
+    def follow_run(
+        self,
+        *,
+        project_root: Path,
+        execution_id: str,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+        event_sink: ExecutionSink | None = None,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_s
+        emitted_events = 0
+        started_sink = False
+        while True:
+            record = self._load_run(project_root=project_root, execution_id=execution_id)
+            if record is None:
+                raise AgentNBException(
+                    code="EXECUTION_NOT_FOUND",
+                    message=f"Execution not found: {execution_id}",
+                )
+            if event_sink is not None and not started_sink:
+                event_sink.started(
+                    execution_id=record.execution_id,
+                    session_id=record.session_id,
+                )
+                started_sink = True
+            if event_sink is not None:
+                for event in record.events[emitted_events:]:
+                    event_sink.accept(event)
+                emitted_events = len(record.events)
+            if record.status != "running":
+                return record.to_dict()
+            if time.monotonic() >= deadline:
+                raise RunWaitTimedOutError(timeout_s)
+            time.sleep(poll_interval_s)
+
     def cancel_run(
         self,
         *,
@@ -481,16 +516,27 @@ class ExecutionService:
             if record.status != "running":
                 return {
                     "execution_id": execution_id,
+                    "session_id": record.session_id,
                     "cancel_requested": False,
                     "status": record.status,
+                    "run_status": record.status,
+                    "session_outcome": "unchanged",
                 }
 
             try:
                 self.runtime.interrupt(project_root=project_root, session_id=record.session_id)
-                return self._finalize_cancelled_run(project_root=project_root, record=record)
+                return self._finalize_cancelled_run(
+                    project_root=project_root,
+                    record=record,
+                    session_outcome="preserved",
+                )
             except KernelNotReadyError:
                 self.runtime.stop_starting(project_root=project_root, session_id=record.session_id)
-                return self._finalize_cancelled_run(project_root=project_root, record=record)
+                return self._finalize_cancelled_run(
+                    project_root=project_root,
+                    record=record,
+                    session_outcome="stopped",
+                )
             except NoKernelRunningError:
                 if time.monotonic() >= deadline:
                     raise
@@ -502,6 +548,7 @@ class ExecutionService:
             return
 
         run = ExecutionRun(store=self._store(project_root), record=record, started=True)
+        progress_sink = _ExecutionProgressSink(run)
 
         try:
             execution = self.runtime.execute(
@@ -509,6 +556,7 @@ class ExecutionService:
                 session_id=record.session_id,
                 code=record.code,
                 timeout_s=30.0,
+                event_sink=progress_sink,
             )
             updated = run.result_record(execution)
         except Exception as exc:
@@ -639,6 +687,7 @@ class ExecutionService:
         *,
         project_root: Path,
         record: ExecutionRecord,
+        session_outcome: str,
     ) -> dict[str, Any]:
         if record.worker_pid is not None:
             _terminate_process(record.worker_pid)
@@ -651,8 +700,11 @@ class ExecutionService:
         self._store(project_root).append(updated)
         return {
             "execution_id": record.execution_id,
+            "session_id": record.session_id,
             "cancel_requested": True,
             "status": updated.status,
+            "run_status": updated.status,
+            "session_outcome": session_outcome,
         }
 
     def _read_runs(
@@ -702,6 +754,52 @@ class ExecutionService:
 
 def _new_execution_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+class _ExecutionProgressSink(ExecutionSink):
+    def __init__(self, run: ExecutionRun) -> None:
+        self._run = run
+        self._stdout = ""
+        self._stderr = ""
+        self._result: str | None = None
+        self._events: list[ExecutionEvent] = []
+        self._ename: str | None = None
+        self._evalue: str | None = None
+        self._traceback: list[str] | None = None
+
+    def started(self, *, execution_id: str, session_id: str) -> None:
+        del execution_id, session_id
+
+    def accept(self, event: ExecutionEvent) -> None:
+        self._events.append(event)
+        if event.kind == "stdout":
+            self._stdout += event.content or ""
+        elif event.kind == "stderr":
+            self._stderr += event.content or ""
+        elif event.kind == "result":
+            self._result = event.content
+        elif event.kind == "display" and event.content:
+            self._result = f"{self._result}\n{event.content}" if self._result else event.content
+        elif event.kind == "error":
+            metadata = event.metadata
+            ename = metadata.get("ename")
+            if isinstance(ename, str):
+                self._ename = ename
+            if event.content is not None:
+                self._evalue = event.content
+            traceback = metadata.get("traceback")
+            if isinstance(traceback, list) and all(isinstance(item, str) for item in traceback):
+                self._traceback = list(traceback)
+
+        self._run.replace(
+            stdout=self._stdout,
+            stderr=self._stderr,
+            result=self._result,
+            ename=self._ename,
+            evalue=self._evalue,
+            traceback=self._traceback,
+            events=list(self._events),
+        )
 
 
 def _terminate_process(pid: int) -> None:

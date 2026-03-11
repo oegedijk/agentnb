@@ -240,6 +240,60 @@ def test_execution_service_wait_for_run_times_out(project_dir: Path, mocker) -> 
         )
 
 
+def test_execution_service_follow_run_replays_incremental_events(project_dir: Path) -> None:
+    class Sink(ExecutionSink):
+        def __init__(self) -> None:
+            self.started_calls: list[tuple[str, str]] = []
+            self.events: list[ExecutionEvent] = []
+
+        def started(self, *, execution_id: str, session_id: str) -> None:
+            self.started_calls.append((execution_id, session_id))
+
+        def accept(self, event: ExecutionEvent) -> None:
+            self.events.append(event)
+
+    service = ExecutionService(KernelRuntime())
+    sink = Sink()
+    running = ExecutionRecord(
+        execution_id="run-1",
+        ts="2026-03-10T00:00:00+00:00",
+        session_id="default",
+        command_type="exec",
+        status="running",
+        duration_ms=0,
+        events=[ExecutionEvent(kind="stdout", content="hello\n")],
+    )
+    finished = ExecutionRecord(
+        execution_id="run-1",
+        ts="2026-03-10T00:00:01+00:00",
+        session_id="default",
+        command_type="exec",
+        status="ok",
+        duration_ms=10,
+        result="2",
+        events=[
+            ExecutionEvent(kind="stdout", content="hello\n"),
+            ExecutionEvent(kind="result", content="2"),
+        ],
+    )
+    service._load_run = Mock(side_effect=[running, finished])  # type: ignore[method-assign]
+
+    run = service.follow_run(
+        project_root=project_dir,
+        execution_id="run-1",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+        event_sink=sink,
+    )
+
+    assert run["status"] == "ok"
+    assert sink.started_calls == [("run-1", "default")]
+    assert sink.events == [
+        ExecutionEvent(kind="stdout", content="hello\n"),
+        ExecutionEvent(kind="result", content="2"),
+    ]
+
+
 def test_execution_service_cancel_run_interrupts_session(project_dir: Path, mocker) -> None:
     mocker.patch("agentnb.execution.pid_exists", return_value=True)
     kill = mocker.patch("agentnb.execution.os.kill")
@@ -262,6 +316,8 @@ def test_execution_service_cancel_run_interrupts_session(project_dir: Path, mock
 
     assert payload["cancel_requested"] is True
     assert payload["status"] == "error"
+    assert payload["session_id"] == "analysis"
+    assert payload["session_outcome"] == "preserved"
     runtime.interrupt.assert_called_once_with(project_root=project_dir, session_id="analysis")
     kill.assert_called_once()
     assert stored is not None
@@ -295,6 +351,8 @@ def test_execution_service_cancel_run_stops_starting_session(project_dir: Path, 
 
     assert payload["cancel_requested"] is True
     assert payload["status"] == "error"
+    assert payload["session_id"] == "analysis"
+    assert payload["session_outcome"] == "stopped"
     runtime.stop_starting.assert_called_once_with(project_root=project_dir, session_id="analysis")
     kill.assert_called_once()
     assert stored is not None

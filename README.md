@@ -73,7 +73,7 @@ the subcommand, for example `agentnb --agent status` or `agentnb status --agent`
 The normal agent loop is:
 
 1. `agentnb exec --ensure-started "..." --json` for short snippets
-2. `agentnb status --wait --json` if a session is still starting
+2. `agentnb status --wait-idle --json` when you need to know the session is safe for the next command
 3. `agentnb exec --file analysis.py --json` or pipe code through stdin for multiline work
 4. `agentnb vars --json`
 5. `agentnb inspect NAME --json`
@@ -81,6 +81,7 @@ The normal agent loop is:
 7. `agentnb reload myapp.module --json` to target one imported module
 8. `agentnb history --json`
 9. `agentnb runs list --json` when you need durable execution records
+10. `agentnb runs follow EXECUTION_ID --json` when you need live background progress
 
 Important:
 - Drive one session serially: wait for each command to finish before sending the next.
@@ -111,14 +112,15 @@ It is not a notebook editing tool:
 
 - `agentnb start [--project PATH] [--python PATH] [--auto-install]`
 - top-level flags: `agentnb [--json] [--agent] [--quiet] [--no-suggestions] <command>`
-- `agentnb status [--project PATH] [--session NAME] [--wait] [--timeout SECONDS]`
-- `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--ensure-started] [--background] [--stdout-only|--stderr-only|--result-only] [--project PATH] [--session NAME] [--json]`
+- `agentnb status [--project PATH] [--session NAME] [--wait|--wait-idle] [--timeout SECONDS]`
+- `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--ensure-started] [--background|--stream] [--stdout-only|--stderr-only|--result-only] [--project PATH] [--session NAME] [--json]`
 - `agentnb vars [--project PATH] [--session NAME] [--json] [--types|--no-types] [--match TEXT] [--recent N]`
 - `agentnb inspect NAME [--project PATH] [--session NAME] [--json]`
 - `agentnb reload [MODULE] [--project PATH] [--session NAME] [--json]`
 - `agentnb history [--project PATH] [--session NAME] [--errors] [--latest|--last N] [--all] [--json]`
 - `agentnb runs list [--project PATH] [--session NAME] [--errors] [--json]`
 - `agentnb runs show EXECUTION_ID [--project PATH] [--json]`
+- `agentnb runs follow EXECUTION_ID [--project PATH] [--timeout SECONDS] [--json]`
 - `agentnb runs wait EXECUTION_ID [--project PATH] [--timeout SECONDS] [--json]`
 - `agentnb runs cancel EXECUTION_ID [--project PATH] [--json]`
 - `agentnb sessions list [--project PATH] [--json]`
@@ -135,7 +137,7 @@ Notes:
 - `history` shows semantic user-visible steps by default such as `exec`, `vars`, `inspect`, `reload`, and `reset`.
 - Use `history --all` to include internal helper executions sent to the kernel.
 - `runs` exposes durable execution records keyed by `execution_id`; use it for background work and exact run lookup.
-- `exec --background` returns immediately with an `execution_id`; follow it with `runs wait`, `runs show`, or `runs cancel`.
+- `exec --background` returns immediately with an `execution_id`; use `runs show` for the latest snapshot, `runs follow` for live progress, `runs wait` for the final snapshot, and `runs cancel` to stop the run.
 - When multiple live sessions exist, kernel-bound commands require `--session NAME` unless there is only one live session to infer.
 - Module reloading is explicit. `reload MODULE` reloads one imported project-local module.
 - Bare `reload` reloads all currently imported project-local modules and reports rebound names and possible stale objects.
@@ -237,10 +239,11 @@ uv run pytest
 ## Current Ergonomics
 
 - multi-session targeting with `--session`, plus `sessions list` and `sessions delete`
-- `exec --ensure-started` and `status --wait` for first-use/startup flows
+- `exec --ensure-started`, `status --wait`, and `status --wait-idle` for first-use/startup and session-idleness flows
 - persisted run records with `execution_id`
-- `runs list`, `runs show`, `runs wait`, and `runs cancel` for durable execution control
+- `runs list`, `runs show`, `runs follow`, `runs wait`, and `runs cancel` for durable execution control
 - `exec` accepts short inline code, `--file`, or stdin/heredoc for multiline snippets
+- `exec --stream` for foreground live event delivery on the same execution model
 - `vars` includes type information by default
 - `vars` hides imported helper routines and classes and summarizes common containers compactly
 - `inspect` gives compact previews for pandas-like objects and common `list`/`dict` payloads

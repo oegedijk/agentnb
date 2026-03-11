@@ -6,7 +6,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import click
 
@@ -79,18 +79,20 @@ def main(
     Recommended loop:
 
       1. agentnb exec --ensure-started "from myapp import thing" --json
-      2. agentnb status --wait --json
+      2. agentnb status --wait-idle --json
       3. agentnb exec --file analysis.py --json
       4. agentnb vars --recent 5 --json
       5. agentnb inspect thing --json
       6. agentnb reload myapp.module --json
       7. agentnb history --json
       8. agentnb runs list --json when you need durable execution records
+      9. agentnb runs follow EXECUTION_ID --json for live background progress
 
     Use `--session NAME` on kernel-bound commands when working with more than
     one live session. `sessions list` shows live session names and metadata.
-    `exec --background` returns an `execution_id`; follow it with `runs wait`,
-    `runs show`, or `runs cancel`.
+    `exec --background` returns an `execution_id`; use `runs show` for the
+    latest persisted snapshot, `runs follow` for live progress, `runs wait`
+    for the final snapshot, and `runs cancel` when you need to stop the run.
 
     For multiline code, prefer --file or stdin/heredoc over shell-escaped
     backslashes. `vars` includes type information by default. `history`
@@ -103,10 +105,11 @@ def main(
     stdout. In `--agent` mode, JSON payloads are compacted by default to
     reduce token usage.
 
-    Prefer --json for agent integrations and machine-readable parsing. Startup
-    does not install ipykernel unless you pass --auto-install or use agentnb
-    doctor --fix. Top-level flags such as --agent and --json can be placed
-    before or after the subcommand.
+    Prefer --json for agent integrations and machine-readable parsing. Use
+    `status --wait-idle` when you need to know the session is safe for the
+    next command, not just alive. If ipykernel is missing, use `start --auto-install`.
+    Use `doctor --fix` for automatic repair. Top-level flags such as --agent
+    and --json can be placed before or after the subcommand.
     """
     ctx.obj = _resolve_render_options(
         root_as_json=root_as_json,
@@ -387,16 +390,57 @@ def _suggestions(
             "Run `agentnb history --json` to review the semantic session history view.",
         ]
     if command_name == "runs-show":
+        run = data.get("run")
+        run_payload = cast(dict[str, object], run) if isinstance(run, dict) else None
+        run_status = run_payload.get("status") if run_payload is not None else None
+        if run_status == "running":
+            return [
+                (
+                    "Run `agentnb runs follow EXECUTION_ID --json` "
+                    "to stream new events until the run finishes."
+                ),
+                "Run `agentnb runs wait EXECUTION_ID --json` to block for the final snapshot.",
+                "Run `agentnb runs cancel EXECUTION_ID --json` to stop the background run.",
+            ]
         return [
             "Run `agentnb runs list --json` to inspect more recorded runs.",
+            "Run `agentnb history --json` to review the session-level history view.",
+        ]
+    if command_name == "runs-follow":
+        return [
+            "Run `agentnb runs show EXECUTION_ID --json` to inspect the latest persisted snapshot.",
         ]
     if command_name == "runs-wait":
         return [
             "Run `agentnb runs show EXECUTION_ID --json` to inspect the completed run.",
         ]
     if command_name == "runs-cancel":
+        if data.get("cancel_requested"):
+            if data.get("session_outcome") == "preserved":
+                session_id = data.get("session_id") or "default"
+                return [
+                    (
+                        f"Run `agentnb status --session {session_id} --wait-idle --json` "
+                        "to confirm the session is ready for more work."
+                    ),
+                    (
+                        "Run `agentnb runs show EXECUTION_ID --json` "
+                        "to inspect the cancelled run record."
+                    ),
+                ]
+            if data.get("session_outcome") == "stopped":
+                return [
+                    (
+                        "Run `agentnb start --session NAME --json` "
+                        "to start a fresh session explicitly."
+                    ),
+                    (
+                        'Run `agentnb exec --ensure-started "..." --json` '
+                        "to restart and execute in one step."
+                    ),
+                ]
         return [
-            "Run `agentnb runs wait EXECUTION_ID --json` to watch for the final run result.",
+            "Run `agentnb runs show EXECUTION_ID --json` to inspect the persisted run snapshot.",
         ]
     return []
 
@@ -841,6 +885,11 @@ def reload_cmd(
     help="Wait until the target session is ready instead of returning immediately.",
 )
 @click.option(
+    "--wait-idle",
+    is_flag=True,
+    help="Wait until the target session is alive and not executing another command.",
+)
+@click.option(
     "--timeout",
     default=30.0,
     show_default=True,
@@ -852,6 +901,7 @@ def reload_cmd(
 @json_option
 def status(
     wait: bool,
+    wait_idle: bool,
     timeout: float,
     project: Path | None,
     session_id: str | None,
@@ -859,7 +909,19 @@ def status(
 ) -> None:
     """Check whether the project's kernel is currently running."""
 
+    if wait and wait_idle:
+        raise click.UsageError("Use either --wait or --wait-idle, not both.")
+
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
+        if wait_idle:
+            payload = runtime.wait_for_idle(
+                project_root=project_root,
+                session_id=session_id,
+                timeout_s=timeout,
+            ).to_dict()
+            payload["waited"] = True
+            payload["waited_for"] = "idle"
+            return payload
         if wait:
             payload = runtime.wait_for_ready(
                 project_root=project_root,
@@ -867,6 +929,7 @@ def status(
                 timeout_s=timeout,
             ).to_dict()
             payload["waited"] = True
+            payload["waited_for"] = "ready"
             return payload
         return runtime.status(project_root=project_root, session_id=session_id).to_dict()
 
@@ -1076,7 +1139,7 @@ def runs_list(
 @project_option
 @json_option
 def runs_show(execution_id: str, project: Path | None, as_json: bool) -> None:
-    """Show one persisted exec/reset run in detail."""
+    """Show a persisted snapshot of one exec/reset run."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         del session_id
@@ -1091,7 +1154,7 @@ def runs_show(execution_id: str, project: Path | None, as_json: bool) -> None:
 @project_option
 @json_option
 def runs_wait(execution_id: str, timeout: float, project: Path | None, as_json: bool) -> None:
-    """Wait for one background run to finish."""
+    """Wait for one background run to finish and return its final snapshot."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         del session_id
@@ -1106,12 +1169,54 @@ def runs_wait(execution_id: str, timeout: float, project: Path | None, as_json: 
     _execute_command("runs-wait", project, as_json, DEFAULT_SESSION_ID, False, handler)
 
 
+@runs_group.command("follow")
+@click.argument("execution_id")
+@click.option("--timeout", default=30.0, show_default=True, type=float)
+@project_option
+@json_option
+def runs_follow(execution_id: str, timeout: float, project: Path | None, as_json: bool) -> None:
+    """Follow one persisted run and stream newly recorded events until it finishes."""
+    project_root = resolve_project_root(cwd=Path.cwd(), override=project)
+    options = _current_render_options(local_as_json=as_json)
+    stream: ExecutionSink = JsonExecutionStream() if options.as_json else HumanExecutionStream()
+
+    try:
+        run = executions.follow_run(
+            project_root=project_root,
+            execution_id=execution_id,
+            timeout_s=timeout,
+            event_sink=stream,
+        )
+        response = success_response(
+            command="runs-follow",
+            project=str(project_root),
+            session_id=run.get("session_id", DEFAULT_SESSION_ID),
+            data={"run": run},
+            suggestions=_suggestions("runs-follow", "ok", {"run": run}),
+        )
+    except AgentNBException as exc:
+        response = error_response(
+            command="runs-follow",
+            project=str(project_root),
+            session_id=DEFAULT_SESSION_ID,
+            code=exc.code,
+            message=exc.message,
+            ename=exc.ename,
+            evalue=exc.evalue,
+            traceback=compact_traceback(exc.traceback),
+            data=exc.data,
+            suggestions=_suggestions("runs-follow", "error", exc.data, error_code=exc.code),
+        )
+
+    _emit_stream_completion(response, as_json=as_json, stream=stream)
+
+
 @runs_group.command("cancel")
 @click.argument("execution_id")
 @project_option
 @json_option
 def runs_cancel(execution_id: str, project: Path | None, as_json: bool) -> None:
-    """Interrupt the session for one running background run."""
+    """Cancel one running background run and report what happened to the session."""
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
         del session_id

@@ -371,3 +371,62 @@ def test_runtime_wait_for_ready_times_out(project_dir: Path) -> None:
             timeout_s=0.0,
             poll_interval_s=0.0,
         )
+
+
+def test_runtime_status_reports_busy_when_command_lock_exists(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="default")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="default",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+    store.command_lock_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    backend = Mock()
+    backend.status.return_value = KernelStatus(alive=True, pid=111, python="python")
+    runtime = KernelRuntime(backend=backend)
+
+    status = runtime.status(project_root=project_dir)
+
+    assert status.alive is True
+    assert status.busy is True
+
+
+def test_runtime_wait_for_idle_returns_when_status_becomes_not_busy(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    runtime.status = Mock(  # type: ignore[method-assign]
+        side_effect=[
+            KernelStatus(alive=True, busy=True),
+            KernelStatus(alive=True, busy=False),
+        ]
+    )
+
+    idle = runtime.wait_for_idle(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )
+
+    assert idle.alive is True
+    assert idle.busy is False
+
+
+def test_runtime_wait_for_idle_times_out(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    runtime.status = Mock(return_value=KernelStatus(alive=True, busy=True))  # type: ignore[method-assign]
+
+    with pytest.raises(KernelWaitTimedOutError):
+        runtime.wait_for_idle(
+            project_root=project_dir,
+            session_id="default",
+            timeout_s=0.0,
+            poll_interval_s=0.0,
+        )

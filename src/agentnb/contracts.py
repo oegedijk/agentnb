@@ -76,6 +76,7 @@ class KernelStatus:
     started_at: str | None = None
     uptime_s: float | None = None
     python: str | None = None
+    busy: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

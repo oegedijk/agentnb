@@ -77,6 +77,15 @@ class KernelRuntime:
             return KernelStatus(alive=False)
 
         status = self._backend.status(session)
+        status = KernelStatus(
+            alive=status.alive,
+            pid=status.pid,
+            connection_file=status.connection_file,
+            started_at=status.started_at,
+            uptime_s=status.uptime_s,
+            python=status.python,
+            busy=store.has_active_command_lock() if status.alive else False,
+        )
         if not status.alive:
             store.clear_session()
         return status
@@ -180,6 +189,23 @@ class KernelRuntime:
         while True:
             status = self.status(project_root=project_root, session_id=session_id)
             if status.alive:
+                return status
+            if time.monotonic() >= deadline:
+                raise KernelWaitTimedOutError(timeout_s)
+            time.sleep(poll_interval_s)
+
+    def wait_for_idle(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+    ) -> KernelStatus:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            status = self.status(project_root=project_root, session_id=session_id)
+            if status.alive and not status.busy:
                 return status
             if time.monotonic() >= deadline:
                 raise KernelWaitTimedOutError(timeout_s)

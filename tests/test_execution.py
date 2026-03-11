@@ -83,3 +83,4 @@ def test_execution_service_history_projection_uses_execution_ids(project_dir: Pa
     assert len(entries) == 2
     assert all(entry["execution_id"] == "run-1" for entry in entries)
     assert [entry["kind"] for entry in entries] == ["kernel_execution", "user_command"]
+    assert all(entry["ts"] == "2026-03-10T00:00:00+00:00" for entry in entries)

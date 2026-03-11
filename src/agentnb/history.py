@@ -125,6 +125,7 @@ class HistoryStore:
 
 def user_command_record(
     *,
+    ts: str | None = None,
     session_id: str,
     execution_id: str | None = None,
     command_type: str,
@@ -153,7 +154,7 @@ def user_command_record(
     )
     return HistoryRecord(
         kind="user_command",
-        ts=utc_now_iso(),
+        ts=utc_now_iso() if ts is None else ts,
         session_id=session_id,
         execution_id=execution_id,
         status=resolved_status,
@@ -172,6 +173,7 @@ def user_command_record(
 
 def kernel_execution_record(
     *,
+    ts: str | None = None,
     session_id: str,
     execution_id: str | None = None,
     command_type: str,
@@ -199,7 +201,7 @@ def kernel_execution_record(
     )
     return HistoryRecord(
         kind="kernel_execution",
-        ts=utc_now_iso(),
+        ts=utc_now_iso() if ts is None else ts,
         session_id=session_id,
         execution_id=execution_id,
         status=resolved_status,

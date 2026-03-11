@@ -102,6 +102,7 @@ class ExecutionRecord:
         )
         return [
             kernel_execution_record(
+                ts=self.ts,
                 session_id=self.session_id,
                 execution_id=self.execution_id,
                 command_type=self.command_type,
@@ -115,6 +116,7 @@ class ExecutionRecord:
                 result=self.result,
             ),
             user_command_record(
+                ts=self.ts,
                 session_id=self.session_id,
                 execution_id=self.execution_id,
                 command_type=self.command_type,

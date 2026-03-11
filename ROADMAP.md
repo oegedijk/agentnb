@@ -21,6 +21,7 @@ Status as of March 11, 2026:
 - completed: background execution with `runs list|show|wait|cancel`
 - remaining: streaming execution on top of the same execution model
 - next up: real-time event delivery without changing `execution_id` or the persisted run schema
+- stabilization needed from smoke tests: foreground interrupt reliability, accurate live/busy status during active execution, and consistent session `last_activity` metadata
 
 ### Goals
 
@@ -40,11 +41,20 @@ Status as of March 11, 2026:
 - First-use execution ergonomics:
   - `agentnb exec --ensure-started` to auto-start a missing kernel for the default workflow
   - `status --wait [--timeout]` to block until a kernel is ready for execution
+  - `status --wait-idle [--timeout]` or equivalent to block until a session is safe for the next command
   - `--session` aliases that are short and consistent across commands
 - Execution event model:
   - typed events for `stdout`, `stderr`, `result`, `display`, `error`, `status`
   - stable `execution_id` across foreground, streaming, and background execution paths
   - internal event persistence to support replay, export, and artifact capture later
+- Execution control stabilization:
+  - foreground `interrupt` must reliably reach a running execution
+  - `status` must accurately report live-versus-not-ready state while commands are in flight
+  - session listings should reflect recent execution activity consistently
+  - cancellation behavior should be explicit about whether it preserves or tears down the session
+- Run observation ergonomics:
+  - live follow/tail for background runs on top of the persisted event model
+  - clearer distinction between snapshot inspection (`runs show`) and live observation
 
 ### Delivery Order
 
@@ -60,6 +70,7 @@ Status as of March 11, 2026:
 - Extend the event schema to cover sync, streaming, and replay modes without changing event meaning by mode.
 - Support top-level output-mode defaults so agents do not need to repeat `--json` on every command.
 - Keep existing `default` session behavior unchanged.
+- Control-plane commands need stable semantics during active execution, especially `status`, `interrupt`, and `cancel`.
 
 ## v0.3 - Reproducibility and Debug Workflows
 
@@ -188,11 +199,14 @@ Status as of March 11, 2026:
   - explicit deprecation policy for JSON fields
 - Performance:
   - benchmark startup latency, round-trip execution latency, and memory overhead
+- Output/noise control:
+  - make `--quiet` fully suppress non-essential human output, including suggestions
+  - keep machine-oriented modes predictable during streaming and control-plane errors
 
 ## Near-Term Priority Queue
 
-1. Multi-session support (`--session`, list/attach/delete)
-2. First-use session ergonomics (`exec --ensure-started`, `status --wait`)
-3. Execution record model (`execution_id`, persisted events, stable event schema)
-4. Background execution IDs + cancel/wait commands
+1. Execution control stabilization (`interrupt`, active-execution `status`, consistent session activity metadata)
+2. Streaming execution on top of the persisted event model
+3. Session idleness ergonomics (`status --wait-idle` or equivalent)
+4. Run observation ergonomics (live follow/tail on top of persisted events)
 5. Replay/export (history -> notebook/transcript)

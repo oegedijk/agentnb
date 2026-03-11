@@ -3,6 +3,8 @@ from __future__ import annotations
 import signal
 import subprocess
 from pathlib import Path
+from queue import Empty
+from unittest.mock import Mock
 
 from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
@@ -78,3 +80,38 @@ def test_start_detaches_kernel_process(
 def test_startup_code_only_bootstraps_project_path() -> None:
     assert "autoreload" not in STARTUP_CODE
     assert "AGENTNB_PROJECT_ROOT" in STARTUP_CODE
+
+
+def test_status_falls_back_to_heartbeat_when_shell_probe_is_busy(
+    tmp_path: Path,
+    mocker: MockerFixture,
+) -> None:
+    backend = LocalIPythonBackend()
+    connection_file = tmp_path / "kernel-default.json"
+    connection_file.write_text("{}", encoding="utf-8")
+    session = SessionInfo(
+        session_id="default",
+        pid=1234,
+        connection_file=str(connection_file),
+        python_executable="python",
+        project_root=str(tmp_path),
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+
+    client = Mock()
+    client.kernel_info.return_value = "msg-1"
+    client.get_shell_msg.side_effect = Empty()
+    client.is_alive.return_value = True
+    mocker.patch.object(backend, "_create_client", return_value=client)
+    mocker.patch("agentnb.backend.pid_exists", return_value=True)
+
+    status = backend.status(session, timeout_s=0.1)
+
+    assert status.alive is True
+    client.start_channels.assert_called_once_with(
+        shell=True,
+        iopub=False,
+        stdin=False,
+        hb=True,
+        control=False,
+    )

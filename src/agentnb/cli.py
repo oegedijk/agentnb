@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -15,7 +17,13 @@ from .compact import (
     compact_run_entry,
     compact_traceback,
 )
-from .contracts import CommandResponse, error_response, success_response
+from .contracts import (
+    CommandResponse,
+    ExecutionEvent,
+    ExecutionSink,
+    error_response,
+    success_response,
+)
 from .errors import AgentNBException, InvalidInputError
 from .execution import ExecutionService
 from .ops import NotebookOps
@@ -164,13 +172,99 @@ def _emit(response: CommandResponse, *, as_json: bool) -> None:
     options = _current_render_options(local_as_json=as_json)
     if response.command == "exec" and response.data.get("selected_output") is not None:
         response = replace(response, suggestions=[])
-    if not options.show_suggestions:
+    if options.quiet or not options.show_suggestions:
         response = replace(response, suggestions=[])
     rendered = render_response(response, options=options)
     if rendered:
         click.echo(rendered)
     if response.status == "error":
         raise click.exceptions.Exit(1)
+
+
+class HumanExecutionStream(ExecutionSink):
+    def __init__(self) -> None:
+        self.execution_id: str | None = None
+        self.session_id: str | None = None
+        self.emitted_output = False
+
+    def started(self, *, execution_id: str, session_id: str) -> None:
+        self.execution_id = execution_id
+        self.session_id = session_id
+
+    def accept(self, event: ExecutionEvent) -> None:
+        if event.kind == "stdout" and event.content:
+            _echo_stream_text(event.content)
+            self.emitted_output = True
+            return
+        if event.kind == "stderr" and event.content:
+            _echo_stream_text(event.content, err=True)
+            self.emitted_output = True
+            return
+        if event.kind in {"result", "display"} and event.content:
+            _echo_stream_block(event.content)
+            self.emitted_output = True
+
+
+class JsonExecutionStream(ExecutionSink):
+    def started(self, *, execution_id: str, session_id: str) -> None:
+        _emit_json_stream_frame(
+            {
+                "type": "start",
+                "execution_id": execution_id,
+                "session_id": session_id,
+            }
+        )
+
+    def accept(self, event: ExecutionEvent) -> None:
+        _emit_json_stream_frame({"type": "event", "event": event.to_dict()})
+
+
+def _echo_stream_text(text: str, *, err: bool = False) -> None:
+    click.echo(text, nl=False, err=err)
+
+
+def _echo_stream_block(text: str) -> None:
+    if text.endswith("\n"):
+        click.echo(text, nl=False)
+        return
+    click.echo(text)
+
+
+def _emit_json_stream_frame(payload: dict[str, Any]) -> None:
+    click.echo(json.dumps(payload, ensure_ascii=True))
+
+
+def _emit_stream_completion(
+    response: CommandResponse,
+    *,
+    as_json: bool,
+    stream: ExecutionSink | None = None,
+) -> None:
+    options = _current_render_options(local_as_json=as_json)
+    if options.quiet or not options.show_suggestions:
+        response = replace(response, suggestions=[])
+
+    if options.as_json:
+        _emit_json_stream_frame({"type": "final", "response": response.to_dict()})
+    else:
+        human_stream = stream if isinstance(stream, HumanExecutionStream) else None
+        if response.status == "ok" and human_stream is not None and not human_stream.emitted_output:
+            click.echo("Execution completed.")
+        if response.status == "error":
+            rendered = render_response(response, options=replace(options, as_json=False))
+            if rendered:
+                click.echo(rendered, err=True)
+        elif response.suggestions:
+            click.echo(_render_suggestions_block(response.suggestions))
+
+    if response.status == "error":
+        raise click.exceptions.Exit(1)
+
+
+def _render_suggestions_block(suggestions: list[str]) -> str:
+    lines = ["", "Next:"]
+    lines.extend(f"- {suggestion}" for suggestion in suggestions)
+    return "\n".join(lines)
 
 
 def _suggestions(
@@ -418,6 +512,11 @@ def start(
     is_flag=True,
     help="Run the execution in the background and return an execution_id immediately.",
 )
+@click.option(
+    "--stream",
+    is_flag=True,
+    help="Stream execution events in real time and finish with the final result payload.",
+)
 @click.option("--stdout-only", "output_selector", flag_value="stdout", default=None)
 @click.option("--stderr-only", "output_selector", flag_value="stderr")
 @click.option("--result-only", "output_selector", flag_value="result")
@@ -430,6 +529,7 @@ def exec_cmd(
     timeout: float,
     ensure_started: bool,
     background: bool,
+    stream: bool,
     output_selector: str | None,
     project: Path | None,
     session_id: str | None,
@@ -469,7 +569,10 @@ def exec_cmd(
             traceback=exc.traceback,
             suggestions=_suggestions("exec", "error", {}),
         )
-        _emit(response, as_json=as_json)
+        if stream:
+            _emit_stream_completion(response, as_json=as_json)
+        else:
+            _emit(response, as_json=as_json)
         return
 
     if background and output_selector is not None:
@@ -483,6 +586,46 @@ def exec_cmd(
             suggestions=_suggestions("exec", "error", {}, error_code="INVALID_INPUT"),
         )
         _emit(response, as_json=as_json)
+        return
+
+    if stream and background:
+        project_root = resolve_project_root(cwd=Path.cwd(), override=project)
+        response = error_response(
+            command="exec",
+            project=str(project_root),
+            session_id=session_id or DEFAULT_SESSION_ID,
+            code="INVALID_INPUT",
+            message="--stream and --background cannot be used together.",
+            suggestions=_suggestions("exec", "error", {}, error_code="INVALID_INPUT"),
+        )
+        if stream:
+            _emit_stream_completion(response, as_json=as_json)
+        else:
+            _emit(response, as_json=as_json)
+        return
+
+    if stream and output_selector is not None:
+        project_root = resolve_project_root(cwd=Path.cwd(), override=project)
+        response = error_response(
+            command="exec",
+            project=str(project_root),
+            session_id=session_id or DEFAULT_SESSION_ID,
+            code="INVALID_INPUT",
+            message="Output selectors are not supported with --stream.",
+            suggestions=_suggestions("exec", "error", {}, error_code="INVALID_INPUT"),
+        )
+        _emit_stream_completion(response, as_json=as_json)
+        return
+
+    if stream:
+        _execute_streaming_exec(
+            source=source,
+            timeout=timeout,
+            ensure_started=ensure_started,
+            project=project,
+            session_id=session_id,
+            as_json=as_json,
+        )
         return
 
     def handler(project_root: Path, session_id: str) -> dict[str, object]:
@@ -522,6 +665,88 @@ def exec_cmd(
         return payload
 
     _execute_command("exec", project, as_json, session_id, True, handler)
+
+
+def _execute_streaming_exec(
+    *,
+    source: str,
+    timeout: float,
+    ensure_started: bool,
+    project: Path | None,
+    session_id: str | None,
+    as_json: bool,
+) -> None:
+    project_root = resolve_project_root(cwd=Path.cwd(), override=project)
+    response_session_id = session_id or DEFAULT_SESSION_ID
+    options = _current_render_options(local_as_json=as_json)
+    stream: ExecutionSink = JsonExecutionStream() if options.as_json else HumanExecutionStream()
+
+    try:
+        resolved_session_id = runtime.resolve_session_id(
+            project_root=project_root,
+            requested_session_id=session_id,
+            require_live_session=True,
+        )
+        response_session_id = resolved_session_id
+        managed = executions.execute_code(
+            project_root=project_root,
+            session_id=resolved_session_id,
+            code=source,
+            timeout_s=timeout,
+            ensure_started=ensure_started,
+            event_sink=stream,
+        )
+        payload = compact_execution_payload(managed.record.to_execution_payload())
+        if ensure_started:
+            payload["ensured_started"] = True
+            payload["started_new_session"] = managed.started_new_session
+        if managed.record.status == "error":
+            response = error_response(
+                command="exec",
+                project=str(project_root),
+                session_id=response_session_id,
+                code="EXECUTION_ERROR",
+                message="Execution failed",
+                ename=managed.record.ename,
+                evalue=managed.record.evalue,
+                traceback=compact_traceback(managed.record.traceback),
+                data=payload,
+                suggestions=_suggestions("exec", "error", payload, error_code="EXECUTION_ERROR"),
+            )
+        else:
+            response = success_response(
+                command="exec",
+                project=str(project_root),
+                session_id=response_session_id,
+                data=payload,
+                suggestions=_suggestions("exec", "ok", payload),
+            )
+    except AgentNBException as exc:
+        response = error_response(
+            command="exec",
+            project=str(project_root),
+            session_id=response_session_id,
+            code=exc.code,
+            message=exc.message,
+            ename=exc.ename,
+            evalue=exc.evalue,
+            traceback=compact_traceback(exc.traceback),
+            data=exc.data,
+            suggestions=_suggestions("exec", "error", exc.data, error_code=exc.code),
+        )
+    except Exception as exc:
+        response = error_response(
+            command="exec",
+            project=str(project_root),
+            session_id=response_session_id,
+            code="INTERNAL_ERROR",
+            message=str(exc),
+            ename=type(exc).__name__,
+            evalue=str(exc),
+            suggestions=_suggestions("exec", "error", {}, error_code="INTERNAL_ERROR"),
+        )
+
+    _emit_stream_completion(response, as_json=as_json, stream=stream)
 
 
 @main.command("vars")

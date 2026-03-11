@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
-from .contracts import ExecutionResult, KernelStatus
+from .contracts import ExecutionResult, ExecutionSink, KernelStatus
 from .errors import (
     AmbiguousSessionError,
     ExecutionTimedOutError,
@@ -191,6 +191,9 @@ class KernelRuntime:
         code: str,
         timeout_s: float,
         session_id: str = DEFAULT_SESSION_ID,
+        *,
+        before_backend: Callable[[], None] | None = None,
+        event_sink: ExecutionSink | None = None,
     ) -> ExecutionResult:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
         self._hooks.before_execute(store.project_root, session_id, code)
@@ -202,7 +205,14 @@ class KernelRuntime:
                 if not lock_acquired:
                     raise SessionBusyError()
                 try:
-                    result = self._backend.execute(session=session, code=code, timeout_s=timeout_s)
+                    if before_backend is not None:
+                        before_backend()
+                    result = self._backend.execute(
+                        session=session,
+                        code=code,
+                        timeout_s=timeout_s,
+                        event_sink=event_sink,
+                    )
                 except BackendExecutionTimeout as exc:
                     self._backend.interrupt(session)
                     raise ExecutionTimedOutError(timeout_s) from exc
@@ -296,9 +306,21 @@ class KernelRuntime:
         return store, session
 
     def _last_activity(self, project_root: Path, session_id: str) -> str | None:
-        history = HistoryStore(project_root=project_root, session_id=session_id).read(
+        history_entries = HistoryStore(project_root=project_root, session_id=session_id).read(
             include_internal=True
         )
-        if not history:
+        timestamps = [entry.ts for entry in history_entries]
+        execution_entries = ExecutionService(self).history_entries(
+            project_root=project_root,
+            session_id=session_id,
+            include_internal=True,
+            errors_only=False,
+        )
+        timestamps.extend(
+            str(entry.get("ts"))
+            for entry in execution_entries
+            if isinstance(entry.get("ts"), str) and entry.get("ts")
+        )
+        if not timestamps:
             return None
-        return history[-1].ts
+        return max(timestamps)

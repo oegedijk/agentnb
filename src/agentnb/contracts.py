@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 SCHEMA_VERSION = "1.0"
 
 ResponseStatus = Literal["ok", "error"]
-EventKind = Literal["stdout", "stderr", "result", "error", "status"]
+EventKind = Literal["stdout", "stderr", "result", "display", "error", "status"]
 
 
 def utc_now_iso() -> str:
@@ -41,6 +41,12 @@ class ExecutionEvent:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class ExecutionSink(Protocol):
+    def started(self, *, execution_id: str, session_id: str) -> None: ...
+
+    def accept(self, event: ExecutionEvent) -> None: ...
 
 
 @dataclass(slots=True)

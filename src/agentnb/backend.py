@@ -7,13 +7,20 @@ import time
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import zmq
 from jupyter_client import BlockingKernelClient
 
-from .contracts import ExecutionEvent, ExecutionResult, KernelStatus, utc_now_iso
+from .contracts import (
+    ExecutionEvent,
+    ExecutionResult,
+    ExecutionSink,
+    KernelStatus,
+    utc_now_iso,
+)
 from .errors import BackendOperationError
+from .execution_events import ExecutionResultAccumulator, dispatch_event
 from .session import SessionInfo, pid_exists
 
 STARTUP_CODE = """import os
@@ -42,7 +49,13 @@ class RuntimeBackend(Protocol):
 
     def status(self, session: SessionInfo, timeout_s: float = 2.0) -> KernelStatus: ...
 
-    def execute(self, session: SessionInfo, code: str, timeout_s: float) -> ExecutionResult: ...
+    def execute(
+        self,
+        session: SessionInfo,
+        code: str,
+        timeout_s: float,
+        event_sink: ExecutionSink | None = None,
+    ) -> ExecutionResult: ...
 
     def interrupt(self, session: SessionInfo) -> None: ...
 
@@ -137,7 +150,7 @@ class LocalIPythonBackend:
         alive = False
         client = self._create_client(connection_file)
         try:
-            client.start_channels(shell=True, iopub=False, stdin=False, hb=False, control=False)
+            client.start_channels(shell=True, iopub=False, stdin=False, hb=True, control=False)
             msg_id = client.kernel_info()
             deadline = time.monotonic() + timeout_s
             while True:
@@ -150,7 +163,10 @@ class LocalIPythonBackend:
                 alive = msg.get("msg_type") == "kernel_info_reply"
                 break
         except Exception:
-            alive = False
+            alive = bool(client.is_alive())
+        else:
+            if not alive:
+                alive = bool(client.is_alive())
         finally:
             _close_client(client)
 
@@ -164,24 +180,20 @@ class LocalIPythonBackend:
             python=session.python_executable,
         )
 
-    def execute(self, session: SessionInfo, code: str, timeout_s: float) -> ExecutionResult:
+    def execute(
+        self,
+        session: SessionInfo,
+        code: str,
+        timeout_s: float,
+        event_sink: ExecutionSink | None = None,
+    ) -> ExecutionResult:
         connection_file = Path(session.connection_file)
         if not connection_file.exists():
             raise BackendOperationError("Kernel connection file is missing")
 
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
-        events: list[ExecutionEvent] = []
-
-        result_text: str | None = None
-        execution_count: int | None = None
-        ename: str | None = None
-        evalue: str | None = None
-        tb: list[str] | None = None
-        status = "ok"
-
         started = time.monotonic()
         client = self._create_client(connection_file)
+        accumulator = ExecutionResultAccumulator()
 
         try:
             client.start_channels(shell=True, iopub=True, stdin=False, hb=False, control=False)
@@ -208,71 +220,67 @@ class LocalIPythonBackend:
                 if msg_type == "stream":
                     name = content.get("name", "stdout")
                     text = str(content.get("text", ""))
-                    events.append(
-                        ExecutionEvent(kind=name if name == "stderr" else "stdout", content=text)
+                    dispatch_event(
+                        accumulator=accumulator,
+                        event=ExecutionEvent(
+                            kind=name if name == "stderr" else "stdout",
+                            content=text,
+                        ),
+                        sink=event_sink,
                     )
-                    if name == "stderr":
-                        stderr_parts.append(text)
-                    else:
-                        stdout_parts.append(text)
                 elif msg_type == "execute_result":
                     value = _extract_text_plain(content)
-                    result_text = value
-                    events.append(ExecutionEvent(kind="result", content=value))
+                    dispatch_event(
+                        accumulator=accumulator,
+                        event=ExecutionEvent(kind="result", content=value),
+                        sink=event_sink,
+                    )
                 elif msg_type == "display_data":
                     value = _extract_text_plain(content)
                     if value:
-                        result_text = f"{result_text}\n{value}" if result_text else value
-                        events.append(
-                            ExecutionEvent(kind="result", content=value, metadata={"display": True})
+                        dispatch_event(
+                            accumulator=accumulator,
+                            event=ExecutionEvent(kind="display", content=value),
+                            sink=event_sink,
                         )
                 elif msg_type == "execute_input":
-                    execution_count = content.get("execution_count")
+                    accumulator.set_execution_count(content.get("execution_count"))
                 elif msg_type == "error":
-                    status = "error"
-                    ename = content.get("ename")
-                    evalue = content.get("evalue")
-                    tb = content.get("traceback")
-                    events.append(
-                        ExecutionEvent(
+                    dispatch_event(
+                        accumulator=accumulator,
+                        event=ExecutionEvent(
                             kind="error",
-                            content=evalue,
-                            metadata={"ename": ename, "traceback": tb or []},
-                        )
+                            content=str(content.get("evalue", "")) or None,
+                            metadata={
+                                "ename": content.get("ename"),
+                                "traceback": content.get("traceback") or [],
+                            },
+                        ),
+                        sink=event_sink,
                     )
-                elif msg_type == "status" and content.get("execution_state") == "idle":
-                    idle_received = True
-                    events.append(ExecutionEvent(kind="status", content="idle"))
+                elif msg_type == "status":
+                    state = content.get("execution_state")
+                    if isinstance(state, str):
+                        dispatch_event(
+                            accumulator=accumulator,
+                            event=ExecutionEvent(kind="status", content=state),
+                            sink=event_sink,
+                        )
+                        if state == "idle":
+                            idle_received = True
 
             shell_reply = self._shell_reply(client=client, msg_id=msg_id)
             shell_content: dict[str, object] = {}
             if shell_reply is not None:
                 shell_content = _as_dict(shell_reply.get("content"))
-            if shell_content and execution_count is None:
-                execution_count = cast(int | None, shell_content.get("execution_count"))
-
-            if shell_content.get("status") == "error":
-                status = "error"
-                ename = cast(str | None, shell_content.get("ename", ename))
-                evalue = cast(str | None, shell_content.get("evalue", evalue))
-                tb = cast(list[str] | None, shell_content.get("traceback", tb))
+            if shell_content:
+                accumulator.apply_shell_reply(cast(dict[str, Any], shell_content))
 
         finally:
             _close_client(client)
 
         duration_ms = int((time.monotonic() - started) * 1000)
-        return ExecutionResult(
-            status=status,
-            stdout="".join(stdout_parts),
-            stderr="".join(stderr_parts),
-            result=result_text,
-            execution_count=execution_count,
-            duration_ms=duration_ms,
-            ename=ename,
-            evalue=evalue,
-            traceback=tb,
-            events=events,
-        )
+        return accumulator.build(duration_ms=duration_ms)
 
     def interrupt(self, session: SessionInfo) -> None:
         if not pid_exists(session.pid):

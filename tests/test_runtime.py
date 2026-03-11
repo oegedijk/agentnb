@@ -15,6 +15,7 @@ from agentnb.errors import (
     KernelWaitTimedOutError,
     SessionNotFoundError,
 )
+from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.history import HistoryStore
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, SessionStore
@@ -199,6 +200,42 @@ def test_runtime_list_sessions_reports_alive_entries(project_dir: Path) -> None:
     assert [session["session_id"] for session in sessions] == ["default", "analysis"]
     assert sessions[0]["is_default"] is True
     assert sessions[1]["is_default"] is False
+
+
+def test_runtime_list_sessions_uses_execution_history_for_last_activity(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="analysis")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python-analysis",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+    ExecutionStore(project_dir).append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="analysis",
+            command_type="exec",
+            status="ok",
+            duration_ms=12,
+            result="2",
+        )
+    )
+
+    backend = Mock()
+    backend.status.return_value = KernelStatus(alive=True, pid=222, python="python-analysis")
+    runtime = KernelRuntime(backend=backend)
+
+    sessions = runtime.list_sessions(project_root=project_dir)
+
+    assert sessions[0]["session_id"] == "analysis"
+    assert sessions[0]["last_activity"] == "2026-03-10T00:00:00+00:00"
 
 
 def test_runtime_delete_session_stops_alive_kernel(project_dir: Path) -> None:

@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink
-from agentnb.errors import KernelNotReadyError, RunWaitTimedOutError
+from agentnb.errors import AgentNBException, KernelNotReadyError, RunWaitTimedOutError
 from agentnb.execution import ExecutionRecord, ExecutionService, ExecutionStore
 from agentnb.runtime import KernelRuntime
 
@@ -193,6 +193,27 @@ def test_execution_service_start_background_code_persists_running_record(
     assert stored.worker_pid == 456
 
 
+def test_execution_service_start_background_code_persists_spawn_failure(
+    project_dir: Path, mocker
+) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    service = ExecutionService(runtime)
+    mocker.patch("agentnb.execution.subprocess.Popen", side_effect=OSError("spawn failed"))
+
+    with pytest.raises(OSError, match="spawn failed"):
+        service.start_background_code(
+            project_root=project_dir,
+            session_id="default",
+            code="1 + 1",
+        )
+
+    runs = ExecutionStore(project_dir).read(session_id="default")
+    assert len(runs) == 1
+    assert runs[0].status == "error"
+    assert runs[0].ename == "OSError"
+    assert runs[0].evalue == "spawn failed"
+
+
 def test_execution_service_wait_for_run_returns_completed_record(project_dir: Path) -> None:
     ExecutionStore(project_dir).append(
         ExecutionRecord(
@@ -235,6 +256,21 @@ def test_execution_service_wait_for_run_times_out(project_dir: Path, mocker) -> 
         ExecutionService(KernelRuntime()).wait_for_run(
             project_root=project_dir,
             execution_id="run-1",
+            timeout_s=0.0,
+            poll_interval_s=0.0,
+        )
+
+
+def test_execution_service_get_run_raises_when_missing(project_dir: Path) -> None:
+    with pytest.raises(AgentNBException, match="Execution not found: missing"):
+        ExecutionService(KernelRuntime()).get_run(project_root=project_dir, execution_id="missing")
+
+
+def test_execution_service_wait_for_run_raises_when_missing(project_dir: Path) -> None:
+    with pytest.raises(AgentNBException, match="Execution not found: missing"):
+        ExecutionService(KernelRuntime()).wait_for_run(
+            project_root=project_dir,
+            execution_id="missing",
             timeout_s=0.0,
             poll_interval_s=0.0,
         )
@@ -358,3 +394,125 @@ def test_execution_service_cancel_run_stops_starting_session(project_dir: Path, 
     assert stored is not None
     assert stored.status == "error"
     assert stored.ename == "CancelledError"
+
+
+def test_execution_service_cancel_run_returns_unchanged_for_finished_run(project_dir: Path) -> None:
+    ExecutionStore(project_dir).append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="analysis",
+            command_type="exec",
+            status="ok",
+            duration_ms=7,
+            result="2",
+        )
+    )
+
+    payload = ExecutionService(KernelRuntime()).cancel_run(
+        project_root=project_dir,
+        execution_id="run-1",
+    )
+
+    assert payload == {
+        "execution_id": "run-1",
+        "session_id": "analysis",
+        "cancel_requested": False,
+        "status": "ok",
+        "run_status": "ok",
+        "session_outcome": "unchanged",
+    }
+
+
+def test_execution_service_marks_exited_background_worker_as_error(
+    project_dir: Path, mocker
+) -> None:
+    mocker.patch("agentnb.execution.pid_exists", return_value=False)
+    ExecutionStore(project_dir).append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            worker_pid=123,
+            code="1 + 1",
+        )
+    )
+
+    run = ExecutionService(KernelRuntime()).get_run(project_root=project_dir, execution_id="run-1")
+
+    assert run["status"] == "error"
+    assert run["ename"] == "WorkerExitedError"
+    assert run["evalue"] == "Background worker exited before recording a result."
+
+
+def test_execution_service_complete_background_run_persists_streamed_progress(
+    project_dir: Path,
+    mocker,
+) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    service = ExecutionService(runtime)
+    mocker.patch("agentnb.execution.pid_exists", return_value=True)
+    ExecutionStore(project_dir).append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            code="print('hello')",
+            worker_pid=123,
+        )
+    )
+
+    def execute_stub(**kwargs: object) -> ExecutionResult:
+        sink = kwargs["event_sink"]
+        assert sink is not None
+        sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
+        sink.accept(ExecutionEvent(kind="stderr", content="warn\n"))
+        sink.accept(ExecutionEvent(kind="display", content="42"))
+        sink.accept(
+            ExecutionEvent(
+                kind="error",
+                content="boom",
+                metadata={"ename": "RuntimeError", "traceback": ["tb"]},
+            )
+        )
+        return ExecutionResult(
+            status="error",
+            stdout="hello\n",
+            stderr="warn\n",
+            result="42",
+            duration_ms=8,
+            ename="RuntimeError",
+            evalue="boom",
+            traceback=["tb"],
+            events=[
+                ExecutionEvent(kind="stdout", content="hello\n"),
+                ExecutionEvent(kind="stderr", content="warn\n"),
+                ExecutionEvent(kind="display", content="42"),
+                ExecutionEvent(
+                    kind="error",
+                    content="boom",
+                    metadata={"ename": "RuntimeError", "traceback": ["tb"]},
+                ),
+            ],
+        )
+
+    runtime.execute = Mock(side_effect=execute_stub)  # type: ignore[method-assign]
+
+    service.complete_background_run(project_root=project_dir, execution_id="run-1")
+
+    stored = ExecutionStore(project_dir).get("run-1")
+    assert stored is not None
+    assert stored.status == "error"
+    assert stored.stdout == "hello\n"
+    assert stored.stderr == "warn\n"
+    assert stored.result == "42"
+    assert stored.ename == "RuntimeError"
+    assert stored.evalue == "boom"
+    assert stored.traceback == ["tb"]
+    assert [event.kind for event in stored.events] == ["stdout", "stderr", "display", "error"]

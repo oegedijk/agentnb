@@ -6,10 +6,17 @@ from pathlib import Path
 from queue import Empty
 from unittest.mock import Mock
 
+import pytest
 from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 
-from agentnb.backend import STARTUP_CODE, LocalIPythonBackend
+from agentnb.backend import (
+    STARTUP_CODE,
+    BackendOperationError,
+    LocalIPythonBackend,
+    _tail_log,
+    _uptime_seconds,
+)
 from agentnb.provisioner import _python_supports_module
 from agentnb.session import SessionInfo
 
@@ -115,3 +122,75 @@ def test_status_falls_back_to_heartbeat_when_shell_probe_is_busy(
         hb=True,
         control=False,
     )
+
+
+def test_execute_raises_when_connection_file_is_missing(tmp_path: Path) -> None:
+    backend = LocalIPythonBackend()
+    session = SessionInfo(
+        session_id="default",
+        pid=1234,
+        connection_file=str(tmp_path / "kernel-default.json"),
+        python_executable="python",
+        project_root=str(tmp_path),
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+
+    with pytest.raises(BackendOperationError, match="connection file is missing"):
+        backend.execute(session, "1 + 1", timeout_s=1.0)
+
+
+def test_wait_for_ready_includes_kernel_log_when_process_exits_early(
+    tmp_path: Path,
+    mocker: MockerFixture,
+) -> None:
+    backend = LocalIPythonBackend()
+    log_file = tmp_path / "kernel-default.log"
+    log_file.write_text("kernel boot failed", encoding="utf-8")
+    session = SessionInfo(
+        session_id="default",
+        pid=1234,
+        connection_file=str(tmp_path / "kernel-default.json"),
+        python_executable="python",
+        project_root=str(tmp_path),
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+    process = mocker.Mock()
+    process.poll.return_value = 7
+
+    with pytest.raises(BackendOperationError, match="kernel boot failed"):
+        backend._wait_for_ready(session, process=process, timeout_s=0.0, log_file=log_file)
+
+
+def test_reset_reapplies_startup_code_after_success(mocker: MockerFixture, tmp_path: Path) -> None:
+    backend = LocalIPythonBackend()
+    session = SessionInfo(
+        session_id="default",
+        pid=1234,
+        connection_file=str(tmp_path / "kernel-default.json"),
+        python_executable="python",
+        project_root=str(tmp_path),
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+    execute_mock = mocker.patch.object(
+        backend,
+        "execute",
+        side_effect=[
+            mocker.Mock(status="ok", duration_ms=5),
+            mocker.Mock(status="ok", duration_ms=2),
+        ],
+    )
+
+    result = backend.reset(session, timeout_s=1.0)
+
+    assert result.status == "ok"
+    assert execute_mock.call_count == 2
+    assert execute_mock.call_args_list[1].args[1] == STARTUP_CODE
+
+
+def test_tail_log_and_uptime_handle_edge_cases(tmp_path: Path) -> None:
+    log_file = tmp_path / "kernel.log"
+    log_file.write_text("x" * 500, encoding="utf-8")
+
+    assert len(_tail_log(log_file, max_chars=40)) == 40
+    assert _tail_log(tmp_path / "missing.log") == ""
+    assert _uptime_seconds("not-a-timestamp") is None

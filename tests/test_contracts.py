@@ -1,37 +1,31 @@
 from __future__ import annotations
 
-import pytest
-
-from agentnb.contracts import error_response, success_response
+from agentnb.contracts import SCHEMA_VERSION, error_response, success_response
 
 
-@pytest.mark.parametrize(
-    "required_key",
-    ["schema_version", "status", "command", "project", "session_id", "timestamp", "data", "error"],
-)
-def test_success_response_has_required_top_level_fields(required_key: str) -> None:
+def test_success_response_to_dict_preserves_schema_and_payload() -> None:
     response = success_response(
         command="status",
         project="/tmp/project",
         session_id="default",
         data={"alive": False},
+        suggestions=["Run `agentnb start --json`."],
     )
 
     payload = response.to_dict()
-    assert required_key in payload
+
+    assert payload["schema_version"] == SCHEMA_VERSION
+    assert payload["status"] == "ok"
+    assert payload["command"] == "status"
+    assert payload["project"] == "/tmp/project"
+    assert payload["session_id"] == "default"
+    assert payload["data"] == {"alive": False}
+    assert payload["suggestions"] == ["Run `agentnb start --json`."]
+    assert payload["error"] is None
+    assert isinstance(payload["timestamp"], str)
 
 
-@pytest.mark.parametrize(
-    ("field", "expected"),
-    [
-        ("code", "NO_KERNEL"),
-        ("message", "No kernel running."),
-        ("ename", "RuntimeError"),
-        ("evalue", "missing kernel"),
-        ("traceback", ["line1"]),
-    ],
-)
-def test_error_response_includes_stable_error_keys(field: str, expected: str | list[str]) -> None:
+def test_error_response_to_dict_preserves_nested_error_fields() -> None:
     response = error_response(
         command="exec",
         project="/tmp/project",
@@ -41,9 +35,19 @@ def test_error_response_includes_stable_error_keys(field: str, expected: str | l
         ename="RuntimeError",
         evalue="missing kernel",
         traceback=["line1"],
+        data={"alive": False},
+        suggestions=["Run `agentnb start --json`."],
     )
 
     payload = response.to_dict()
+
     assert payload["status"] == "error"
-    assert payload["error"] is not None
-    assert payload["error"][field] == expected
+    assert payload["data"] == {"alive": False}
+    assert payload["suggestions"] == ["Run `agentnb start --json`."]
+    assert payload["error"] == {
+        "code": "NO_KERNEL",
+        "message": "No kernel running.",
+        "ename": "RuntimeError",
+        "evalue": "missing kernel",
+        "traceback": ["line1"],
+    }

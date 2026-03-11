@@ -1,0 +1,141 @@
+from __future__ import annotations
+
+from agentnb.compact import (
+    compact_collection_preview,
+    compact_execution_payload,
+    compact_history_entry,
+    compact_run_entry,
+    compact_traceback,
+)
+
+
+def test_compact_traceback_strips_ansi_and_middle_lines() -> None:
+    traceback = [
+        "\x1b[31mTraceback (most recent call last):\x1b[0m",
+        '  File "main.py", line 1, in <module>',
+        "line 3",
+        "line 4",
+        "line 5",
+        "ValueError: bad value",
+    ]
+
+    compacted = compact_traceback(traceback)
+
+    assert compacted == [
+        "Traceback (most recent call last):",
+        '  File "main.py", line 1, in <module>',
+        "...",
+        "line 4",
+        "line 5",
+        "ValueError: bad value",
+    ]
+
+
+def test_compact_execution_payload_truncates_large_fields_and_preserves_selected_output() -> None:
+    payload = {
+        "status": "ok",
+        "duration_ms": 12,
+        "execution_id": "run-1",
+        "stdout": "stdout " * 80,
+        "stderr": "stderr " * 80,
+        "result": "result " * 80,
+        "selected_output": "stdout",
+        "selected_text": "exact output\n",
+    }
+
+    compacted = compact_execution_payload(payload)
+
+    assert compacted["execution_id"] == "run-1"
+    assert compacted["selected_output"] == "stdout"
+    assert compacted["selected_text"] == "exact output\n"
+    assert compacted["stdout"].endswith("...")
+    assert compacted["stderr"].endswith("...")
+    assert compacted["result"].endswith("...")
+
+
+def test_compact_collection_preview_limits_nested_values() -> None:
+    preview = {
+        "kind": "sequence-like",
+        "length": 5,
+        "item_type": "dict",
+        "sample_keys": ["id", "title", "body", "author", "meta", "ignored"],
+        "sample": [
+            {
+                "id": 1,
+                "title": "a" * 100,
+                "body": "b" * 100,
+                "author": "c" * 100,
+                "meta": "d" * 100,
+                "ignored": "e" * 100,
+            }
+            for _ in range(5)
+        ],
+    }
+
+    compacted = compact_collection_preview(preview)
+
+    assert compacted["length"] == 5
+    assert compacted["item_type"] == "dict"
+    assert compacted["sample_keys"] == ["id", "title", "body", "author", "meta"]
+    assert len(compacted["sample"]) == 3
+    assert set(compacted["sample"][0]) == {"id", "title", "body", "author", "meta"}
+
+
+def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
+    ok_entry = compact_history_entry(
+        {
+            "kind": "user_command",
+            "ts": "2026-03-11T00:00:00+00:00",
+            "status": "ok",
+            "duration_ms": 5,
+            "command_type": "exec",
+            "input": (
+                "url = 'https://example.com/really/long/path/to/resource?"
+                "alpha=1&beta=2&gamma=3'\nurl"
+            ),
+            "user_visible": True,
+        }
+    )
+    error_entry = compact_history_entry(
+        {
+            "kind": "user_command",
+            "ts": "2026-03-11T00:00:00+00:00",
+            "status": "error",
+            "duration_ms": 5,
+            "command_type": "exec",
+            "error_type": "ZeroDivisionError",
+            "user_visible": True,
+        }
+    )
+
+    assert ok_entry["label"].startswith("exec url = 'https://example.com")
+    assert "gamma=3" not in ok_entry["label"]
+    assert error_entry["label"] == "exec error ZeroDivisionError"
+
+
+def test_compact_run_entry_exposes_previews_and_error_type() -> None:
+    entry = compact_run_entry(
+        {
+            "execution_id": "run-1",
+            "ts": "2026-03-11T00:00:00+00:00",
+            "session_id": "default",
+            "command_type": "exec",
+            "status": "error",
+            "duration_ms": 9,
+            "stdout": "line one\nline two",
+            "result": "value",
+            "ename": "RuntimeError",
+        }
+    )
+
+    assert entry == {
+        "execution_id": "run-1",
+        "ts": "2026-03-11T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "error",
+        "duration_ms": 9,
+        "result_preview": "value",
+        "stdout_preview": "line one line two",
+        "error_type": "RuntimeError",
+    }

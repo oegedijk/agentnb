@@ -97,9 +97,13 @@ def test_runtime_doctor_merges_store_metadata(project_dir: Path, mocker: MockerF
     payload = runtime.doctor(project_root=project_dir)
 
     assert payload["ready"] is True
+    assert payload["selected_python"] == "/custom/python"
+    assert payload["python_source"] == "explicit"
     assert payload["session_exists"] is False
     assert payload["stale_session_cleaned"] is False
-    assert isinstance(payload["checks"], list)
+    assert payload["checks"] == [
+        {"name": "python", "status": "ok", "message": "ok", "fix_hint": None}
+    ]
 
 
 def test_runtime_ensure_started_delegates_to_start(

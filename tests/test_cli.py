@@ -445,7 +445,14 @@ def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path
     payload = _payload(result.output)
     assert payload["status"] == "ok"
     assert payload["command"] == "doctor"
-    assert "checks" in payload["data"]
+    assert payload["data"] == {
+        "ready": True,
+        "checks": [{"name": "python", "status": "ok", "message": "ok"}],
+        "selected_python": "python",
+        "python_source": "current",
+        "session_exists": False,
+        "stale_session_cleaned": False,
+    }
 
 
 def test_cli_start_auto_install_is_opt_in(

@@ -113,6 +113,47 @@ def test_ensure_ipykernel_auto_install_flow(project_dir: Path, mocker: MockerFix
     supports_mock.assert_called_once()
 
 
+def test_ensure_ipykernel_auto_install_surfaces_installer_failure(
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    provisioner = KernelProvisioner(project_dir)
+    selected = InterpreterSelection(
+        executable=str(Path(sys.executable).absolute()),
+        source="current_python",
+        ipykernel_available=False,
+    )
+    run_mock = mocker.patch("agentnb.provisioner.subprocess.run")
+    run_mock.return_value = subprocess.CompletedProcess(
+        args=["python"],
+        returncode=1,
+        stderr="x" * 500,
+    )
+
+    with pytest.raises(ProvisioningError, match="Failed to auto-install ipykernel"):
+        provisioner.ensure_ipykernel(selected, auto_install=True)
+
+
+def test_ensure_ipykernel_auto_install_rechecks_module_availability(
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    provisioner = KernelProvisioner(project_dir)
+    selected = InterpreterSelection(
+        executable=str(Path(sys.executable).absolute()),
+        source="current_python",
+        ipykernel_available=False,
+    )
+    mocker.patch(
+        "agentnb.provisioner.subprocess.run",
+        return_value=subprocess.CompletedProcess(args=["python"], returncode=0),
+    )
+    mocker.patch("agentnb.provisioner._python_supports_module", return_value=False)
+
+    with pytest.raises(ProvisioningError, match="module is still unavailable"):
+        provisioner.ensure_ipykernel(selected, auto_install=True)
+
+
 def test_doctor_reports_warn_for_missing_ipykernel_without_fix(
     project_dir: Path,
     mocker: MockerFixture,
@@ -176,3 +217,26 @@ def test_doctor_auto_fix_promotes_missing_ipykernel_to_ok(
     ensure_mock.assert_called_once()
     ipykernel_check = next(check for check in report.checks if check.name == "ipykernel")
     assert ipykernel_check.status == "ok"
+
+
+def test_doctor_reports_python_selection_errors(project_dir: Path, mocker: MockerFixture) -> None:
+    provisioner = KernelProvisioner(project_dir)
+    mocker.patch.object(
+        provisioner,
+        "select_interpreter",
+        side_effect=ProvisioningError("bad interpreter"),
+    )
+
+    report = provisioner.doctor(auto_fix=False)
+
+    assert report.ready is False
+    assert report.selected_python is None
+    assert report.python_source is None
+    assert report.checks == [
+        DoctorCheck(
+            name="python",
+            status="error",
+            message="bad interpreter",
+            fix_hint="Provide a valid Python path with --python.",
+        )
+    ]

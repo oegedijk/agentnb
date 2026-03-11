@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from pytest_mock import MockerFixture
 from agentnb.cli import main
 from agentnb.contracts import ExecutionResult
 from agentnb.errors import SessionBusyError
+from agentnb.execution import ExecutionRecord, ManagedExecution
 
 
 def _payload(output: str) -> dict[str, object]:
@@ -57,6 +60,7 @@ def test_cli_json_envelope_for_exec_roundtrip(cli_runner: CliRunner, project_dir
     assert payload["command"] == "exec"
     assert payload["session_id"] == "default"
     assert payload["data"]["result"] == "2"
+    assert isinstance(payload["data"]["execution_id"], str)
     assert "events" not in payload["data"]
 
 
@@ -142,6 +146,79 @@ def test_cli_returns_kernel_not_ready_error_when_connection_exists_without_sessi
     assert payload["error"]["code"] == "KERNEL_NOT_READY"
 
 
+def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {"session_id": "default"},
+        {"session_id": "analysis"},
+    ]
+
+    result = cli_runner.invoke(main, ["status", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert payload["error"]["code"] == "AMBIGUOUS_SESSION"
+    assert payload["error"]["message"].startswith("Multiple live sessions exist")
+    assert payload["data"]["available_sessions"] == ["default", "analysis"]
+    assert payload["suggestions"] == [
+        "Run `agentnb sessions list --json` to see the live session names.",
+        "Retry with `agentnb status --session NAME --json` to target one explicitly.",
+    ]
+
+
+def test_cli_status_uses_only_live_session_when_implicit(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    status_calls: list[dict[str, object]] = []
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {"session_id": "analysis"}
+    ]
+
+    def status_stub(**kwargs: object) -> object:
+        status_calls.append(dict(kwargs))
+        return type("Status", (), {"to_dict": lambda self: {"alive": True, "pid": 123}})()
+
+    cli.runtime.status = status_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["status", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["session_id"] == "analysis"
+    assert status_calls[0]["session_id"] == "analysis"
+
+
+def test_cli_status_wait_uses_runtime_wait_for_ready(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    wait_calls: list[dict[str, object]] = []
+
+    def wait_stub(**kwargs: object) -> object:
+        wait_calls.append(dict(kwargs))
+        return type("Status", (), {"to_dict": lambda self: {"alive": True, "pid": 321}})()
+
+    cli.runtime.wait_for_ready = wait_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["status", "--project", str(project_dir), "--wait", "--timeout", "5", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["alive"] is True
+    assert payload["data"]["waited"] is True
+    assert wait_calls[0]["timeout_s"] == 5.0
+
+
 def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
@@ -217,6 +294,37 @@ def test_cli_start_auto_install_flag_enables_installs(
     assert start_mock.call_args.kwargs["auto_install"] is True
 
 
+def test_cli_start_passes_named_session(
+    cli_runner: CliRunner,
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    start_mock = mocker.patch("agentnb.cli.runtime.start")
+    start_mock.return_value = (
+        mocker.Mock(
+            to_dict=lambda: {
+                "alive": True,
+                "pid": 1234,
+                "connection_file": str(project_dir / ".agentnb" / "kernel-analysis.json"),
+                "started_at": "2026-03-09T00:00:00+00:00",
+                "uptime_s": 0.0,
+                "python": "python",
+            }
+        ),
+        True,
+    )
+
+    result = cli_runner.invoke(
+        main,
+        ["start", "--project", str(project_dir), "--session", "analysis", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["session_id"] == "analysis"
+    assert start_mock.call_args.kwargs["session_id"] == "analysis"
+
+
 def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(main, [])
     assert result.exit_code == 0
@@ -231,10 +339,13 @@ def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "Persistent project-scoped Python REPL for agent workflows." in result.output
     assert "append-only notebook" in result.output
-    assert "agentnb start --json" in result.output
+    assert "agentnb exec --ensure-started" in result.output
+    assert "Use `--session NAME`" in result.output
+    assert "runs wait" in result.output
     assert "--auto-install" in result.output
     assert "doctor --fix" in result.output
     assert "--recent" in result.output
+    assert "sessions" in result.output
 
 
 def test_cli_json_response_includes_suggestions(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -312,6 +423,86 @@ def test_cli_exec_result_only_returns_selected_text(
     )
     assert exec_res.exit_code == 0
     assert exec_res.output.strip() == "2"
+
+
+def test_cli_exec_passes_named_session(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    execute_calls: list[dict[str, object]] = []
+
+    def execute_stub(**kwargs: object) -> ExecutionResult:
+        execute_calls.append(dict(kwargs))
+        return _ok_execution(result="2")
+
+    cli.runtime.execute = execute_stub  # type: ignore[method-assign]
+
+    exec_res = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--session", "analysis", "--json", "1 + 1"],
+    )
+
+    assert exec_res.exit_code == 0
+    payload = _payload(exec_res.output)
+    assert payload["session_id"] == "analysis"
+    assert execute_calls[0]["session_id"] == "analysis"
+
+
+def test_cli_exec_ensure_started_starts_missing_session(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    ensure_calls: list[dict[str, object]] = []
+
+    def ensure_stub(**kwargs: object) -> tuple[object, bool]:
+        ensure_calls.append(dict(kwargs))
+        return object(), True
+
+    cli.runtime.ensure_started = ensure_stub  # type: ignore[method-assign]
+    cli.runtime.execute = lambda **_: _ok_execution(result="2")  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--ensure-started", "--json", "1 + 1"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["ensured_started"] is True
+    assert payload["data"]["started_new_session"] is True
+    assert ensure_calls[0]["session_id"] == "default"
+
+
+def test_cli_exec_background_returns_run_id(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.start_background_code = lambda **_: ManagedExecution(  # type: ignore[method-assign]
+        record=ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            code="1 + 1",
+            worker_pid=123,
+        ),
+        started_new_session=True,
+    )
+
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--background", "--json", "1 + 1"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["execution_id"] == "run-1"
+    assert payload["data"]["background"] is True
+    assert (
+        payload["suggestions"][0]
+        == "Run `agentnb runs wait EXECUTION_ID --json` to wait for the final result."
+    )
 
 
 def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -606,6 +797,218 @@ def test_cli_history_error_exec_label_is_semantic(cli_runner: CliRunner, project
 
     payload = _payload(history_res.output)
     assert payload["data"]["entries"][0]["label"] == "exec error ZeroDivisionError"
+
+
+def test_cli_sessions_list_returns_runtime_entries(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {
+            "session_id": "default",
+            "alive": True,
+            "pid": 111,
+            "python": "python",
+            "is_default": True,
+            "last_activity": "2026-03-09T00:00:00+00:00",
+        },
+        {
+            "session_id": "analysis",
+            "alive": True,
+            "pid": 222,
+            "python": "python",
+            "is_default": False,
+            "last_activity": None,
+        },
+    ]
+
+    result = cli_runner.invoke(main, ["sessions", "list", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "sessions-list"
+    assert [session["session_id"] for session in payload["data"]["sessions"]] == [
+        "default",
+        "analysis",
+    ]
+
+
+def test_cli_sessions_list_empty_has_actionable_suggestions(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: []  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["sessions", "list", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["sessions"] == []
+    assert payload["suggestions"] == [
+        "Run `agentnb start --json` to start the default session.",
+        'Run `agentnb exec --ensure-started --json "..."` to start and execute in one step.',
+    ]
+
+
+def test_cli_sessions_delete_calls_runtime_delete(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    delete_calls: list[dict[str, object]] = []
+
+    def delete_stub(**kwargs: object) -> dict[str, object]:
+        delete_calls.append(dict(kwargs))
+        return {
+            "deleted": True,
+            "session_id": "analysis",
+            "stopped_running_kernel": True,
+        }
+
+    cli.runtime.delete_session = delete_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["sessions", "delete", "analysis", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "sessions-delete"
+    assert payload["session_id"] == "analysis"
+    assert delete_calls[0]["session_id"] == "analysis"
+
+
+def test_cli_runs_list_returns_compacted_runs(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.list_runs = lambda **_: [  # type: ignore[method-assign]
+        {
+            "execution_id": "run-1",
+            "ts": "2026-03-10T00:00:00+00:00",
+            "session_id": "default",
+            "command_type": "exec",
+            "status": "ok",
+            "duration_ms": 12,
+            "stdout": "",
+            "stderr": "",
+            "result": "42",
+            "ename": None,
+        }
+    ]
+
+    result = cli_runner.invoke(main, ["runs", "list", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "runs-list"
+    assert payload["data"]["runs"][0]["execution_id"] == "run-1"
+    assert payload["data"]["runs"][0]["result_preview"] == "42"
+
+
+def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "ts": "2026-03-10T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "ok",
+        "duration_ms": 12,
+        "code": "1 + 1",
+        "stdout": "",
+        "stderr": "",
+        "result": "2",
+        "execution_count": 1,
+        "ename": None,
+        "evalue": None,
+        "traceback": None,
+        "events": [],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "runs-show"
+    assert payload["data"]["run"]["execution_id"] == "run-1"
+
+
+def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.wait_for_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "status": "ok",
+        "result": "2",
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "wait", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "runs-wait"
+    assert payload["data"]["run"]["execution_id"] == "run-1"
+
+
+def test_cli_runs_cancel_requests_interrupt(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.cancel_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "cancel_requested": True,
+        "status": "running",
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "cancel", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "runs-cancel"
+    assert payload["data"]["cancel_requested"] is True
+
+
+def test_cli_module_entrypoint_invokes_main(project_dir: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "agentnb.cli",
+            "sessions",
+            "list",
+            "--project",
+            str(project_dir),
+            "--json",
+        ],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    payload = _payload(completed.stdout)
+    assert payload["command"] == "sessions-list"
+
+
+def test_cli_invalid_session_name_is_rejected(cli_runner: CliRunner, project_dir: Path) -> None:
+    result = cli_runner.invoke(
+        main,
+        ["status", "--project", str(project_dir), "--session", "../bad", "--json"],
+    )
+
+    assert result.exit_code == 2
+    assert "Invalid session name" in result.output
 
 
 def test_cli_reset_is_recorded_as_visible_history_entry(

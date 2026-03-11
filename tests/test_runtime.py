@@ -8,7 +8,13 @@ from unittest.mock import Mock
 import pytest
 
 from agentnb.contracts import KernelStatus
-from agentnb.errors import ExecutionTimedOutError, KernelNotReadyError
+from agentnb.errors import (
+    AmbiguousSessionError,
+    ExecutionTimedOutError,
+    KernelNotReadyError,
+    KernelWaitTimedOutError,
+    SessionNotFoundError,
+)
 from agentnb.history import HistoryStore
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, SessionStore
@@ -151,3 +157,180 @@ def test_runtime_execute_reports_kernel_not_ready_when_session_exists_but_status
 
     with pytest.raises(KernelNotReadyError):
         runtime.execute(project_root=project_dir, code="1 + 1", timeout_s=5)
+
+
+def test_runtime_list_sessions_reports_alive_entries(project_dir: Path) -> None:
+    default_store = SessionStore(project_dir, session_id="default")
+    analysis_store = SessionStore(project_dir, session_id="analysis")
+    default_store.ensure_state_dir()
+
+    default_store.save_session(
+        SessionInfo(
+            session_id="default",
+            pid=os.getpid(),
+            connection_file=str(default_store.connection_file),
+            python_executable="python-default",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    analysis_store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=os.getpid(),
+            connection_file=str(analysis_store.connection_file),
+            python_executable="python-analysis",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:01:00+00:00",
+        )
+    )
+    default_store.connection_file.write_text("{}", encoding="utf-8")
+    analysis_store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.side_effect = [
+        KernelStatus(alive=True, pid=111, python="python-default"),
+        KernelStatus(alive=True, pid=222, python="python-analysis"),
+    ]
+    runtime = KernelRuntime(backend=backend)
+
+    sessions = runtime.list_sessions(project_root=project_dir)
+
+    assert [session["session_id"] for session in sessions] == ["default", "analysis"]
+    assert sessions[0]["is_default"] is True
+    assert sessions[1]["is_default"] is False
+
+
+def test_runtime_delete_session_stops_alive_kernel(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="analysis")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+    store.log_file.write_text("log", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.return_value = KernelStatus(alive=True)
+    runtime = KernelRuntime(backend=backend)
+
+    payload = runtime.delete_session(project_root=project_dir, session_id="analysis")
+
+    assert payload["deleted"] is True
+    assert payload["stopped_running_kernel"] is True
+    backend.stop.assert_called_once()
+    assert store.load_session() is None
+    assert not store.connection_file.exists()
+    assert not store.log_file.exists()
+
+
+def test_runtime_delete_session_raises_for_missing_session(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+
+    with pytest.raises(SessionNotFoundError):
+        runtime.delete_session(project_root=project_dir, session_id="missing")
+
+
+def test_runtime_resolve_session_id_uses_only_live_session(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="analysis")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.return_value = KernelStatus(alive=True, pid=123)
+    runtime = KernelRuntime(backend=backend)
+
+    resolved = runtime.resolve_session_id(
+        project_root=project_dir,
+        requested_session_id=None,
+        require_live_session=True,
+    )
+
+    assert resolved == "analysis"
+
+
+def test_runtime_resolve_session_id_raises_when_multiple_live_sessions_exist(
+    project_dir: Path,
+) -> None:
+    default_store = SessionStore(project_dir, session_id="default")
+    analysis_store = SessionStore(project_dir, session_id="analysis")
+    default_store.ensure_state_dir()
+    for store in (default_store, analysis_store):
+        store.save_session(
+            SessionInfo(
+                session_id=store.session_id,
+                pid=os.getpid(),
+                connection_file=str(store.connection_file),
+                python_executable="python",
+                project_root=str(project_dir),
+                started_at="2026-03-09T00:00:00+00:00",
+            )
+        )
+        store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.side_effect = [
+        KernelStatus(alive=True, pid=111),
+        KernelStatus(alive=True, pid=222),
+    ]
+    runtime = KernelRuntime(backend=backend)
+
+    with pytest.raises(AmbiguousSessionError):
+        runtime.resolve_session_id(
+            project_root=project_dir,
+            requested_session_id=None,
+            require_live_session=True,
+        )
+
+
+def test_runtime_wait_for_ready_returns_when_status_becomes_alive(project_dir: Path) -> None:
+    backend = Mock()
+    runtime = KernelRuntime(backend=backend)
+
+    status_calls = [
+        KernelStatus(alive=False),
+        KernelStatus(alive=False),
+        KernelStatus(alive=True, pid=123),
+    ]
+    runtime.status = Mock(side_effect=status_calls)  # type: ignore[method-assign]
+
+    ready = runtime.wait_for_ready(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )
+
+    assert ready.alive is True
+    assert ready.pid == 123
+
+
+def test_runtime_wait_for_ready_times_out(project_dir: Path) -> None:
+    backend = Mock()
+    runtime = KernelRuntime(backend=backend)
+    runtime.status = Mock(return_value=KernelStatus(alive=False))  # type: ignore[method-assign]
+
+    with pytest.raises(KernelWaitTimedOutError):
+        runtime.wait_for_ready(
+            project_root=project_dir,
+            session_id="default",
+            timeout_s=0.0,
+            poll_interval_s=0.0,
+        )

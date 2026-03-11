@@ -3,15 +3,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .errors import InvalidInputError
+
 DEFAULT_SESSION_ID = "default"
 STATE_DIR_NAME = ".agentnb"
 LEGACY_SESSION_FILE_NAME = "session.json"
 COMMAND_LOCK_FILE_NAME = "command.lock"
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 @dataclass(slots=True)
@@ -28,8 +32,9 @@ class SessionInfo:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SessionInfo:
+        session_id = validate_session_id(str(payload["session_id"]))
         return cls(
-            session_id=str(payload["session_id"]),
+            session_id=session_id,
             pid=int(payload["pid"]),
             connection_file=str(payload["connection_file"]),
             python_executable=str(payload["python_executable"]),
@@ -61,14 +66,24 @@ def pid_exists(pid: int) -> bool:
     return True
 
 
+def validate_session_id(session_id: str) -> str:
+    normalized = session_id.strip()
+    if SESSION_ID_PATTERN.fullmatch(normalized):
+        return normalized
+    raise InvalidInputError(
+        "Invalid session name. Use 1-64 characters: letters, digits, '.', '_', or '-'."
+    )
+
+
 class SessionStore:
     def __init__(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
         self.project_root = project_root.resolve()
-        self.session_id = session_id
+        self.session_id = validate_session_id(session_id)
         self.state_dir = self.project_root / STATE_DIR_NAME
-        self.session_file = self.state_dir / _session_file_name(session_id)
+        self.session_file = self.state_dir / _session_file_name(self.session_id)
         self.legacy_session_file = self.state_dir / LEGACY_SESSION_FILE_NAME
         self.connection_file = self.state_dir / f"kernel-{self.session_id}.json"
+        self.log_file = self.state_dir / f"kernel-{self.session_id}.log"
         self.command_lock_file = self.state_dir / f"{COMMAND_LOCK_FILE_NAME}-{self.session_id}"
 
     def ensure_state_dir(self) -> None:
@@ -96,6 +111,15 @@ class SessionStore:
 
     def clear_session(self) -> None:
         self._safe_unlink(self.session_file)
+
+    def clear_runtime_files(self) -> None:
+        self._safe_unlink(self.connection_file)
+        self._safe_unlink(self.log_file)
+        self._safe_unlink(self.command_lock_file)
+
+    def delete_session(self) -> None:
+        self.clear_runtime_files()
+        self.clear_session()
 
     def has_connection_file(self) -> bool:
         return self.connection_file.exists()
@@ -145,19 +169,43 @@ class SessionStore:
             if lock_acquired:
                 self._safe_unlink(self.command_lock_file)
 
+    @classmethod
+    def list_sessions(cls, project_root: Path) -> list[SessionInfo]:
+        state_dir = project_root.resolve() / STATE_DIR_NAME
+        if not state_dir.exists():
+            return []
+
+        default_store = cls(project_root=project_root, session_id=DEFAULT_SESSION_ID)
+        if default_store.legacy_session_file.exists():
+            default_store.load_session()
+
+        sessions: list[SessionInfo] = []
+        for path in sorted(state_dir.glob("session-*.json")):
+            session = cls._load_session_file(path)
+            if session is None:
+                continue
+            store = cls(project_root=project_root, session_id=session.session_id)
+            sessions.append(store._normalize_session(session))
+
+        return sorted(
+            sessions,
+            key=lambda session: (session.session_id != DEFAULT_SESSION_ID, session.session_id),
+        )
+
     def _session_paths(self) -> tuple[Path, ...]:
         if self.legacy_session_file == self.session_file:
             return (self.session_file,)
         return (self.session_file, self.legacy_session_file)
 
-    def _load_session_file(self, path: Path) -> SessionInfo | None:
+    @staticmethod
+    def _load_session_file(path: Path) -> SessionInfo | None:
         if not path.exists():
             return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             return SessionInfo.from_dict(payload)
         except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError):
-            self._safe_unlink(path)
+            SessionStore._safe_unlink(path)
             return None
 
     def _normalize_session(self, session: SessionInfo) -> SessionInfo:
@@ -173,7 +221,8 @@ class SessionStore:
             started_at=session.started_at,
         )
 
-    def _safe_unlink(self, path: Path) -> None:
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
         try:
             path.unlink()
         except FileNotFoundError:

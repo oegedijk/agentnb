@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 from .backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
 from .contracts import ExecutionResult, KernelStatus
 from .errors import (
+    AmbiguousSessionError,
     ExecutionTimedOutError,
     KernelNotReadyError,
+    KernelWaitTimedOutError,
     NoKernelRunningError,
     SessionBusyError,
+    SessionNotFoundError,
 )
+from .execution import ExecutionService
 from .history import HistoryStore
 from .hooks import Hooks
 from .provisioner import KernelProvisioner
@@ -82,6 +87,104 @@ class KernelRuntime:
         store.clear_session()
         self._hooks.on_kernel_stop(store.project_root, session_id, session)
 
+    def stop_starting(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
+        store = SessionStore(project_root=project_root, session_id=session_id)
+        session = store.load_session()
+        if session is None:
+            raise NoKernelRunningError()
+        self._backend.stop(session)
+        store.delete_session()
+        self._hooks.on_kernel_stop(store.project_root, session_id, session)
+
+    def ensure_started(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+    ) -> tuple[KernelStatus, bool]:
+        return self.start(project_root=project_root, session_id=session_id)
+
+    def list_sessions(self, project_root: Path) -> list[dict[str, object]]:
+        entries: list[dict[str, object]] = []
+        for session in SessionStore.list_sessions(project_root):
+            store = SessionStore(project_root=project_root, session_id=session.session_id)
+            store.cleanup_stale()
+            current = store.load_session()
+            if current is None:
+                continue
+            status = self._backend.status(current)
+            if not status.alive:
+                store.delete_session()
+                continue
+            entries.append(
+                {
+                    "session_id": current.session_id,
+                    "alive": status.alive,
+                    "pid": status.pid,
+                    "connection_file": status.connection_file,
+                    "started_at": status.started_at,
+                    "uptime_s": status.uptime_s,
+                    "python": status.python,
+                    "last_activity": self._last_activity(project_root, current.session_id),
+                    "is_default": current.session_id == DEFAULT_SESSION_ID,
+                }
+            )
+        return entries
+
+    def delete_session(self, project_root: Path, session_id: str) -> dict[str, object]:
+        store = SessionStore(project_root=project_root, session_id=session_id)
+        store.cleanup_stale()
+        session = store.load_session()
+        if session is None:
+            raise SessionNotFoundError(session_id)
+
+        status = self._backend.status(session)
+        stopped = status.alive
+        if status.alive:
+            self._backend.stop(session)
+
+        store.delete_session()
+        return {
+            "deleted": True,
+            "session_id": session_id,
+            "stopped_running_kernel": stopped,
+        }
+
+    def resolve_session_id(
+        self,
+        project_root: Path,
+        requested_session_id: str | None,
+        *,
+        require_live_session: bool,
+    ) -> str:
+        if requested_session_id is not None:
+            return requested_session_id
+        if not require_live_session:
+            return DEFAULT_SESSION_ID
+
+        sessions = self.list_sessions(project_root=project_root)
+        if not sessions:
+            return DEFAULT_SESSION_ID
+        if len(sessions) == 1:
+            return str(sessions[0]["session_id"])
+        raise AmbiguousSessionError([str(session["session_id"]) for session in sessions])
+
+    def wait_for_ready(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+    ) -> KernelStatus:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            status = self.status(project_root=project_root, session_id=session_id)
+            if status.alive:
+                return status
+            if time.monotonic() >= deadline:
+                raise KernelWaitTimedOutError(timeout_s)
+            time.sleep(poll_interval_s)
+
     def execute(
         self,
         project_root: Path,
@@ -135,13 +238,23 @@ class KernelRuntime:
         include_internal: bool = False,
     ) -> list[dict[str, object]]:
         history_store = HistoryStore(project_root=project_root, session_id=session_id)
-        return [
+        ops_entries = [
             entry.to_dict()
             for entry in history_store.read(
                 errors_only=errors_only,
                 include_internal=include_internal,
             )
         ]
+        execution_entries = ExecutionService(self).history_entries(
+            project_root=project_root,
+            session_id=session_id,
+            include_internal=include_internal,
+            errors_only=errors_only,
+        )
+        return sorted(
+            [*ops_entries, *execution_entries],
+            key=lambda entry: str(entry.get("ts", "")),
+        )
 
     def doctor(
         self,
@@ -181,3 +294,11 @@ class KernelRuntime:
             raise NoKernelRunningError()
 
         return store, session
+
+    def _last_activity(self, project_root: Path, session_id: str) -> str | None:
+        history = HistoryStore(project_root=project_root, session_id=session_id).read(
+            include_internal=True
+        )
+        if not history:
+            return None
+        return history[-1].ts

@@ -33,11 +33,11 @@ pip install agentnb
 ## Quick Start
 
 ```bash
-agentnb start --project /path/to/project --json
-agentnb exec "from myapp.models import User" --json
+agentnb exec --project /path/to/project --ensure-started --json "from myapp.models import User"
 agentnb exec --file analysis.py --json
 agentnb vars --json
 agentnb inspect User --json
+agentnb sessions list --json
 agentnb stop --json
 ```
 
@@ -72,19 +72,21 @@ the subcommand, for example `agentnb --agent status` or `agentnb status --agent`
 
 The normal agent loop is:
 
-1. `agentnb start --json`
-2. `agentnb exec "..." --json` for short snippets
+1. `agentnb exec --ensure-started "..." --json` for short snippets
+2. `agentnb status --wait --json` if a session is still starting
 3. `agentnb exec --file analysis.py --json` or pipe code through stdin for multiline work
 4. `agentnb vars --json`
 5. `agentnb inspect NAME --json`
 6. `agentnb reload --json` after editing project-local modules
 7. `agentnb reload myapp.module --json` to target one imported module
 8. `agentnb history --json`
+9. `agentnb runs list --json` when you need durable execution records
 
 Important:
 - Drive one session serially: wait for each command to finish before sending the next.
 - Prefer a final expression over `print(...)` when you want a compact `result` payload.
 - Use `vars --recent N` or `vars --match TEXT` once the namespace gets noisy.
+- Pass `--session NAME` on kernel-bound commands when you are working with more than one live session.
 
 Use `agentnb doctor --json` if startup fails, `agentnb interrupt --json` if execution hangs, and `agentnb reset --json` if the namespace needs a clean slate.
 
@@ -109,15 +111,21 @@ It is not a notebook editing tool:
 
 - `agentnb start [--project PATH] [--python PATH] [--auto-install]`
 - top-level flags: `agentnb [--json] [--agent] [--quiet] [--no-suggestions] <command>`
-- `agentnb status [--project PATH]`
-- `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--stdout-only|--stderr-only|--result-only] [--project PATH] [--json]`
-- `agentnb vars [--project PATH] [--json] [--types|--no-types] [--match TEXT] [--recent N]`
-- `agentnb inspect NAME [--project PATH] [--json]`
-- `agentnb reload [MODULE] [--project PATH] [--json]`
-- `agentnb history [--project PATH] [--errors] [--latest|--last N] [--all] [--json]`
-- `agentnb interrupt [--project PATH] [--json]`
-- `agentnb reset [--project PATH] [--json]`
-- `agentnb stop [--project PATH] [--json]`
+- `agentnb status [--project PATH] [--session NAME] [--wait] [--timeout SECONDS]`
+- `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--ensure-started] [--background] [--stdout-only|--stderr-only|--result-only] [--project PATH] [--session NAME] [--json]`
+- `agentnb vars [--project PATH] [--session NAME] [--json] [--types|--no-types] [--match TEXT] [--recent N]`
+- `agentnb inspect NAME [--project PATH] [--session NAME] [--json]`
+- `agentnb reload [MODULE] [--project PATH] [--session NAME] [--json]`
+- `agentnb history [--project PATH] [--session NAME] [--errors] [--latest|--last N] [--all] [--json]`
+- `agentnb runs list [--project PATH] [--session NAME] [--errors] [--json]`
+- `agentnb runs show EXECUTION_ID [--project PATH] [--json]`
+- `agentnb runs wait EXECUTION_ID [--project PATH] [--timeout SECONDS] [--json]`
+- `agentnb runs cancel EXECUTION_ID [--project PATH] [--json]`
+- `agentnb sessions list [--project PATH] [--json]`
+- `agentnb sessions delete NAME [--project PATH] [--json]`
+- `agentnb interrupt [--project PATH] [--session NAME] [--json]`
+- `agentnb reset [--project PATH] [--session NAME] [--json]`
+- `agentnb stop [--project PATH] [--session NAME] [--json]`
 - `agentnb doctor [--project PATH] [--python PATH] [--fix] [--json]`
 
 Notes:
@@ -126,6 +134,9 @@ Notes:
 - `vars` hides imported helper routines and classes, and summarizes common containers compactly.
 - `history` shows semantic user-visible steps by default such as `exec`, `vars`, `inspect`, `reload`, and `reset`.
 - Use `history --all` to include internal helper executions sent to the kernel.
+- `runs` exposes durable execution records keyed by `execution_id`; use it for background work and exact run lookup.
+- `exec --background` returns immediately with an `execution_id`; follow it with `runs wait`, `runs show`, or `runs cancel`.
+- When multiple live sessions exist, kernel-bound commands require `--session NAME` unless there is only one live session to infer.
 - Module reloading is explicit. `reload MODULE` reloads one imported project-local module.
 - Bare `reload` reloads all currently imported project-local modules and reports rebound names and possible stale objects.
 - If reload reports stale objects, recreate them or run `agentnb reset` when stale state is widespread.
@@ -174,6 +185,7 @@ If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORM
   "timestamp": "2026-03-08T21:00:00+00:00",
   "data": {
     "status": "ok",
+    "execution_id": "run_123",
     "stdout": "",
     "stderr": "",
     "result": "42",
@@ -196,6 +208,8 @@ If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORM
 ## Architecture
 
 - `SessionStore`: project/session metadata and stale cleanup
+- `ExecutionStore`: append-only JSONL run records keyed by `execution_id`
+- `ExecutionService`: foreground/background execution lifecycle and run queries
 - `HistoryStore`: typed JSONL history records for semantic and internal execution history
 - `KernelRuntime`: lifecycle + execution API
 - `RuntimeBackend`: backend interface, with local IPython backend for v0.1
@@ -222,6 +236,10 @@ uv run pytest
 
 ## Current Ergonomics
 
+- multi-session targeting with `--session`, plus `sessions list` and `sessions delete`
+- `exec --ensure-started` and `status --wait` for first-use/startup flows
+- persisted run records with `execution_id`
+- `runs list`, `runs show`, `runs wait`, and `runs cancel` for durable execution control
 - `exec` accepts short inline code, `--file`, or stdin/heredoc for multiline snippets
 - `vars` includes type information by default
 - `vars` hides imported helper routines and classes and summarizes common containers compactly

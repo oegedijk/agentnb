@@ -20,6 +20,7 @@ class HistoryRecord:
     kind: HistoryKind
     ts: str
     session_id: str
+    execution_id: str | None
     status: str
     duration_ms: int
     command_type: str
@@ -44,6 +45,7 @@ class HistoryRecord:
             "user_visible": self.user_visible,
         }
         optional_fields = {
+            "execution_id": self.execution_id,
             "input": self.input,
             "code": self.code,
             "origin": self.origin,
@@ -65,6 +67,7 @@ class HistoryRecord:
             ),
             ts=_require_str(payload, "ts"),
             session_id=_require_str(payload, "session_id"),
+            execution_id=_optional_str(payload, "execution_id"),
             status=_require_str(payload, "status"),
             duration_ms=_require_int(payload, "duration_ms"),
             command_type=_require_str(payload, "command_type"),
@@ -122,7 +125,9 @@ class HistoryStore:
 
 def user_command_record(
     *,
+    ts: str | None = None,
     session_id: str,
+    execution_id: str | None = None,
     command_type: str,
     label: str,
     input_text: str | None = None,
@@ -149,8 +154,9 @@ def user_command_record(
     )
     return HistoryRecord(
         kind="user_command",
-        ts=utc_now_iso(),
+        ts=utc_now_iso() if ts is None else ts,
         session_id=session_id,
+        execution_id=execution_id,
         status=resolved_status,
         duration_ms=resolved_duration,
         command_type=command_type,
@@ -167,7 +173,9 @@ def user_command_record(
 
 def kernel_execution_record(
     *,
+    ts: str | None = None,
     session_id: str,
+    execution_id: str | None = None,
     command_type: str,
     label: str,
     code: str | None,
@@ -193,8 +201,9 @@ def kernel_execution_record(
     )
     return HistoryRecord(
         kind="kernel_execution",
-        ts=utc_now_iso(),
+        ts=utc_now_iso() if ts is None else ts,
         session_id=session_id,
+        execution_id=execution_id,
         status=resolved_status,
         duration_ms=resolved_duration,
         command_type=command_type,

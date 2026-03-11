@@ -100,3 +100,18 @@ def test_runtime_doctor_merges_store_metadata(project_dir: Path, mocker: MockerF
     assert payload["session_exists"] is False
     assert payload["stale_session_cleaned"] is False
     assert isinstance(payload["checks"], list)
+
+
+def test_runtime_ensure_started_delegates_to_start(
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    runtime = KernelRuntime()
+    start_mock = mocker.patch.object(runtime, "start")
+    status = KernelStatus(alive=True, pid=123)
+    start_mock.return_value = (status, True)
+
+    ensured = runtime.ensure_started(project_root=project_dir, session_id="analysis")
+
+    assert ensured == (status, True)
+    start_mock.assert_called_once_with(project_root=project_dir, session_id="analysis")

@@ -54,6 +54,45 @@ class InvalidInputError(AgentNBException):
         super().__init__(code="INVALID_INPUT", message=message)
 
 
+class SessionNotFoundError(AgentNBException):
+    def __init__(self, session_id: str) -> None:
+        super().__init__(
+            code="SESSION_NOT_FOUND",
+            message=f"Session not found: {session_id}",
+        )
+
+
+class AmbiguousSessionError(AgentNBException):
+    def __init__(self, session_ids: list[str]) -> None:
+        super().__init__(
+            code="AMBIGUOUS_SESSION",
+            message="Multiple live sessions exist; pass --session to select one explicitly.",
+            data={"available_sessions": session_ids},
+        )
+
+
+class KernelWaitTimedOutError(AgentNBException):
+    def __init__(self, timeout_s: float) -> None:
+        super().__init__(
+            code="TIMEOUT",
+            message=f"Kernel did not become ready within {timeout_s:g}s.",
+            ename="TimeoutError",
+            evalue=f"Kernel readiness wait exceeded timeout of {timeout_s:g}s",
+            data={"timeout_s": timeout_s},
+        )
+
+
+class RunWaitTimedOutError(AgentNBException):
+    def __init__(self, timeout_s: float) -> None:
+        super().__init__(
+            code="TIMEOUT",
+            message=f"Run did not finish within {timeout_s:g}s.",
+            ename="TimeoutError",
+            evalue=f"Run wait exceeded timeout of {timeout_s:g}s",
+            data={"timeout_s": timeout_s},
+        )
+
+
 class ExecutionTimedOutError(AgentNBException):
     def __init__(self, timeout_s: float) -> None:
         super().__init__(

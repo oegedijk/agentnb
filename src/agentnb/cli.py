@@ -70,22 +70,29 @@ def main(
 
     Recommended loop:
 
-      1. agentnb start --json
-      2. agentnb exec "from myapp import thing" --json
+      1. agentnb exec --ensure-started "from myapp import thing" --json
+      2. agentnb status --wait --json
       3. agentnb exec --file analysis.py --json
       4. agentnb vars --recent 5 --json
       5. agentnb inspect thing --json
       6. agentnb reload myapp.module --json
       7. agentnb history --json
+      8. agentnb runs list --json when you need durable execution records
+
+    Use `--session NAME` on kernel-bound commands when working with more than
+    one live session. `sessions list` shows live session names and metadata.
+    `exec --background` returns an `execution_id`; follow it with `runs wait`,
+    `runs show`, or `runs cancel`.
 
     For multiline code, prefer --file or stdin/heredoc over shell-escaped
     backslashes. `vars` includes type information by default. `history`
     shows semantic user-visible steps by default; pass --all to include
-    internal helper executions. Module reloading is explicit: use `reload`
-    after editing project-local modules. agentnb does not auto-reload modules
-    on every execution. Like a regular IPython notebook, the final expression
-    in an exec block is returned as the result output while `print(...)` goes
-    to stdout. In `--agent` mode, JSON payloads are compacted by default to
+    internal helper executions. `runs` shows persisted exec/reset records by
+    `execution_id`. Module reloading is explicit: use `reload` after editing
+    project-local modules. agentnb does not auto-reload modules on every
+    execution. Like a regular IPython notebook, the final expression in an
+    exec block is returned as the result output while `print(...)` goes to
+    stdout. In `--agent` mode, JSON payloads are compacted by default to
     reduce token usage.
 
     Prefer --json for agent integrations and machine-readable parsing. Startup
@@ -197,6 +204,18 @@ def _suggestions(
         ]
     if command_name == "exec":
         if response_status == "ok":
+            if data.get("background"):
+                return [
+                    "Run `agentnb runs wait EXECUTION_ID --json` to wait for the final result.",
+                    (
+                        "Run `agentnb runs show EXECUTION_ID --json` "
+                        "to inspect the current run record."
+                    ),
+                    (
+                        "Run `agentnb runs cancel EXECUTION_ID --json` "
+                        "to stop a long-running background run."
+                    ),
+                ]
             return [
                 "Run `agentnb vars --recent 5 --json` to inspect the updated namespace.",
                 "Run `agentnb inspect NAME --json` to inspect a specific variable.",

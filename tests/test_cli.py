@@ -339,7 +339,9 @@ def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "Persistent project-scoped Python REPL for agent workflows." in result.output
     assert "append-only notebook" in result.output
-    assert "agentnb start --json" in result.output
+    assert "agentnb exec --ensure-started" in result.output
+    assert "Use `--session NAME`" in result.output
+    assert "runs wait" in result.output
     assert "--auto-install" in result.output
     assert "doctor --fix" in result.output
     assert "--recent" in result.output
@@ -497,6 +499,10 @@ def test_cli_exec_background_returns_run_id(cli_runner: CliRunner, project_dir: 
     payload = _payload(result.output)
     assert payload["data"]["execution_id"] == "run-1"
     assert payload["data"]["background"] is True
+    assert (
+        payload["suggestions"][0]
+        == "Run `agentnb runs wait EXECUTION_ID --json` to wait for the final result."
+    )
 
 
 def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: Path) -> None:

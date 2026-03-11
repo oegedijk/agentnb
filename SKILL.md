@@ -37,11 +37,18 @@ Do not use `agentnb` for simple one-shot shell or Python tasks where state does 
 
 Run from the target project root when possible.
 
-Start or verify a kernel:
+Prefer the first-use path that starts only when needed:
+
+```bash
+agentnb exec --ensure-started "from myapp.models import User" --json
+```
+
+Start or verify a kernel explicitly when you need lifecycle control:
 
 ```bash
 agentnb status --json
 agentnb start --json
+agentnb status --wait --json
 ```
 
 If `agentnb start` reports that `ipykernel` is missing, either rerun with
@@ -66,23 +73,26 @@ Notes:
 - `start` will reuse an already-alive kernel instead of spawning a duplicate.
 - Prefer `--json` when you need machine-readable output.
 - Use one command at a time per session.
+- Use `--session NAME` on kernel-bound commands when more than one live session exists.
+- `agentnb sessions list --json` shows live sessions and their metadata.
 
 ## Core Loop
 
 Use this order for normal work:
 
-1. `agentnb start --json`
-2. `agentnb exec ... --json` for short inline snippets
+1. `agentnb exec --ensure-started ... --json` for short inline snippets
+2. `agentnb status --wait --json` if the target session is still starting
 3. `agentnb exec --file ... --json` or pipe code through stdin for multiline work
 4. `agentnb vars --json` or `agentnb inspect NAME --json`
 5. `agentnb reload --json` after editing project-local source files
 6. `agentnb reload myapp.models --json` when you want to target one imported module
-7. `agentnb history --json` when you need to review prior steps
+7. `agentnb history --json` when you need the semantic transcript
+8. `agentnb runs list --json` when you need durable exec/reset records
 
 Examples:
 
 ```bash
-agentnb exec "from myapp.models import User" --json
+agentnb exec --ensure-started "from myapp.models import User" --json
 agentnb exec "u = User(name='test'); print(u)" --json
 agentnb exec --file scripts/debug_snippet.py --json
 agentnb exec --json <<'PY'
@@ -94,6 +104,7 @@ agentnb vars --json
 agentnb inspect u --json
 agentnb reload --json
 agentnb reload myapp.models --json
+agentnb runs list --json
 ```
 
 For multi-line code, prefer `--file` or stdin/heredoc over shell-escaped
@@ -105,6 +116,15 @@ When the namespace gets noisy, use:
 ```bash
 agentnb vars --recent 5 --json
 agentnb vars --match rows --json
+```
+
+For background work:
+
+```bash
+agentnb exec --background --json "long_running_call()"
+agentnb runs wait EXECUTION_ID --json
+agentnb runs show EXECUTION_ID --json
+agentnb runs cancel EXECUTION_ID --json
 ```
 
 ## Recovery
@@ -129,12 +149,18 @@ agentnb start --json
 ```
 
 Use `history --errors --json` to inspect recent failures.
+Use `runs show EXECUTION_ID --json` when you need the exact stored record for one execution.
 
 ## Operating Rules
 
+- Prefer `exec --ensure-started` for the first command in a workflow.
 - Check `status` or `start` before assuming a live kernel exists.
 - Prefer `exec` for real work and `vars` or `inspect` for observation.
 - Prefer short inline `exec` for one-liners and stdin or `--file` for multiline code.
+- Use `--session NAME` explicitly once multiple live sessions exist; do not rely on guessing.
+- Use `sessions list` to discover live session names before targeting one.
+- Use `runs` for durable execution lookup, background control, and exact `execution_id` queries.
+- `exec --background` returns immediately; follow it with `runs wait`, `runs show`, or `runs cancel`.
 - Prefer a final expression over `print(...)` when you want a compact return value.
 - Use `reload` after editing importable project modules instead of assuming live definitions updated automatically.
 - Bare `reload` reloads all imported project-local modules. `reload MODULE` targets one imported project-local module.
@@ -152,4 +178,4 @@ Use `history --errors --json` to inspect recent failures.
 - `agentnb` is a persistent REPL interface, not a notebook editor.
 - It behaves more like an append-only notebook transcript than a mutable notebook document.
 - State is process-local and can drift from on-disk source until modules are reloaded or the kernel is restarted.
-- Commands operate on the default session model in the current implementation.
+- Commands target one session at a time; one live session can be inferred, but multiple live sessions require explicit `--session`.

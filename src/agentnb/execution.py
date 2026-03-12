@@ -18,6 +18,7 @@ from .errors import (
     NoKernelRunningError,
     RunWaitTimedOutError,
 )
+from .execution_events import ExecutionResultAccumulator
 from .session import DEFAULT_SESSION_ID, pid_exists
 from .state import StateLayout
 
@@ -740,46 +741,25 @@ def _new_execution_id() -> str:
 class _ExecutionProgressSink(ExecutionSink):
     def __init__(self, run: ExecutionRun) -> None:
         self._run = run
-        self._stdout = ""
-        self._stderr = ""
-        self._result: str | None = None
-        self._events: list[ExecutionEvent] = []
-        self._ename: str | None = None
-        self._evalue: str | None = None
-        self._traceback: list[str] | None = None
+        self._accumulator = ExecutionResultAccumulator()
 
     def started(self, *, execution_id: str, session_id: str) -> None:
         del execution_id, session_id
 
     def accept(self, event: ExecutionEvent) -> None:
-        self._events.append(event)
-        if event.kind == "stdout":
-            self._stdout += event.content or ""
-        elif event.kind == "stderr":
-            self._stderr += event.content or ""
-        elif event.kind == "result":
-            self._result = event.content
-        elif event.kind == "display" and event.content:
-            self._result = f"{self._result}\n{event.content}" if self._result else event.content
-        elif event.kind == "error":
-            metadata = event.metadata
-            ename = metadata.get("ename")
-            if isinstance(ename, str):
-                self._ename = ename
-            if event.content is not None:
-                self._evalue = event.content
-            traceback = metadata.get("traceback")
-            if isinstance(traceback, list) and all(isinstance(item, str) for item in traceback):
-                self._traceback = list(traceback)
+        self._accumulator.accept(event)
+        snapshot = self._accumulator.build(duration_ms=0)
+        status = "error" if snapshot.status == "error" else "running"
 
         self._run.replace(
-            stdout=self._stdout,
-            stderr=self._stderr,
-            result=self._result,
-            ename=self._ename,
-            evalue=self._evalue,
-            traceback=self._traceback,
-            events=list(self._events),
+            status=status,
+            stdout=snapshot.stdout,
+            stderr=snapshot.stderr,
+            result=snapshot.result,
+            ename=snapshot.ename,
+            evalue=snapshot.evalue,
+            traceback=snapshot.traceback,
+            events=snapshot.events,
         )
 
 

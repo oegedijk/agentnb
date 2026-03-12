@@ -147,7 +147,7 @@ harder to extend and the user-facing contract harder to keep stable.
   - first implementation target:
     - completed: preserve display/result separation and MIME metadata in the internal execution-output path while keeping the current human/JSON contract stable
   - follow-up work still needed:
-    - move background progress persistence onto the same structured-output projection path used by foreground execution
+    - completed: move background progress persistence onto the same structured-output projection path used by foreground execution
     - persist structured outputs in execution records so replay/export do not have to reconstruct them from compacted text fields
     - keep renderers and selectors projecting from the structured model instead of growing new text-flattening rules in parallel
 - Run manager / execution controller abstraction:

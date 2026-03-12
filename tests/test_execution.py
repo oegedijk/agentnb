@@ -7,7 +7,13 @@ import pytest
 
 from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink
 from agentnb.errors import AgentNBException, KernelNotReadyError, RunWaitTimedOutError
-from agentnb.execution import ExecutionRecord, ExecutionService, ExecutionStore
+from agentnb.execution import (
+    ExecutionRecord,
+    ExecutionRun,
+    ExecutionService,
+    ExecutionStore,
+    _ExecutionProgressSink,
+)
 from agentnb.runtime import KernelRuntime
 
 
@@ -512,7 +518,14 @@ def test_execution_service_complete_background_run_persists_streamed_progress(
         assert sink is not None
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         sink.accept(ExecutionEvent(kind="stderr", content="warn\n"))
-        sink.accept(ExecutionEvent(kind="display", content="42"))
+        sink.accept(ExecutionEvent(kind="result", content="2"))
+        sink.accept(
+            ExecutionEvent(
+                kind="display",
+                content="42",
+                metadata={"mime": {"text/plain": "42", "text/html": "<b>42</b>"}},
+            )
+        )
         sink.accept(
             ExecutionEvent(
                 kind="error",
@@ -520,11 +533,35 @@ def test_execution_service_complete_background_run_persists_streamed_progress(
                 metadata={"ename": "RuntimeError", "traceback": ["tb"]},
             )
         )
+        in_progress = ExecutionStore(project_dir).get("run-1")
+        assert in_progress is not None
+        assert in_progress.status == "error"
+        assert in_progress.stdout == "hello\n"
+        assert in_progress.stderr == "warn\n"
+        assert in_progress.result == "2\n42"
+        assert in_progress.ename == "RuntimeError"
+        assert in_progress.evalue == "boom"
+        assert in_progress.traceback == ["tb"]
+        assert in_progress.events == [
+            ExecutionEvent(kind="stdout", content="hello\n"),
+            ExecutionEvent(kind="stderr", content="warn\n"),
+            ExecutionEvent(kind="result", content="2"),
+            ExecutionEvent(
+                kind="display",
+                content="42",
+                metadata={"mime": {"text/plain": "42", "text/html": "<b>42</b>"}},
+            ),
+            ExecutionEvent(
+                kind="error",
+                content="boom",
+                metadata={"ename": "RuntimeError", "traceback": ["tb"]},
+            ),
+        ]
         return ExecutionResult(
             status="error",
             stdout="hello\n",
             stderr="warn\n",
-            result="42",
+            result="2\n42",
             duration_ms=8,
             ename="RuntimeError",
             evalue="boom",
@@ -532,7 +569,12 @@ def test_execution_service_complete_background_run_persists_streamed_progress(
             events=[
                 ExecutionEvent(kind="stdout", content="hello\n"),
                 ExecutionEvent(kind="stderr", content="warn\n"),
-                ExecutionEvent(kind="display", content="42"),
+                ExecutionEvent(kind="result", content="2"),
+                ExecutionEvent(
+                    kind="display",
+                    content="42",
+                    metadata={"mime": {"text/plain": "42", "text/html": "<b>42</b>"}},
+                ),
                 ExecutionEvent(
                     kind="error",
                     content="boom",
@@ -550,8 +592,66 @@ def test_execution_service_complete_background_run_persists_streamed_progress(
     assert stored.status == "error"
     assert stored.stdout == "hello\n"
     assert stored.stderr == "warn\n"
-    assert stored.result == "42"
+    assert stored.result == "2\n42"
     assert stored.ename == "RuntimeError"
     assert stored.evalue == "boom"
     assert stored.traceback == ["tb"]
-    assert [event.kind for event in stored.events] == ["stdout", "stderr", "display", "error"]
+    assert stored.events == [
+        ExecutionEvent(kind="stdout", content="hello\n"),
+        ExecutionEvent(kind="stderr", content="warn\n"),
+        ExecutionEvent(kind="result", content="2"),
+        ExecutionEvent(
+            kind="display",
+            content="42",
+            metadata={"mime": {"text/plain": "42", "text/html": "<b>42</b>"}},
+        ),
+        ExecutionEvent(
+            kind="error",
+            content="boom",
+            metadata={"ename": "RuntimeError", "traceback": ["tb"]},
+        ),
+    ]
+
+
+def test_execution_progress_sink_keeps_nonterminal_background_snapshot_running(
+    project_dir: Path,
+) -> None:
+    store = ExecutionStore(project_dir)
+    run = ExecutionRun(
+        store=store,
+        record=ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            code="display_then_wait()",
+            worker_pid=123,
+        ),
+        started=True,
+    )
+    sink = _ExecutionProgressSink(run)
+
+    sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
+    sink.accept(
+        ExecutionEvent(
+            kind="display",
+            content="preview",
+            metadata={"mime": {"text/plain": "preview", "text/html": "<p>preview</p>"}},
+        )
+    )
+
+    stored = store.get("run-1")
+    assert stored is not None
+    assert stored.status == "running"
+    assert stored.stdout == "hello\n"
+    assert stored.result == "preview"
+    assert stored.events == [
+        ExecutionEvent(kind="stdout", content="hello\n"),
+        ExecutionEvent(
+            kind="display",
+            content="preview",
+            metadata={"mime": {"text/plain": "preview", "text/html": "<p>preview</p>"}},
+        ),
+    ]

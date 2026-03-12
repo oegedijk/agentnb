@@ -13,14 +13,14 @@ import zmq
 from jupyter_client import BlockingKernelClient
 
 from .contracts import (
-    ExecutionEvent,
     ExecutionResult,
     ExecutionSink,
     KernelStatus,
     utc_now_iso,
 )
 from .errors import BackendOperationError
-from .execution_events import ExecutionResultAccumulator, dispatch_event
+from .execution_events import ExecutionResultAccumulator, dispatch_output_item
+from .execution_output import output_item_from_jupyter_message
 from .session import SessionInfo, pid_exists
 from .state import kernel_connection_file, kernel_log_file
 
@@ -216,59 +216,25 @@ class LocalIPythonBackend:
                     continue
 
                 msg_type = msg.get("msg_type")
+                if not isinstance(msg_type, str):
+                    continue
                 content = msg.get("content", {})
 
-                if msg_type == "stream":
-                    name = content.get("name", "stdout")
-                    text = str(content.get("text", ""))
-                    dispatch_event(
-                        accumulator=accumulator,
-                        event=ExecutionEvent(
-                            kind=name if name == "stderr" else "stdout",
-                            content=text,
-                        ),
-                        sink=event_sink,
-                    )
-                elif msg_type == "execute_result":
-                    value = _extract_text_plain(content)
-                    dispatch_event(
-                        accumulator=accumulator,
-                        event=ExecutionEvent(kind="result", content=value),
-                        sink=event_sink,
-                    )
-                elif msg_type == "display_data":
-                    value = _extract_text_plain(content)
-                    if value:
-                        dispatch_event(
-                            accumulator=accumulator,
-                            event=ExecutionEvent(kind="display", content=value),
-                            sink=event_sink,
-                        )
-                elif msg_type == "execute_input":
+                if msg_type == "execute_input":
                     accumulator.set_execution_count(content.get("execution_count"))
-                elif msg_type == "error":
-                    dispatch_event(
-                        accumulator=accumulator,
-                        event=ExecutionEvent(
-                            kind="error",
-                            content=str(content.get("evalue", "")) or None,
-                            metadata={
-                                "ename": content.get("ename"),
-                                "traceback": content.get("traceback") or [],
-                            },
-                        ),
-                        sink=event_sink,
-                    )
-                elif msg_type == "status":
-                    state = content.get("execution_state")
-                    if isinstance(state, str):
-                        dispatch_event(
-                            accumulator=accumulator,
-                            event=ExecutionEvent(kind="status", content=state),
-                            sink=event_sink,
-                        )
-                        if state == "idle":
-                            idle_received = True
+                    continue
+
+                item = output_item_from_jupyter_message(msg_type, _as_dict(content))
+                if item is None:
+                    continue
+
+                dispatch_output_item(
+                    accumulator=accumulator,
+                    item=item,
+                    sink=event_sink,
+                )
+                if item.kind == "status" and item.state == "idle":
+                    idle_received = True
 
             shell_reply = self._shell_reply(client=client, msg_id=msg_id)
             shell_content: dict[str, object] = {}
@@ -391,17 +357,6 @@ _ip.run_line_magic("reset", "-f")
                 return None
             if shell_msg.get("parent_header", {}).get("msg_id") == msg_id:
                 return shell_msg
-
-
-def _extract_text_plain(content: dict[str, object]) -> str | None:
-    data = content.get("data")
-    if not isinstance(data, dict):
-        return None
-    data_dict = cast(dict[str, object], data)
-    text_plain = data_dict.get("text/plain")
-    if text_plain is None:
-        return None
-    return str(text_plain)
 
 
 def _uptime_seconds(started_at: str) -> float | None:

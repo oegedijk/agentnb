@@ -130,6 +130,7 @@ harder to extend and the user-facing contract harder to keep stable.
     - keep CLI-only concerns limited to argument parsing, stdin/file input handling, and human/stream rendering
     - route future non-CLI control surfaces such as snapshot/replay/verify through the same typed request/response seam instead of adding new orchestration paths
 - Rich execution output model:
+  - status: initial slice landed
   - purpose: preserve execution structure internally so v0.4 artifacts do not have to reverse-engineer text output
   - hidden complexity to absorb:
     - the distinction between streams, expression results, display data, errors, and future artifact references
@@ -144,7 +145,11 @@ harder to extend and the user-facing contract harder to keep stable.
     - artifact work will either be constrained to plain text or forced to bolt structured meaning back onto flattened output
     - backend, renderer, and persistence changes will be coupled more tightly than they need to be
   - first implementation target:
-    - preserve display/result separation and MIME metadata even if the first renderer still emits text-only summaries
+    - completed: preserve display/result separation and MIME metadata in the internal execution-output path while keeping the current human/JSON contract stable
+  - follow-up work still needed:
+    - move background progress persistence onto the same structured-output projection path used by foreground execution
+    - persist structured outputs in execution records so replay/export do not have to reconstruct them from compacted text fields
+    - keep renderers and selectors projecting from the structured model instead of growing new text-flattening rules in parallel
 - Run manager / execution controller abstraction:
   - purpose: separate run semantics from the current local subprocess implementation used for background execution
   - hidden complexity to absorb:

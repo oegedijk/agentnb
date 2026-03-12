@@ -321,7 +321,12 @@ def test_execution_service_cancel_run_interrupts_session(project_dir: Path, mock
         )
     )
 
-    payload = ExecutionService(runtime).cancel_run(project_root=project_dir, execution_id="run-1")
+    payload = ExecutionService(runtime).cancel_run(
+        project_root=project_dir,
+        execution_id="run-1",
+        timeout_s=0.0,
+        poll_interval_s=0.0,
+    )
     stored = ExecutionStore(project_dir).get("run-1")
 
     assert payload["cancel_requested"] is True
@@ -333,6 +338,66 @@ def test_execution_service_cancel_run_interrupts_session(project_dir: Path, mock
     assert stored is not None
     assert stored.status == "error"
     assert stored.ename == "CancelledError"
+
+
+def test_execution_service_cancel_run_returns_finished_state_when_run_completes_after_interrupt(
+    project_dir: Path,
+    mocker,
+) -> None:
+    mocker.patch("agentnb.execution.pid_exists", return_value=True)
+    kill = mocker.patch("agentnb.execution.os.kill")
+    runtime = KernelRuntime(backend=Mock())
+    store = ExecutionStore(project_dir)
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="analysis",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            worker_pid=123,
+        )
+    )
+
+    def interrupt_stub(**kwargs: object) -> None:
+        del kwargs
+        store.append(
+            ExecutionRecord(
+                execution_id="run-1",
+                ts="2026-03-10T00:00:01+00:00",
+                session_id="analysis",
+                command_type="exec",
+                status="ok",
+                duration_ms=7,
+                worker_pid=123,
+                result="2",
+            )
+        )
+
+    runtime.interrupt = Mock(side_effect=interrupt_stub)  # type: ignore[method-assign]
+
+    payload = ExecutionService(runtime).cancel_run(
+        project_root=project_dir,
+        execution_id="run-1",
+        timeout_s=0.2,
+        poll_interval_s=0.0,
+    )
+    stored = store.get("run-1")
+
+    assert payload == {
+        "execution_id": "run-1",
+        "session_id": "analysis",
+        "cancel_requested": False,
+        "status": "ok",
+        "run_status": "ok",
+        "session_outcome": "unchanged",
+    }
+    runtime.interrupt.assert_called_once_with(project_root=project_dir, session_id="analysis")
+    kill.assert_not_called()
+    assert stored is not None
+    assert stored.status == "ok"
+    assert stored.result == "2"
 
 
 def test_execution_service_cancel_run_stops_starting_session(project_dir: Path, mocker) -> None:

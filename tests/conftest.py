@@ -77,13 +77,14 @@ def patch_cli_runtime(runtime: KernelRuntime, monkeypatch: pytest.MonkeyPatch) -
     import agentnb.cli as cli
 
     executions = ExecutionService(runtime)
+    ops = NotebookOps(runtime)
     monkeypatch.setattr(cli, "runtime", runtime)
-    monkeypatch.setattr(cli, "ops", NotebookOps(runtime))
+    monkeypatch.setattr(cli, "ops", ops)
     monkeypatch.setattr(cli, "executions", executions)
     monkeypatch.setattr(
         cli,
         "application",
-        cli.AgentNBApp(runtime=runtime, executions=executions),
+        cli.AgentNBApp(runtime=runtime, executions=executions, ops=ops),
     )
 
 

@@ -3,31 +3,141 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
-from .compact import compact_execution_payload, compact_traceback
+from .compact import (
+    compact_execution_payload,
+    compact_history_entry,
+    compact_inspect_payload,
+    compact_run_entry,
+    compact_traceback,
+)
 from .contracts import CommandResponse, ExecutionSink, error_response, success_response
 from .errors import AgentNBException
 from .execution import ExecutionService
+from .ops import NotebookOps
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID
 
 OutputSelector = str
+StatusWaitFor = Literal["ready", "idle"]
 
 
-@dataclass(slots=True, frozen=True)
-class ExecRequest:
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ProjectRequest:
     project_root: Path
-    code: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "project_root", self.project_root.resolve())
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SessionRequest(ProjectRequest):
     session_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ExecRequest(SessionRequest):
+    code: str
     timeout_s: float = 30.0
     ensure_started: bool = False
     background: bool = False
     stream: bool = False
     output_selector: OutputSelector | None = None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "project_root", self.project_root.resolve())
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class StartRequest(SessionRequest):
+    python_executable: Path | None = None
+    auto_install: bool = False
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class StatusRequest(SessionRequest):
+    wait_for: StatusWaitFor | None = None
+    timeout_s: float = 30.0
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class VarsRequest(SessionRequest):
+    include_types: bool = True
+    match_text: str | None = None
+    recent: int | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class InspectRequest(SessionRequest):
+    name: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ReloadRequest(SessionRequest):
+    module_name: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class HistoryRequest(SessionRequest):
+    errors: bool = False
+    latest: bool = False
+    last: int | None = None
+    include_internal: bool = False
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class InterruptRequest(SessionRequest):
+    pass
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ResetRequest(SessionRequest):
+    timeout_s: float = 10.0
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class StopRequest(SessionRequest):
+    pass
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class DoctorRequest(SessionRequest):
+    python_executable: Path | None = None
+    auto_fix: bool = False
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SessionsListRequest(ProjectRequest):
+    pass
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SessionsDeleteRequest(ProjectRequest):
+    session_name: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RunsListRequest(SessionRequest):
+    errors: bool = False
+    last: int | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RunLookupRequest(ProjectRequest):
+    execution_id: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RunsWaitRequest(RunLookupRequest):
+    timeout_s: float = 30.0
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RunsFollowRequest(RunLookupRequest):
+    timeout_s: float = 30.0
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RunsCancelRequest(RunLookupRequest):
+    pass
 
 
 class AgentNBApp:
@@ -36,10 +146,21 @@ class AgentNBApp:
         *,
         runtime: KernelRuntime | None = None,
         executions: ExecutionService | None = None,
+        ops: NotebookOps | None = None,
     ) -> None:
         resolved_runtime = runtime or KernelRuntime()
         self.runtime = resolved_runtime
         self.executions = executions or ExecutionService(resolved_runtime)
+        self.ops = ops or NotebookOps(resolved_runtime)
+
+    def start(self, request: StartRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="start",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=False,
+            handler=lambda session_id: self._start_payload(request=request, session_id=session_id),
+        )
 
     def exec(
         self,
@@ -56,12 +177,216 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=request.session_id,
             require_live_session=True,
-            handler=lambda resolved_session_id: self._exec_payload(
+            handler=lambda session_id: self._exec_payload(
                 request=request,
-                session_id=resolved_session_id,
+                session_id=session_id,
                 event_sink=event_sink,
             ),
         )
+
+    def status(self, request: StatusRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="status",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=True,
+            handler=lambda session_id: self._status_payload(request=request, session_id=session_id),
+        )
+
+    def vars(self, request: VarsRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="vars",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=True,
+            handler=lambda session_id: self._vars_payload(request=request, session_id=session_id),
+        )
+
+    def inspect(self, request: InspectRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="inspect",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=True,
+            handler=lambda session_id: self._inspect_payload(
+                request=request,
+                session_id=session_id,
+            ),
+        )
+
+    def reload(self, request: ReloadRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="reload",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=True,
+            handler=lambda session_id: self._reload_payload(request=request, session_id=session_id),
+        )
+
+    def history(self, request: HistoryRequest) -> CommandResponse:
+        if request.latest and request.last is not None:
+            return self._input_error(
+                command_name="history",
+                project_root=request.project_root,
+                session_id=request.session_id,
+                message="Use either --latest or --last, not both.",
+            )
+
+        return self._handle_command(
+            command_name="history",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=True,
+            handler=lambda session_id: self._history_payload(
+                request=request,
+                session_id=session_id,
+            ),
+        )
+
+    def interrupt(self, request: InterruptRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="interrupt",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=True,
+            handler=lambda session_id: self._interrupt_payload(
+                request=request, session_id=session_id
+            ),
+        )
+
+    def reset(self, request: ResetRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="reset",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=True,
+            handler=lambda session_id: self._reset_payload(request=request, session_id=session_id),
+        )
+
+    def stop(self, request: StopRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="stop",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=True,
+            handler=lambda session_id: self._stop_payload(request=request, session_id=session_id),
+        )
+
+    def doctor(self, request: DoctorRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="doctor",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=False,
+            handler=lambda session_id: self._doctor_payload(request=request, session_id=session_id),
+        )
+
+    def sessions_list(self, request: SessionsListRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="sessions-list",
+            project_root=request.project_root,
+            requested_session_id=None,
+            require_live_session=False,
+            handler=lambda _: {
+                "sessions": self.runtime.list_sessions(project_root=request.project_root)
+            },
+        )
+
+    def sessions_delete(self, request: SessionsDeleteRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="sessions-delete",
+            project_root=request.project_root,
+            requested_session_id=request.session_name,
+            require_live_session=False,
+            handler=lambda _: self.runtime.delete_session(
+                project_root=request.project_root,
+                session_id=request.session_name,
+            ),
+        )
+
+    def runs_list(self, request: RunsListRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="runs-list",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=False,
+            handler=lambda _: self._runs_list_payload(request=request),
+        )
+
+    def runs_show(self, request: RunLookupRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="runs-show",
+            project_root=request.project_root,
+            requested_session_id=None,
+            require_live_session=False,
+            handler=lambda _: {
+                "run": self.executions.get_run(
+                    project_root=request.project_root,
+                    execution_id=request.execution_id,
+                )
+            },
+        )
+
+    def runs_wait(self, request: RunsWaitRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="runs-wait",
+            project_root=request.project_root,
+            requested_session_id=None,
+            require_live_session=False,
+            handler=lambda _: {
+                "run": self.executions.wait_for_run(
+                    project_root=request.project_root,
+                    execution_id=request.execution_id,
+                    timeout_s=request.timeout_s,
+                )
+            },
+        )
+
+    def runs_follow(
+        self,
+        request: RunsFollowRequest,
+        *,
+        event_sink: ExecutionSink | None = None,
+    ) -> CommandResponse:
+        return self._handle_command(
+            command_name="runs-follow",
+            project_root=request.project_root,
+            requested_session_id=None,
+            require_live_session=False,
+            handler=lambda _: {
+                "run": self.executions.follow_run(
+                    project_root=request.project_root,
+                    execution_id=request.execution_id,
+                    timeout_s=request.timeout_s,
+                    event_sink=event_sink,
+                )
+            },
+            response_session_id_resolver=_run_response_session_id,
+        )
+
+    def runs_cancel(self, request: RunsCancelRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="runs-cancel",
+            project_root=request.project_root,
+            requested_session_id=None,
+            require_live_session=False,
+            handler=lambda _: self.executions.cancel_run(
+                project_root=request.project_root,
+                execution_id=request.execution_id,
+            ),
+        )
+
+    def _start_payload(self, *, request: StartRequest, session_id: str) -> dict[str, object]:
+        status, started_new = self.runtime.start(
+            project_root=request.project_root,
+            session_id=session_id,
+            python_executable=request.python_executable,
+            auto_install=request.auto_install,
+        )
+        payload = status.to_dict()
+        payload["started_new"] = started_new
+        payload["auto_install"] = request.auto_install
+        return payload
 
     def _exec_payload(
         self,
@@ -108,33 +433,157 @@ class AgentNBApp:
             )
         return payload
 
+    def _status_payload(self, *, request: StatusRequest, session_id: str) -> dict[str, object]:
+        if request.wait_for == "idle":
+            payload = self.runtime.wait_for_idle(
+                project_root=request.project_root,
+                session_id=session_id,
+                timeout_s=request.timeout_s,
+            ).to_dict()
+            payload["waited"] = True
+            payload["waited_for"] = "idle"
+            return payload
+        if request.wait_for == "ready":
+            payload = self.runtime.wait_for_ready(
+                project_root=request.project_root,
+                session_id=session_id,
+                timeout_s=request.timeout_s,
+            ).to_dict()
+            payload["waited"] = True
+            payload["waited_for"] = "ready"
+            return payload
+        return self.runtime.status(
+            project_root=request.project_root,
+            session_id=session_id,
+        ).to_dict()
+
+    def _vars_payload(self, *, request: VarsRequest, session_id: str) -> dict[str, object]:
+        values = self.ops.list_vars(project_root=request.project_root, session_id=session_id)
+        if request.match_text:
+            match_lower = request.match_text.lower()
+            values = [item for item in values if match_lower in str(item["name"]).lower()]
+        if request.recent is not None:
+            values = values[-request.recent :]
+        if not request.include_types:
+            values = [{"name": item["name"], "repr": item["repr"]} for item in values]
+        return {"vars": values}
+
+    def _inspect_payload(self, *, request: InspectRequest, session_id: str) -> dict[str, object]:
+        payload = self.ops.inspect_var(
+            project_root=request.project_root,
+            session_id=session_id,
+            name=request.name,
+        )
+        return {"inspect": compact_inspect_payload(payload)}
+
+    def _reload_payload(self, *, request: ReloadRequest, session_id: str) -> dict[str, object]:
+        return self.ops.reload_module(
+            project_root=request.project_root,
+            session_id=session_id,
+            module_name=request.module_name,
+        )
+
+    def _history_payload(self, *, request: HistoryRequest, session_id: str) -> dict[str, object]:
+        entries = self.runtime.history(
+            project_root=request.project_root,
+            session_id=session_id,
+            errors_only=request.errors,
+            include_internal=request.include_internal,
+        )
+        entries = [compact_history_entry(entry) for entry in entries]
+        if request.latest:
+            entries = entries[-1:]
+        elif request.last is not None:
+            entries = entries[-request.last :]
+        return {"entries": entries}
+
+    def _interrupt_payload(
+        self, *, request: InterruptRequest, session_id: str
+    ) -> dict[str, object]:
+        self.runtime.interrupt(project_root=request.project_root, session_id=session_id)
+        return {"interrupted": True}
+
+    def _reset_payload(self, *, request: ResetRequest, session_id: str) -> dict[str, object]:
+        managed = self.executions.reset_session(
+            project_root=request.project_root,
+            session_id=session_id,
+            timeout_s=request.timeout_s,
+        )
+        payload = compact_execution_payload(managed.record.to_execution_payload())
+        if managed.record.status == "error":
+            raise AgentNBException(
+                code="EXECUTION_ERROR",
+                message="Reset failed",
+                ename=managed.record.ename,
+                evalue=managed.record.evalue,
+                traceback=managed.record.traceback,
+                data=payload,
+            )
+        return payload
+
+    def _stop_payload(self, *, request: StopRequest, session_id: str) -> dict[str, object]:
+        self.runtime.stop(project_root=request.project_root, session_id=session_id)
+        return {"stopped": True}
+
+    def _doctor_payload(self, *, request: DoctorRequest, session_id: str) -> dict[str, object]:
+        return self.runtime.doctor(
+            project_root=request.project_root,
+            session_id=session_id,
+            python_executable=request.python_executable,
+            auto_fix=request.auto_fix,
+        )
+
+    def _runs_list_payload(self, *, request: RunsListRequest) -> dict[str, object]:
+        entries = self.executions.list_runs(
+            project_root=request.project_root,
+            session_id=request.session_id if request.session_id is not None else None,
+            errors_only=request.errors,
+        )
+        compacted = [compact_run_entry(entry) for entry in entries]
+        if request.last is not None:
+            compacted = compacted[-request.last :]
+        return {"runs": compacted}
+
     def _validate_exec_request(self, request: ExecRequest) -> CommandResponse | None:
         if request.background and request.output_selector is not None:
             return self._input_error(
-                request=request,
+                command_name="exec",
+                project_root=request.project_root,
+                session_id=request.session_id,
                 message="Output selectors are not supported with --background.",
             )
         if request.stream and request.background:
             return self._input_error(
-                request=request,
+                command_name="exec",
+                project_root=request.project_root,
+                session_id=request.session_id,
                 message="--stream and --background cannot be used together.",
             )
         if request.stream and request.output_selector is not None:
             return self._input_error(
-                request=request,
+                command_name="exec",
+                project_root=request.project_root,
+                session_id=request.session_id,
                 message="Output selectors are not supported with --stream.",
             )
         return None
 
-    def _input_error(self, *, request: ExecRequest, message: str) -> CommandResponse:
+    def _input_error(
+        self,
+        *,
+        command_name: str,
+        project_root: Path,
+        session_id: str | None,
+        message: str,
+    ) -> CommandResponse:
         return error_response(
-            command="exec",
-            project=str(request.project_root),
-            session_id=request.session_id or DEFAULT_SESSION_ID,
+            command=command_name,
+            project=str(project_root),
+            session_id=session_id or DEFAULT_SESSION_ID,
             code="INVALID_INPUT",
             message=message,
             suggestions=suggestions_for_command(
-                "exec",
+                command_name,
                 "error",
                 {},
                 error_code="INVALID_INPUT",
@@ -149,6 +598,7 @@ class AgentNBApp:
         requested_session_id: str | None,
         require_live_session: bool,
         handler: Callable[[str], dict[str, object]],
+        response_session_id_resolver: Callable[[str, dict[str, object]], str] | None = None,
     ) -> CommandResponse:
         response_session_id = requested_session_id or DEFAULT_SESSION_ID
 
@@ -160,6 +610,8 @@ class AgentNBApp:
             )
             response_session_id = resolved_session_id
             data = handler(resolved_session_id)
+            if response_session_id_resolver is not None:
+                response_session_id = response_session_id_resolver(response_session_id, data)
             return success_response(
                 command=command_name,
                 project=str(project_root),
@@ -201,6 +653,16 @@ class AgentNBApp:
                     error_code="INTERNAL_ERROR",
                 ),
             )
+
+
+def _run_response_session_id(current_session_id: str, data: dict[str, object]) -> str:
+    run = data.get("run")
+    if isinstance(run, dict):
+        run_payload = cast(dict[str, object], run)
+        session_id = run_payload.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            return session_id
+    return current_session_id
 
 
 def suggestions_for_command(

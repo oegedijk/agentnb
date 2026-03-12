@@ -15,13 +15,14 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 
 ## v0.2 - Session and Execution Ergonomics
 
-Status as of March 11, 2026:
+Status as of March 12, 2026:
 - completed: named sessions, ambiguity handling, `exec --ensure-started`, `status --wait`
 - completed: persisted execution records with `execution_id`
 - completed: background execution with `runs list|show|wait|cancel`
 - completed: real-time streaming execution on top of the same execution model
 - completed: foreground interrupt reliability, active-execution `status`, consistent session `last_activity`, `status --wait-idle`, and live `runs follow`
 - completed: explicit cancel semantics plus a clear snapshot/live split between `runs show` and `runs follow`
+- completed: `runs cancel` now preserves the run's natural terminal state when completion wins the race against cancellation, instead of always overwriting it with synthetic cancellation
 - v0.2 status: complete
 
 ### Goals
@@ -109,7 +110,7 @@ harder to extend and the user-facing contract harder to keep stable.
     - add provenance fields only when replay/verify actually need them
     - keep compact/history rendering aligned with journal semantics so internal versus user-visible entries stay distinguishable in `history --all`
 - Application service layer above the CLI:
-  - status: initial `exec` migration completed
+  - status: current CLI workflows migrated onto the app boundary
   - purpose: stop `click` command handlers from becoming the de facto application core
   - hidden complexity to absorb:
     - session resolution rules
@@ -125,11 +126,9 @@ harder to extend and the user-facing contract harder to keep stable.
   - if skipped:
     - the CLI file will keep accumulating domain logic and become the place where behavior is defined by accident
     - future non-CLI interfaces will either diverge from CLI behavior or copy large amounts of orchestration code
-  - first implementation target:
-    - completed: move one representative workflow end-to-end, `exec`, through the service layer
   - follow-up work still needed:
-    - migrate the next kernel-bound workflows (`reset`, `history`, `runs`) onto the same request/response boundary
     - keep CLI-only concerns limited to argument parsing, stdin/file input handling, and human/stream rendering
+    - route future non-CLI control surfaces such as snapshot/replay/verify through the same typed request/response seam instead of adding new orchestration paths
 - Rich execution output model:
   - purpose: preserve execution structure internally so v0.4 artifacts do not have to reverse-engineer text output
   - hidden complexity to absorb:

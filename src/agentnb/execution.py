@@ -24,6 +24,8 @@ from .state import StateLayout
 if TYPE_CHECKING:
     from .runtime import KernelRuntime
 
+_CANCEL_SETTLE_TIMEOUT_S = 0.5
+
 
 @dataclass(slots=True)
 class ExecutionRecord:
@@ -487,6 +489,14 @@ class ExecutionService:
 
             try:
                 self.runtime.interrupt(project_root=project_root, session_id=record.session_id)
+                latest = self._wait_for_run_state_change(
+                    project_root=project_root,
+                    execution_id=execution_id,
+                    timeout_s=min(timeout_s, _CANCEL_SETTLE_TIMEOUT_S),
+                    poll_interval_s=poll_interval_s,
+                )
+                if latest is not None and latest.status != "running":
+                    return self._terminal_run_payload(latest)
                 return self._finalize_cancelled_run(
                     project_root=project_root,
                     record=record,
@@ -500,6 +510,9 @@ class ExecutionService:
                     session_outcome="stopped",
                 )
             except NoKernelRunningError:
+                latest = self._load_run(project_root=project_root, execution_id=execution_id)
+                if latest is not None and latest.status != "running":
+                    return self._terminal_run_payload(latest)
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(poll_interval_s)
@@ -636,14 +649,44 @@ class ExecutionService:
             evalue="Run was cancelled by user.",
         )
         self._store(project_root).append(updated)
+        return self._terminal_run_payload(
+            updated,
+            cancel_requested=True,
+            session_outcome=session_outcome,
+        )
+
+    def _terminal_run_payload(
+        self,
+        record: ExecutionRecord,
+        *,
+        cancel_requested: bool = False,
+        session_outcome: str = "unchanged",
+    ) -> dict[str, Any]:
         return {
             "execution_id": record.execution_id,
             "session_id": record.session_id,
-            "cancel_requested": True,
-            "status": updated.status,
-            "run_status": updated.status,
+            "cancel_requested": cancel_requested,
+            "status": record.status,
+            "run_status": record.status,
             "session_outcome": session_outcome,
         }
+
+    def _wait_for_run_state_change(
+        self,
+        *,
+        project_root: Path,
+        execution_id: str,
+        timeout_s: float,
+        poll_interval_s: float,
+    ) -> ExecutionRecord | None:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            record = self._load_run(project_root=project_root, execution_id=execution_id)
+            if record is None or record.status != "running":
+                return record
+            if time.monotonic() >= deadline:
+                return record
+            time.sleep(poll_interval_s)
 
     def _read_runs(
         self,

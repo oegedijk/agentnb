@@ -147,32 +147,6 @@ def test_execution_service_stream_sink_reuses_execution_id(project_dir: Path) ->
     assert stored.stdout == "hello\n"
 
 
-def test_execution_service_history_projection_uses_execution_ids(project_dir: Path) -> None:
-    store = ExecutionStore(project_dir)
-    store.append(
-        ExecutionRecord(
-            execution_id="run-1",
-            ts="2026-03-10T00:00:00+00:00",
-            session_id="default",
-            command_type="reset",
-            status="ok",
-            duration_ms=9,
-        )
-    )
-
-    entries = ExecutionService(KernelRuntime()).history_entries(
-        project_root=project_dir,
-        session_id="default",
-        include_internal=True,
-        errors_only=False,
-    )
-
-    assert len(entries) == 2
-    assert all(entry["execution_id"] == "run-1" for entry in entries)
-    assert [entry["kind"] for entry in entries] == ["kernel_execution", "user_command"]
-    assert all(entry["ts"] == "2026-03-10T00:00:00+00:00" for entry in entries)
-
-
 def test_execution_service_start_background_code_persists_running_record(
     project_dir: Path, mocker
 ) -> None:

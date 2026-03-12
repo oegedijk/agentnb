@@ -77,10 +77,129 @@ Status as of March 11, 2026:
 
 ## v0.3 - Reproducibility and Debug Workflows
 
+### Pre-v0.3 Refactors
+
+These refactors should land before the main v0.3 feature surface so replay,
+verification, artifacts, and alternate control surfaces build on deeper
+abstractions instead of more command-specific glue.
+
+The intent is not just code cleanup. Each refactor below exists to hide a
+specific kind of complexity before later roadmap items arrive. If skipped,
+that complexity will spread outward into feature code, making the system
+harder to extend and the user-facing contract harder to keep stable.
+
+- Unified command journal:
+  - status: completed initial version
+  - purpose: establish one owner for the question "what happened in this session?" across semantic history and persisted execution records
+  - hidden complexity to absorb:
+    - merging `HistoryStore` records with projected execution records
+    - ordering, filtering, and classifying user-visible versus internal commands
+    - identifying which commands are replayable versus inspection-only
+  - target shape:
+    - a `CommandJournal` module that exposes ordered journal entries plus stable selectors (`errors_only`, `include_internal`, `latest`, `last N`, replayable-only)
+    - replay, verify, snapshot restore, and export should depend on this layer instead of reading raw history/execution stores directly
+  - why this must come first:
+    - without a journal, `history`, `replay`, `verify`, snapshot restore, and export will each reimplement slightly different traversal logic
+    - this is the deepest current refactor because it turns duplicated read-side logic into one module boundary
+  - if skipped:
+    - future sessions will add more feature-specific read paths with subtly different filtering and ordering rules
+    - user-facing disagreements between `history`, replay selection, and export selection will become likely
+  - follow-up work still needed:
+    - add selection helpers for common replay/verify inputs
+    - add provenance fields only when replay/verify actually need them
+- Application service layer above the CLI:
+  - purpose: stop `click` command handlers from becoming the de facto application core
+  - hidden complexity to absorb:
+    - session resolution rules
+    - command orchestration and multi-step workflows
+    - mapping domain errors into command responses
+    - shared request/response handling across CLI, future stdin-JSON mode, and RPC-like control surfaces
+  - target shape:
+    - an `AgentNBApp` or similarly named application-service layer with typed request/response objects for operations such as `exec`, `history`, `runs`, `snapshot`, `replay`, and `verify`
+    - `cli.py` becomes a thin adapter: parse args -> build request -> call app service -> render response
+  - why this must come before v0.5 control surfaces:
+    - `call` / RPC-like commands and stdin JSON request mode should reuse the same core orchestration as the CLI
+    - if skipped, each new control surface will duplicate workflow and error-handling rules
+  - if skipped:
+    - the CLI file will keep accumulating domain logic and become the place where behavior is defined by accident
+    - future non-CLI interfaces will either diverge from CLI behavior or copy large amounts of orchestration code
+  - first implementation target:
+    - move one representative workflow end-to-end, likely `exec`, through the service layer before migrating the rest
+- Rich execution output model:
+  - purpose: preserve execution structure internally so v0.4 artifacts do not have to reverse-engineer text output
+  - hidden complexity to absorb:
+    - the distinction between streams, expression results, display data, errors, and future artifact references
+    - MIME-aware outputs such as text, HTML, tables, images, and richer notebook-style display payloads
+  - target shape:
+    - a typed execution-output model below rendering, where renderers decide how to present outputs but do not define what outputs exist
+    - backend adapters should return structured output items; `output.py` should render or compact them for human/JSON modes
+  - why this must come before artifacts:
+    - current text flattening is acceptable for `stdout`/`result` but will leak backend limitations into artifact design
+    - artifact persistence should consume structured outputs directly rather than scraping text from compacted payloads
+  - if skipped:
+    - artifact work will either be constrained to plain text or forced to bolt structured meaning back onto flattened output
+    - backend, renderer, and persistence changes will be coupled more tightly than they need to be
+  - first implementation target:
+    - preserve display/result separation and MIME metadata even if the first renderer still emits text-only summaries
+- Run manager / execution controller abstraction:
+  - purpose: separate run semantics from the current local subprocess implementation used for background execution
+  - hidden complexity to absorb:
+    - run identity, observation, waiting, cancellation, timeout handling, and final snapshot semantics
+    - the distinction between foreground execution, background execution, and live follow
+    - future differences between local, containerized, and remote backends
+  - target shape:
+    - a `RunManager` or `ExecutionController` abstraction with stable concepts such as `RunHandle`, `RunSnapshot`, `RunObserver`, and capability flags
+    - the current `_background-run` subprocess path becomes one implementation detail behind that interface
+  - why this must come before alternate backends:
+    - local subprocess orchestration should not define the public run contract
+    - `runs show|follow|wait|cancel` semantics need to survive backend changes
+  - if skipped:
+    - the current local background-run mechanism will become the implicit architecture instead of one implementation
+    - remote/container backends will require either CLI-visible behavior changes or awkward compatibility shims
+  - first implementation target:
+    - move background-run spawning and follow/wait/cancel behavior behind one internal interface without changing the CLI contract
+- Extension host boundary:
+  - purpose: give plugins, policy, and reliability hooks one deep home instead of growing ad hoc methods across runtime and CLI layers
+  - hidden complexity to absorb:
+    - plugin registration and lifecycle
+    - policy evaluation before/after execution
+    - execution context passed to extensions
+    - extension failure isolation and stable error reporting
+  - target shape:
+    - an `ExtensionHost` or equivalent boundary that owns loading, ordering, and invoking extensions/policies
+    - current no-op hooks become a narrow compatibility shim or are subsumed into the extension host
+  - why this must come before v0.5 policy/plugins:
+    - otherwise policy decisions will leak into `KernelRuntime`, CLI handlers, and backend code as one-off special cases
+    - reliability features such as diagnostics or restart hooks will also need one place to attach
+  - if skipped:
+    - every new policy or plugin-style feature will add another ad hoc callback or special-case branch
+    - extension failures will be harder to isolate and reason about because there will be no single host boundary
+  - first implementation target:
+    - define typed execution lifecycle events and extension context objects before adding actual plugin loading
+- State layout ownership:
+  - purpose: centralize ownership of `.agentnb/` filesystem layout, schema versions, and migration boundaries
+  - hidden complexity to absorb:
+    - path naming and discovery for sessions, histories, runs, snapshots, artifacts, and future metadata
+    - schema versioning and compatibility checks
+    - cleanup and retention rules for persisted state
+  - target shape:
+    - one state-layout module or state repository boundary that defines where each persisted resource lives and how schema versions are tracked
+    - leaf modules should ask for their paths/resources instead of encoding layout conventions independently
+  - why this must come before snapshots and artifacts:
+    - snapshots and artifacts will otherwise repeat the current pattern of each module knowing its own filenames and directory structure
+    - centralized ownership will make future migrations less risky
+  - if skipped:
+    - `.agentnb/` layout knowledge will continue to fragment as new persisted resource types are added
+    - schema changes and cleanup logic will become harder to audit and migrate safely
+  - first implementation target:
+    - extract `.agentnb/` layout constants and path-building rules into one module before adding new persisted resource types
+
 ### Goals
 
 - Make iterative agent work easier to replay, diagnose, and promote to tests.
 - Make "clean verification" a first-class workflow instead of a manual sequence of commands.
+- Make iterative CLI use lower-noise and more obvious without requiring full JSON output.
+- Improve recovery and next-step guidance while keeping the command surface small and composable.
 
 ### Planned Features
 
@@ -106,12 +225,18 @@ Status as of March 11, 2026:
   - direct selectors for the most recent failed or successful execution
 - Output shaping:
   - additional low-noise modes beyond the current `--quiet` and `--no-suggestions`
+  - a compact working-output mode distinct from full `--json`
+  - clearer separation between interactive working output and exact machine-contract output
+  - more state-aware, recovery-oriented suggestions within the existing command set
+  - more actionable `SESSION_BUSY` and `AMBIGUOUS_SESSION` responses that surface the shortest resolving path directly
 
 ### API/Contract Notes
 
 - History entries gain optional `tags`, `command_type`, and `execution_id`.
 - Verification responses should identify the first failed step and the source execution that produced it.
 - JSON envelopes should keep machine-stable fields predictable across commands (`session_id`, `execution_id`, `duration_ms`, typed error codes).
+- Keep full `--json` as the exact machine-stable contract rather than assuming it is the best default working mode.
+- Prefer improving behavior, flags, suggestions, and output shaping of existing commands over adding new top-level commands.
 - Snapshot metadata tracked in `.agentnb/` with schema versioning.
 
 ## v0.4 - Rich Output and Artifacts
@@ -205,6 +330,9 @@ Status as of March 11, 2026:
   - benchmark startup latency, round-trip execution latency, and memory overhead
 - Output/noise control:
   - keep machine-oriented modes predictable during streaming and control-plane errors
+- Command-surface discipline:
+  - prefer a small set of composable commands over feature-specific command growth
+  - optimize common workflows by improving defaults, suggestions, and output shaping before introducing new verbs
 
 ## Near-Term Priority Queue
 

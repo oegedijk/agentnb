@@ -18,7 +18,6 @@ from .errors import (
     NoKernelRunningError,
     RunWaitTimedOutError,
 )
-from .history import HistoryRecord, kernel_execution_record, user_command_record
 from .session import DEFAULT_SESSION_ID, STATE_DIR_NAME, pid_exists
 
 if TYPE_CHECKING:
@@ -107,43 +106,6 @@ class ExecutionRecord:
     def to_execution_payload(self) -> dict[str, Any]:
         payload = self.to_dict()
         return payload
-
-    def to_history_records(self) -> list[HistoryRecord]:
-        label = "reset" if self.command_type == "reset" else "exec"
-        helper_label = (
-            "reset kernel state" if self.command_type == "reset" else "exec kernel execution"
-        )
-        return [
-            kernel_execution_record(
-                ts=self.ts,
-                session_id=self.session_id,
-                execution_id=self.execution_id,
-                command_type=self.command_type,
-                label=helper_label,
-                code=self.code,
-                origin="execution_service",
-                status=self.status,
-                duration_ms=self.duration_ms,
-                error_type=self.ename,
-                stdout=self.stdout,
-                result=self.result,
-            ),
-            user_command_record(
-                ts=self.ts,
-                session_id=self.session_id,
-                execution_id=self.execution_id,
-                command_type=self.command_type,
-                label=label,
-                input_text=self.code,
-                code=self.code,
-                origin="execution_service",
-                status=self.status,
-                duration_ms=self.duration_ms,
-                error_type=self.ename,
-                stdout=self.stdout,
-                result=self.result,
-            ),
-        ]
 
 
 class ExecutionStore:
@@ -577,30 +539,6 @@ class ExecutionService:
             traceback=updated.traceback,
             events=updated.events,
         )
-
-    def history_entries(
-        self,
-        *,
-        project_root: Path,
-        session_id: str,
-        include_internal: bool,
-        errors_only: bool,
-    ) -> list[dict[str, Any]]:
-        entries: list[HistoryRecord] = []
-        for record in self._read_runs(
-            session_id=session_id,
-            command_types={"exec", "reset"},
-            errors_only=errors_only,
-            project_root=project_root,
-        ):
-            if record.status not in {"ok", "error"}:
-                continue
-            projections = record.to_history_records()
-            if include_internal:
-                entries.extend(projections)
-            else:
-                entries.append(projections[-1])
-        return [entry.to_dict() for entry in entries]
 
     def _record_from_result(
         self,

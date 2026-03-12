@@ -212,6 +212,7 @@ If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORM
 - `SessionStore`: project/session metadata and stale cleanup
 - `ExecutionStore`: append-only JSONL run records keyed by `execution_id`
 - `ExecutionService`: foreground/background execution lifecycle and run queries
+- `CommandJournal`: unified read path over semantic history and persisted execution records
 - `HistoryStore`: typed JSONL history records for semantic and internal execution history
 - `KernelRuntime`: lifecycle + execution API
 - `RuntimeBackend`: backend interface, with local IPython backend for v0.1

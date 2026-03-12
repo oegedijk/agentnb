@@ -15,9 +15,8 @@ from .errors import (
     SessionBusyError,
     SessionNotFoundError,
 )
-from .execution import ExecutionService
-from .history import HistoryStore
 from .hooks import Hooks
+from .journal import CommandJournal
 from .provisioner import KernelProvisioner
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
 
@@ -31,6 +30,7 @@ class KernelRuntime:
     ) -> None:
         self._backend = backend or LocalIPythonBackend()
         self._hooks = hooks or Hooks()
+        self._journal = CommandJournal()
         self._provisioner_factory = provisioner_factory or (
             lambda project_root: KernelProvisioner(project_root)
         )
@@ -273,24 +273,15 @@ class KernelRuntime:
         errors_only: bool = False,
         include_internal: bool = False,
     ) -> list[dict[str, object]]:
-        history_store = HistoryStore(project_root=project_root, session_id=session_id)
-        ops_entries = [
+        return [
             entry.to_dict()
-            for entry in history_store.read(
-                errors_only=errors_only,
+            for entry in self._journal.entries(
+                project_root=project_root,
+                session_id=session_id,
                 include_internal=include_internal,
+                errors_only=errors_only,
             )
         ]
-        execution_entries = ExecutionService(self).history_entries(
-            project_root=project_root,
-            session_id=session_id,
-            include_internal=include_internal,
-            errors_only=errors_only,
-        )
-        return sorted(
-            [*ops_entries, *execution_entries],
-            key=lambda entry: str(entry.get("ts", "")),
-        )
 
     def doctor(
         self,
@@ -332,21 +323,7 @@ class KernelRuntime:
         return store, session
 
     def _last_activity(self, project_root: Path, session_id: str) -> str | None:
-        history_entries = HistoryStore(project_root=project_root, session_id=session_id).read(
-            include_internal=True
-        )
-        timestamps = [entry.ts for entry in history_entries]
-        execution_entries = ExecutionService(self).history_entries(
+        return self._journal.last_activity(
             project_root=project_root,
             session_id=session_id,
-            include_internal=True,
-            errors_only=False,
         )
-        timestamps.extend(
-            str(entry.get("ts"))
-            for entry in execution_entries
-            if isinstance(entry.get("ts"), str) and entry.get("ts")
-        )
-        if not timestamps:
-            return None
-        return max(timestamps)

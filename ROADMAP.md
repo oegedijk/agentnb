@@ -109,6 +109,7 @@ harder to extend and the user-facing contract harder to keep stable.
     - add provenance fields only when replay/verify actually need them
     - keep compact/history rendering aligned with journal semantics so internal versus user-visible entries stay distinguishable in `history --all`
 - Application service layer above the CLI:
+  - status: initial `exec` migration completed
   - purpose: stop `click` command handlers from becoming the de facto application core
   - hidden complexity to absorb:
     - session resolution rules
@@ -125,7 +126,10 @@ harder to extend and the user-facing contract harder to keep stable.
     - the CLI file will keep accumulating domain logic and become the place where behavior is defined by accident
     - future non-CLI interfaces will either diverge from CLI behavior or copy large amounts of orchestration code
   - first implementation target:
-    - move one representative workflow end-to-end, likely `exec`, through the service layer before migrating the rest
+    - completed: move one representative workflow end-to-end, `exec`, through the service layer
+  - follow-up work still needed:
+    - migrate the next kernel-bound workflows (`reset`, `history`, `runs`) onto the same request/response boundary
+    - keep CLI-only concerns limited to argument parsing, stdin/file input handling, and human/stream rendering
 - Rich execution output model:
   - purpose: preserve execution structure internally so v0.4 artifacts do not have to reverse-engineer text output
   - hidden complexity to absorb:

@@ -19,6 +19,7 @@ from .errors import (
     RunWaitTimedOutError,
 )
 from .execution_events import ExecutionResultAccumulator
+from .execution_output import OutputItem
 from .session import DEFAULT_SESSION_ID, pid_exists
 from .state import StateLayout
 
@@ -45,6 +46,7 @@ class ExecutionRecord:
     ename: str | None = None
     evalue: str | None = None
     traceback: list[str] | None = None
+    outputs: list[OutputItem] = field(default_factory=list)
     events: list[ExecutionEvent] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,8 +69,22 @@ class ExecutionRecord:
             "events": [event.to_dict() for event in self.events],
         }
 
+    def to_storage_dict(self) -> dict[str, Any]:
+        payload = self.to_dict()
+        payload["outputs"] = [item.to_dict() for item in self.outputs]
+        return payload
+
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ExecutionRecord:
+        raw_outputs = payload.get("outputs", [])
+        outputs: list[OutputItem] = []
+        if isinstance(raw_outputs, list):
+            for raw_output in raw_outputs:
+                if not isinstance(raw_output, dict):
+                    continue
+                item = OutputItem.from_dict(raw_output)
+                if item is not None:
+                    outputs.append(item)
         raw_events = payload.get("events", [])
         events: list[ExecutionEvent] = []
         if isinstance(raw_events, list):
@@ -102,6 +118,7 @@ class ExecutionRecord:
             ename=_optional_str(payload, "ename"),
             evalue=_optional_str(payload, "evalue"),
             traceback=_optional_str_list(payload, "traceback"),
+            outputs=outputs,
             events=events,
         )
 
@@ -120,7 +137,7 @@ class ExecutionStore:
     def append(self, record: ExecutionRecord) -> None:
         self.layout.ensure_state_dir()
         with self.executions_file.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record.to_dict(), ensure_ascii=True))
+            handle.write(json.dumps(record.to_storage_dict(), ensure_ascii=True))
             handle.write("\n")
 
     def read(
@@ -201,6 +218,7 @@ class ExecutionRun:
             ename=execution.ename,
             evalue=execution.evalue,
             traceback=execution.traceback,
+            outputs=[OutputItem.from_event(event) for event in execution.events],
             events=execution.events,
         )
 
@@ -577,6 +595,7 @@ class ExecutionService:
             ename=execution.ename,
             evalue=execution.evalue,
             traceback=execution.traceback,
+            outputs=[OutputItem.from_event(event) for event in execution.events],
             events=execution.events,
         )
 
@@ -759,6 +778,7 @@ class _ExecutionProgressSink(ExecutionSink):
             ename=snapshot.ename,
             evalue=snapshot.evalue,
             traceback=snapshot.traceback,
+            outputs=[OutputItem.from_event(event) for event in snapshot.events],
             events=snapshot.events,
         )
 

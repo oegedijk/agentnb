@@ -1141,6 +1141,13 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
         "ename": None,
         "evalue": None,
         "traceback": None,
+        "outputs": [
+            {
+                "kind": "result",
+                "text": "2",
+                "mime": {"text/plain": "2"},
+            }
+        ],
         "events": [],
     }
 
@@ -1153,6 +1160,7 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
     payload = _payload(result.output)
     assert payload["command"] == "runs-show"
     assert payload["data"]["run"]["execution_id"] == "run-1"
+    assert "outputs" not in payload["data"]["run"]
 
 
 def test_cli_runs_show_human_clarifies_snapshot_for_running_run(
@@ -1203,6 +1211,82 @@ def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir:
     payload = _payload(result.output)
     assert payload["command"] == "runs-wait"
     assert payload["data"]["run"]["execution_id"] == "run-1"
+
+
+@pytest.mark.parametrize(
+    ("subcommand", "setup"),
+    [
+        (
+            "wait",
+            lambda cli: setattr(  # type: ignore[method-assign]
+                cli.executions,
+                "wait_for_run",
+                lambda **_: {
+                    "execution_id": "run-1",
+                    "session_id": "default",
+                    "status": "ok",
+                    "result": "2",
+                    "outputs": [
+                        {
+                            "kind": "result",
+                            "text": "2",
+                            "mime": {"text/plain": "2"},
+                        }
+                    ],
+                },
+            ),
+        ),
+        (
+            "follow",
+            lambda cli: setattr(  # type: ignore[method-assign]
+                cli.executions,
+                "follow_run",
+                lambda **kwargs: (
+                    kwargs["event_sink"].started(
+                        execution_id="run-1",
+                        session_id="default",
+                    ),
+                    {
+                        "execution_id": "run-1",
+                        "session_id": "default",
+                        "status": "ok",
+                        "result": "2",
+                        "outputs": [
+                            {
+                                "kind": "result",
+                                "text": "2",
+                                "mime": {"text/plain": "2"},
+                            }
+                        ],
+                    },
+                )[-1],
+            ),
+        ),
+    ],
+)
+def test_cli_run_lookup_json_hides_internal_outputs(
+    cli_runner: CliRunner,
+    project_dir: Path,
+    subcommand: str,
+    setup,
+) -> None:
+    import agentnb.cli as cli
+
+    setup(cli)
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", subcommand, "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    if subcommand == "follow":
+        frames = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+        run_payload = frames[-1]["response"]["data"]["run"]
+    else:
+        run_payload = _payload(result.output)["data"]["run"]
+    assert run_payload["execution_id"] == "run-1"
+    assert "outputs" not in run_payload
 
 
 def test_cli_runs_follow_stream_json_emits_events_and_final(

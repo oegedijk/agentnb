@@ -9,8 +9,10 @@ from agentnb.app import (
     ExecRequest,
     HistoryRequest,
     ResetRequest,
+    RunLookupRequest,
     RunsFollowRequest,
     RunsListRequest,
+    RunsWaitRequest,
     SessionsDeleteRequest,
     SessionsListRequest,
     StatusRequest,
@@ -487,6 +489,84 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
         timeout_s=4.0,
         event_sink=sink,
     )
+
+
+@pytest.mark.parametrize(
+    ("command_name", "request_factory"),
+    [
+        (
+            "show",
+            lambda project_dir: RunLookupRequest(
+                project_root=project_dir,
+                execution_id="run-1",
+            ),
+        ),
+        (
+            "wait",
+            lambda project_dir: RunsWaitRequest(
+                project_root=project_dir,
+                execution_id="run-1",
+                timeout_s=4.0,
+            ),
+        ),
+        (
+            "follow",
+            lambda project_dir: RunsFollowRequest(
+                project_root=project_dir,
+                execution_id="run-1",
+                timeout_s=4.0,
+            ),
+        ),
+    ],
+)
+def test_app_run_lookup_commands_hide_internal_outputs_from_response(
+    project_dir,
+    command_name: str,
+    request_factory,
+) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "default"
+    executions = Mock(spec=ExecutionService)
+    sink = DummySink()
+    run_payload = {
+        "execution_id": "run-1",
+        "session_id": "analysis",
+        "status": "ok",
+        "result": "2",
+        "outputs": [{"kind": "result", "text": "2", "mime": {"text/plain": "2"}}],
+    }
+    executions.get_run.return_value = dict(run_payload)
+    executions.wait_for_run.return_value = dict(run_payload)
+    executions.follow_run.return_value = dict(run_payload)
+    app = AgentNBApp(runtime=runtime, executions=executions)
+
+    if command_name == "show":
+        response = app.runs_show(request_factory(project_dir))
+        executions.get_run.assert_called_once_with(
+            project_root=project_dir.resolve(),
+            execution_id="run-1",
+        )
+    elif command_name == "wait":
+        response = app.runs_wait(request_factory(project_dir))
+        executions.wait_for_run.assert_called_once_with(
+            project_root=project_dir.resolve(),
+            execution_id="run-1",
+            timeout_s=4.0,
+        )
+    else:
+        response = app.runs_follow(request_factory(project_dir), event_sink=sink)
+        executions.follow_run.assert_called_once_with(
+            project_root=project_dir.resolve(),
+            execution_id="run-1",
+            timeout_s=4.0,
+            event_sink=sink,
+        )
+
+    assert response.status == "ok"
+    expected_session_id = "analysis" if command_name == "follow" else "default"
+    assert response.session_id == expected_session_id
+    assert response.data["run"]["execution_id"] == "run-1"
+    assert "outputs" not in response.data["run"]
 
 
 def test_app_sessions_list_routes_through_handle_command(project_dir) -> None:

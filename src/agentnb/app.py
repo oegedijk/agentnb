@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from .compact import (
     compact_execution_payload,
@@ -319,12 +319,12 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=None,
             require_live_session=False,
-            handler=lambda _: {
-                "run": self.executions.get_run(
-                    project_root=request.project_root,
-                    execution_id=request.execution_id,
-                )
-            },
+            handler=lambda _: self._run_lookup_payload(
+                project_root=request.project_root,
+                execution_id=request.execution_id,
+                timeout_s=None,
+                event_sink=None,
+            ),
         )
 
     def runs_wait(self, request: RunsWaitRequest) -> CommandResponse:
@@ -333,13 +333,12 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=None,
             require_live_session=False,
-            handler=lambda _: {
-                "run": self.executions.wait_for_run(
-                    project_root=request.project_root,
-                    execution_id=request.execution_id,
-                    timeout_s=request.timeout_s,
-                )
-            },
+            handler=lambda _: self._run_lookup_payload(
+                project_root=request.project_root,
+                execution_id=request.execution_id,
+                timeout_s=request.timeout_s,
+                event_sink=None,
+            ),
         )
 
     def runs_follow(
@@ -353,14 +352,12 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=None,
             require_live_session=False,
-            handler=lambda _: {
-                "run": self.executions.follow_run(
-                    project_root=request.project_root,
-                    execution_id=request.execution_id,
-                    timeout_s=request.timeout_s,
-                    event_sink=event_sink,
-                )
-            },
+            handler=lambda _: self._run_lookup_payload(
+                project_root=request.project_root,
+                execution_id=request.execution_id,
+                timeout_s=request.timeout_s,
+                event_sink=event_sink,
+            ),
             response_session_id_resolver=_run_response_session_id,
         )
 
@@ -543,6 +540,34 @@ class AgentNBApp:
         if request.last is not None:
             compacted = compacted[-request.last :]
         return {"runs": compacted}
+
+    def _run_lookup_payload(
+        self,
+        *,
+        project_root: Path,
+        execution_id: str,
+        timeout_s: float | None,
+        event_sink: ExecutionSink | None,
+    ) -> dict[str, object]:
+        if event_sink is not None:
+            run = self.executions.follow_run(
+                project_root=project_root,
+                execution_id=execution_id,
+                timeout_s=30.0 if timeout_s is None else timeout_s,
+                event_sink=event_sink,
+            )
+        elif timeout_s is not None:
+            run = self.executions.wait_for_run(
+                project_root=project_root,
+                execution_id=execution_id,
+                timeout_s=timeout_s,
+            )
+        else:
+            run = self.executions.get_run(
+                project_root=project_root,
+                execution_id=execution_id,
+            )
+        return {"run": _public_run_payload(run)}
 
     def _validate_exec_request(self, request: ExecRequest) -> CommandResponse | None:
         if request.background and request.output_selector is not None:
@@ -846,3 +871,9 @@ def select_exec_output(payload: dict[str, object], selector: OutputSelector) -> 
         return "" if result is None else str(result)
     value = payload.get(selector)
     return "" if value is None else str(value)
+
+
+def _public_run_payload(run: dict[str, Any]) -> dict[str, Any]:
+    public = dict(run)
+    public.pop("outputs", None)
+    return public

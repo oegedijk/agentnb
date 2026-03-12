@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from .contracts import ExecutionEvent
 
@@ -111,6 +111,37 @@ class OutputItem:
             return ExecutionEvent(kind="error", content=self.text, metadata=metadata)
         return ExecutionEvent(kind="status", content=self.state)
 
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"kind": self.kind}
+        if self.text is not None:
+            payload["text"] = self.text
+        if self.stream is not None:
+            payload["stream"] = self.stream
+        if self.mime:
+            payload["mime"] = dict(self.mime)
+        if self.ename is not None:
+            payload["ename"] = self.ename
+        if self.traceback is not None:
+            payload["traceback"] = list(self.traceback)
+        if self.state is not None:
+            payload["state"] = self.state
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> OutputItem | None:
+        kind = payload.get("kind")
+        if kind not in {"stream", "result", "display", "error", "status"}:
+            return None
+        return cls(
+            kind=cast(OutputItemKind, kind),
+            text=_optional_str(payload.get("text")),
+            stream=_optional_stream(payload.get("stream")),
+            mime=_mime_dict(payload.get("mime")),
+            ename=_optional_str(payload.get("ename")),
+            traceback=_optional_str_list(payload.get("traceback")),
+            state=_optional_str(payload.get("state")),
+        )
+
 
 @dataclass(slots=True)
 class ExecutionOutput:
@@ -160,6 +191,29 @@ class ExecutionOutput:
 
     def to_events(self) -> list[ExecutionEvent]:
         return [item.to_event() for item in self.items]
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"items": [item.to_dict() for item in self.items]}
+        if self.execution_count is not None:
+            payload["execution_count"] = self.execution_count
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> ExecutionOutput:
+        raw_items = payload.get("items", [])
+        items: list[OutputItem] = []
+        if isinstance(raw_items, list):
+            for raw_item in raw_items:
+                if not isinstance(raw_item, dict):
+                    continue
+                item = OutputItem.from_dict(cast(dict[str, Any], raw_item))
+                if item is not None:
+                    items.append(item)
+        execution_count = payload.get("execution_count")
+        return cls(
+            items=items,
+            execution_count=execution_count if isinstance(execution_count, int) else None,
+        )
 
 
 def output_item_from_jupyter_message(
@@ -215,6 +269,16 @@ def _mime_bundle(content: dict[str, object]) -> dict[str, str]:
     return bundle
 
 
+def _mime_dict(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    bundle: dict[str, str] = {}
+    for key, item in value.items():
+        if isinstance(key, str) and isinstance(item, str):
+            bundle[key] = item
+    return bundle
+
+
 def _mime_text(bundle: dict[str, str]) -> str | None:
     text_plain = bundle.get("text/plain")
     if text_plain is not None:
@@ -247,6 +311,12 @@ def _mime_metadata(mime: dict[str, str]) -> dict[str, str | dict[str, str]]:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _optional_stream(value: object) -> StreamName | None:
+    if value in {"stdout", "stderr"}:
+        return cast(StreamName, value)
+    return None
 
 
 def _optional_str_list(value: object) -> list[str] | None:

@@ -148,7 +148,8 @@ harder to extend and the user-facing contract harder to keep stable.
     - completed: preserve display/result separation and MIME metadata in the internal execution-output path while keeping the current human/JSON contract stable
   - follow-up work still needed:
     - completed: move background progress persistence onto the same structured-output projection path used by foreground execution
-    - persist structured outputs in execution records so replay/export do not have to reconstruct them from compacted text fields
+    - completed: persist structured outputs in execution records while keeping `stdout` / `stderr` / `result` / `events` as compatibility projections for the current CLI and JSON contract
+    - replay/export should read structured outputs as the source of truth; in-flight compatibility snapshots may already project display content into legacy `result`
     - keep renderers and selectors projecting from the structured model instead of growing new text-flattening rules in parallel
 - Run manager / execution controller abstraction:
   - purpose: separate run semantics from the current local subprocess implementation used for background execution

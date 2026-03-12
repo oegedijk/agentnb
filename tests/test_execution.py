@@ -14,6 +14,7 @@ from agentnb.execution import (
     ExecutionStore,
     _ExecutionProgressSink,
 )
+from agentnb.execution_output import OutputItem
 from agentnb.runtime import KernelRuntime
 
 
@@ -28,6 +29,7 @@ def test_execution_store_roundtrip_and_get(project_dir: Path) -> None:
         duration_ms=12,
         code="1 + 1",
         result="2",
+        outputs=[OutputItem.result(text="2", mime={"text/plain": "2"})],
         events=[ExecutionEvent(kind="result", content="2")],
     )
 
@@ -40,7 +42,52 @@ def test_execution_store_roundtrip_and_get(project_dir: Path) -> None:
     assert entries[0].execution_id == "run-1"
     assert loaded is not None
     assert loaded.result == "2"
+    assert loaded.outputs == [OutputItem.result(text="2", mime={"text/plain": "2"})]
     assert loaded.events[0].kind == "result"
+
+
+def test_execution_record_from_dict_accepts_legacy_records_without_outputs() -> None:
+    record = ExecutionRecord.from_dict(
+        {
+            "execution_id": "run-1",
+            "ts": "2026-03-10T00:00:00+00:00",
+            "session_id": "default",
+            "command_type": "exec",
+            "status": "ok",
+            "duration_ms": 12,
+            "result": "2",
+            "events": [{"kind": "result", "content": "2", "metadata": {}}],
+        }
+    )
+
+    assert record.outputs == []
+    assert record.events == [ExecutionEvent(kind="result", content="2")]
+
+
+def test_execution_record_storage_dict_includes_outputs_but_public_dict_does_not() -> None:
+    record = ExecutionRecord(
+        execution_id="run-1",
+        ts="2026-03-10T00:00:00+00:00",
+        session_id="default",
+        command_type="exec",
+        status="ok",
+        duration_ms=12,
+        result="2",
+        outputs=[OutputItem.result(text="2", mime={"text/plain": "2"})],
+        events=[ExecutionEvent(kind="result", content="2")],
+    )
+
+    public_payload = record.to_dict()
+    storage_payload = record.to_storage_dict()
+
+    assert "outputs" not in public_payload
+    assert storage_payload["outputs"] == [
+        {
+            "kind": "result",
+            "text": "2",
+            "mime": {"text/plain": "2"},
+        }
+    ]
 
 
 def test_execution_store_returns_latest_version_for_same_run(project_dir: Path) -> None:

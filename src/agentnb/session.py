@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -10,11 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from .errors import InvalidInputError
+from .state import StateLayout
 
 DEFAULT_SESSION_ID = "default"
-STATE_DIR_NAME = ".agentnb"
-LEGACY_SESSION_FILE_NAME = "session.json"
-COMMAND_LOCK_FILE_NAME = "command.lock"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -77,17 +74,18 @@ def validate_session_id(session_id: str) -> str:
 
 class SessionStore:
     def __init__(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
-        self.project_root = project_root.resolve()
+        self.layout = StateLayout(project_root)
+        self.project_root = self.layout.project_root
         self.session_id = validate_session_id(session_id)
-        self.state_dir = self.project_root / STATE_DIR_NAME
-        self.session_file = self.state_dir / _session_file_name(self.session_id)
-        self.legacy_session_file = self.state_dir / LEGACY_SESSION_FILE_NAME
-        self.connection_file = self.state_dir / f"kernel-{self.session_id}.json"
-        self.log_file = self.state_dir / f"kernel-{self.session_id}.log"
-        self.command_lock_file = self.state_dir / f"{COMMAND_LOCK_FILE_NAME}-{self.session_id}"
+        self.state_dir = self.layout.state_dir
+        self.session_file = self.layout.session_file(self.session_id)
+        self.legacy_session_file = self.layout.legacy_session_file
+        self.connection_file = self.layout.connection_file(self.session_id)
+        self.log_file = self.layout.log_file(self.session_id)
+        self.command_lock_file = self.layout.command_lock_file(self.session_id)
 
     def ensure_state_dir(self) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.layout.ensure_state_dir()
 
     def load_session(self) -> SessionInfo | None:
         for path in self._session_paths():
@@ -145,22 +143,7 @@ class SessionStore:
         return True
 
     def ensure_gitignore_entry(self) -> bool:
-        self.ensure_state_dir()
-        gitignore = self.project_root / ".gitignore"
-        entry = f"{STATE_DIR_NAME}/"
-
-        if not gitignore.exists():
-            gitignore.write_text(f"{entry}\n", encoding="utf-8")
-            return True
-
-        lines = gitignore.read_text(encoding="utf-8").splitlines()
-        if entry in lines:
-            return False
-
-        suffix = "" if gitignore.read_text(encoding="utf-8").endswith("\n") else "\n"
-        with gitignore.open("a", encoding="utf-8") as handle:
-            handle.write(f"{suffix}{entry}\n")
-        return True
+        return self.layout.ensure_gitignore_entry()
 
     @contextmanager
     def acquire_command_lock(self) -> Any:
@@ -176,7 +159,8 @@ class SessionStore:
 
     @classmethod
     def list_sessions(cls, project_root: Path) -> list[SessionInfo]:
-        state_dir = project_root.resolve() / STATE_DIR_NAME
+        layout = StateLayout(project_root)
+        state_dir = layout.state_dir
         if not state_dir.exists():
             return []
 
@@ -185,7 +169,7 @@ class SessionStore:
             default_store.load_session()
 
         sessions: list[SessionInfo] = []
-        for path in sorted(state_dir.glob("session-*.json")):
+        for path in layout.session_files():
             session = cls._load_session_file(path)
             if session is None:
                 continue
@@ -265,8 +249,3 @@ class SessionStore:
 
         self._safe_unlink(self.command_lock_file)
         return True
-
-
-def _session_file_name(session_id: str) -> str:
-    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12]
-    return f"session-{digest}.json"

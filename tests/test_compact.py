@@ -107,10 +107,35 @@ def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
             "user_visible": True,
         }
     )
+    internal_ok_entry = compact_history_entry(
+        {
+            "kind": "kernel_execution",
+            "ts": "2026-03-11T00:00:00+00:00",
+            "status": "ok",
+            "duration_ms": 5,
+            "command_type": "exec",
+            "label": "exec kernel execution",
+            "code": "value = 42\nvalue",
+            "user_visible": False,
+        }
+    )
+    internal_error_entry = compact_history_entry(
+        {
+            "kind": "kernel_execution",
+            "ts": "2026-03-11T00:00:00+00:00",
+            "status": "error",
+            "duration_ms": 5,
+            "command_type": "exec",
+            "error_type": "ZeroDivisionError",
+            "user_visible": False,
+        }
+    )
 
     assert ok_entry["label"].startswith("exec url = 'https://example.com")
     assert "gamma=3" not in ok_entry["label"]
     assert error_entry["label"] == "exec error ZeroDivisionError"
+    assert internal_ok_entry["label"] == "exec kernel execution value = 42 value"
+    assert internal_error_entry["label"] == "exec kernel error ZeroDivisionError"
 
 
 def test_compact_run_entry_exposes_previews_and_error_type() -> None:

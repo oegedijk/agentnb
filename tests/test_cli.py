@@ -927,6 +927,8 @@ def test_cli_history_all_includes_internal_helper_entries(
         "kernel_execution",
         "user_command",
     ]
+    assert entries[0]["label"] == "exec kernel execution value = 42"
+    assert entries[1]["label"] == "exec"
     assert entries[-2]["command_type"] == "vars"
     assert entries[-2]["user_visible"] is False
     assert "code" not in entries[-2]

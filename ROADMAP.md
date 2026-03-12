@@ -107,6 +107,7 @@ harder to extend and the user-facing contract harder to keep stable.
   - follow-up work still needed:
     - add selection helpers for common replay/verify inputs
     - add provenance fields only when replay/verify actually need them
+    - keep compact/history rendering aligned with journal semantics so internal versus user-visible entries stay distinguishable in `history --all`
 - Application service layer above the CLI:
   - purpose: stop `click` command handlers from becoming the de facto application core
   - hidden complexity to absorb:
@@ -177,6 +178,7 @@ harder to extend and the user-facing contract harder to keep stable.
   - first implementation target:
     - define typed execution lifecycle events and extension context objects before adding actual plugin loading
 - State layout ownership:
+  - status: completed initial path/layout extraction
   - purpose: centralize ownership of `.agentnb/` filesystem layout, schema versions, and migration boundaries
   - hidden complexity to absorb:
     - path naming and discovery for sessions, histories, runs, snapshots, artifacts, and future metadata
@@ -192,7 +194,10 @@ harder to extend and the user-facing contract harder to keep stable.
     - `.agentnb/` layout knowledge will continue to fragment as new persisted resource types are added
     - schema changes and cleanup logic will become harder to audit and migrate safely
   - first implementation target:
-    - extract `.agentnb/` layout constants and path-building rules into one module before adding new persisted resource types
+    - completed: extract `.agentnb/` layout constants and path-building rules into one module before adding new persisted resource types
+  - follow-up work still needed:
+    - move schema-version ownership and compatibility checks into the same boundary
+    - route future snapshot/artifact path registration through the state-layout module instead of adding new ad hoc filenames
 
 ### Goals
 

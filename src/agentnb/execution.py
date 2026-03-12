@@ -18,12 +18,11 @@ from .errors import (
     NoKernelRunningError,
     RunWaitTimedOutError,
 )
-from .session import DEFAULT_SESSION_ID, STATE_DIR_NAME, pid_exists
+from .session import DEFAULT_SESSION_ID, pid_exists
+from .state import StateLayout
 
 if TYPE_CHECKING:
     from .runtime import KernelRuntime
-
-EXECUTIONS_FILE_NAME = "executions.jsonl"
 
 
 @dataclass(slots=True)
@@ -110,12 +109,13 @@ class ExecutionRecord:
 
 class ExecutionStore:
     def __init__(self, project_root: Path) -> None:
-        self.project_root = project_root.resolve()
-        self.state_dir = self.project_root / STATE_DIR_NAME
-        self.executions_file = self.state_dir / EXECUTIONS_FILE_NAME
+        self.layout = StateLayout(project_root)
+        self.project_root = self.layout.project_root
+        self.state_dir = self.layout.state_dir
+        self.executions_file = self.layout.executions_file
 
     def append(self, record: ExecutionRecord) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.layout.ensure_state_dir()
         with self.executions_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=True))
             handle.write("\n")

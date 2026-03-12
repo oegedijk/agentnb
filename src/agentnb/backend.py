@@ -22,6 +22,7 @@ from .contracts import (
 from .errors import BackendOperationError
 from .execution_events import ExecutionResultAccumulator, dispatch_event
 from .session import SessionInfo, pid_exists
+from .state import kernel_connection_file, kernel_log_file
 
 STARTUP_CODE = """import os
 import sys
@@ -78,8 +79,8 @@ class LocalIPythonBackend:
         python_executable: str,
     ) -> SessionInfo:
         state_dir.mkdir(parents=True, exist_ok=True)
-        connection_file = state_dir / f"kernel-{session_id}.json"
-        log_file = state_dir / f"kernel-{session_id}.log"
+        connection_file = kernel_connection_file(state_dir, session_id)
+        log_file = kernel_log_file(state_dir, session_id)
         if connection_file.exists():
             connection_file.unlink()
         if log_file.exists():

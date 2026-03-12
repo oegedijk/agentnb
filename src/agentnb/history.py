@@ -6,9 +6,8 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from .contracts import ExecutionResult, utc_now_iso
-from .session import DEFAULT_SESSION_ID, STATE_DIR_NAME
-
-HISTORY_FILE_NAME = "history.jsonl"
+from .session import DEFAULT_SESSION_ID
+from .state import StateLayout
 
 HistoryKind = Literal["user_command", "kernel_execution"]
 
@@ -84,13 +83,14 @@ class HistoryRecord:
 
 class HistoryStore:
     def __init__(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
-        self.project_root = project_root.resolve()
+        self.layout = StateLayout(project_root)
+        self.project_root = self.layout.project_root
         self.session_id = session_id
-        self.state_dir = self.project_root / STATE_DIR_NAME
-        self.history_file = self.state_dir / HISTORY_FILE_NAME
+        self.state_dir = self.layout.state_dir
+        self.history_file = self.layout.history_file
 
     def append(self, record: HistoryRecord) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.layout.ensure_state_dir()
         with self.history_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=True))
             handle.write("\n")

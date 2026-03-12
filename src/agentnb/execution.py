@@ -21,7 +21,7 @@ from .errors import (
 from .execution_events import ExecutionResultAccumulator
 from .execution_output import OutputItem
 from .session import DEFAULT_SESSION_ID, pid_exists
-from .state import StateLayout
+from .state import StateRepository
 
 if TYPE_CHECKING:
     from .runtime import KernelRuntime
@@ -129,13 +129,14 @@ class ExecutionRecord:
 
 class ExecutionStore:
     def __init__(self, project_root: Path) -> None:
-        self.layout = StateLayout(project_root)
-        self.project_root = self.layout.project_root
-        self.state_dir = self.layout.state_dir
-        self.executions_file = self.layout.executions_file
+        self.repository = StateRepository(project_root)
+        self.project_root = self.repository.project_root
+        self.state_dir = self.repository.state_dir
+        self.executions_file = self.repository.executions_file
 
     def append(self, record: ExecutionRecord) -> None:
-        self.layout.ensure_state_dir()
+        self.repository.ensure_compatible()
+        self.repository.ensure_state_dir()
         with self.executions_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_storage_dict(), ensure_ascii=True))
             handle.write("\n")
@@ -147,6 +148,7 @@ class ExecutionStore:
         command_types: set[str] | None = None,
         errors_only: bool = False,
     ) -> list[ExecutionRecord]:
+        self.repository.ensure_compatible()
         if not self.executions_file.exists():
             return []
 

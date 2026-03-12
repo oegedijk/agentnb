@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import InvalidInputError
-from .state import StateLayout
+from .state import StateRepository
 
 DEFAULT_SESSION_ID = "default"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -74,18 +74,19 @@ def validate_session_id(session_id: str) -> str:
 
 class SessionStore:
     def __init__(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
-        self.layout = StateLayout(project_root)
-        self.project_root = self.layout.project_root
+        self.repository = StateRepository(project_root)
+        self.project_root = self.repository.project_root
         self.session_id = validate_session_id(session_id)
-        self.state_dir = self.layout.state_dir
-        self.session_file = self.layout.session_file(self.session_id)
-        self.legacy_session_file = self.layout.legacy_session_file
-        self.connection_file = self.layout.connection_file(self.session_id)
-        self.log_file = self.layout.log_file(self.session_id)
-        self.command_lock_file = self.layout.command_lock_file(self.session_id)
+        self.state_dir = self.repository.state_dir
+        self.session_file = self.repository.session_file(self.session_id)
+        self.legacy_session_file = self.repository.legacy_session_file
+        self.connection_file = self.repository.connection_file(self.session_id)
+        self.log_file = self.repository.log_file(self.session_id)
+        self.command_lock_file = self.repository.command_lock_file(self.session_id)
 
     def ensure_state_dir(self) -> None:
-        self.layout.ensure_state_dir()
+        self.repository.ensure_compatible()
+        self.repository.ensure_state_dir()
 
     def load_session(self) -> SessionInfo | None:
         for path in self._session_paths():
@@ -143,7 +144,7 @@ class SessionStore:
         return True
 
     def ensure_gitignore_entry(self) -> bool:
-        return self.layout.ensure_gitignore_entry()
+        return self.repository.ensure_gitignore_entry()
 
     @contextmanager
     def acquire_command_lock(self) -> Any:
@@ -159,8 +160,9 @@ class SessionStore:
 
     @classmethod
     def list_sessions(cls, project_root: Path) -> list[SessionInfo]:
-        layout = StateLayout(project_root)
-        state_dir = layout.state_dir
+        repository = StateRepository(project_root)
+        repository.ensure_compatible()
+        state_dir = repository.state_dir
         if not state_dir.exists():
             return []
 
@@ -169,7 +171,7 @@ class SessionStore:
             default_store.load_session()
 
         sessions: list[SessionInfo] = []
-        for path in layout.session_files():
+        for path in repository.session_files():
             session = cls._load_session_file(path)
             if session is None:
                 continue

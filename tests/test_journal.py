@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from agentnb.journal import CommandJournal
+from agentnb.journal import CommandJournal, JournalQuery
 
 
 @pytest.fixture
@@ -159,3 +159,50 @@ def test_command_journal_last_activity_uses_latest_entry_for_session(
     )
 
     assert last_activity == "2026-03-10T00:00:03+00:00"
+
+
+def test_command_journal_select_applies_latest_and_last_queries(populated_journal: Path) -> None:
+    latest = CommandJournal().select(
+        project_root=populated_journal,
+        query=JournalQuery(session_id="default", latest=True),
+    )
+    last_two = CommandJournal().select(
+        project_root=populated_journal,
+        query=JournalQuery(session_id="default", last=2),
+    )
+
+    assert [entry.label for entry in latest.entries] == ["inspect thing"]
+    assert [entry.label for entry in last_two.entries] == ["reset", "inspect thing"]
+
+
+def test_command_journal_select_can_filter_by_execution_id(populated_journal: Path) -> None:
+    selection = CommandJournal().select(
+        project_root=populated_journal,
+        query=JournalQuery(
+            session_id="default",
+            execution_id="run-ok",
+            include_internal=True,
+        ),
+    )
+
+    assert [entry.label for entry in selection.entries] == ["exec kernel execution", "exec"]
+
+
+def test_command_journal_entries_include_classification_and_provenance(
+    populated_journal: Path,
+) -> None:
+    selection = CommandJournal().select(
+        project_root=populated_journal,
+        query=JournalQuery(session_id="default", include_internal=True),
+    )
+
+    by_label = {entry.label: entry for entry in selection.entries}
+    assert by_label["vars"].classification == "inspection"
+    assert by_label["inspect thing"].classification == "inspection"
+    assert by_label["exec"].classification == "replayable"
+    assert by_label["reset"].classification == "replayable"
+    assert by_label["exec kernel execution"].classification == "internal"
+    assert by_label["exec"].provenance_source == "execution_store"
+    assert by_label["exec"].provenance_detail == "projected_user_command"
+    assert by_label["vars"].provenance_source == "history_store"
+    assert by_label["vars"].provenance_detail == "history_record"

@@ -114,3 +114,12 @@ class BackendOperationError(AgentNBException):
 class ProvisioningError(AgentNBException):
     def __init__(self, message: str) -> None:
         super().__init__(code="PROVISIONING_ERROR", message=message)
+
+
+class StateCompatibilityError(AgentNBException):
+    def __init__(self, message: str, *, data: dict[str, object] | None = None) -> None:
+        super().__init__(
+            code="STATE_SCHEMA_INCOMPATIBLE",
+            message=message,
+            data=data,
+        )

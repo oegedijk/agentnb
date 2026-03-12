@@ -319,15 +319,6 @@ def test_app_history_compacts_entries_and_applies_last_selection(project_dir) ->
             "kind": "user_command",
             "command_type": "exec",
             "status": "ok",
-            "duration_ms": 1,
-            "user_visible": True,
-            "input": "alpha = 1",
-            "label": "raw alpha",
-        },
-        {
-            "kind": "user_command",
-            "command_type": "exec",
-            "status": "ok",
             "duration_ms": 2,
             "user_visible": True,
             "input": "beta = 2\nbeta + 1",
@@ -359,6 +350,8 @@ def test_app_history_compacts_entries_and_applies_last_selection(project_dir) ->
         session_id="default",
         errors_only=False,
         include_internal=False,
+        latest=False,
+        last=2,
     )
 
 

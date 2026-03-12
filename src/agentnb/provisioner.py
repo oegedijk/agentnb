@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from .errors import InvalidInputError, ProvisioningError
+from .state import StateRepository
 
 IPYKERNEL_REQUIREMENT = "ipykernel>=6.0"
 
@@ -263,7 +264,7 @@ class KernelProvisioner:
         return unique
 
     def _check_state_directory(self) -> DoctorCheck:
-        state_dir = self.project_root / ".agentnb"
+        state_dir = StateRepository(self.project_root).state_dir
         try:
             state_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(

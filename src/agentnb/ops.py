@@ -9,6 +9,7 @@ from .errors import AgentNBException, KernelNotReadyError, NoKernelRunningError
 from .history import HistoryStore, kernel_execution_record, user_command_record
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID
+from .state import StateRepository
 
 
 class NotebookOps:
@@ -402,6 +403,7 @@ print(json.dumps(_payload))
     ) -> dict[str, Any]:
         escaped_module = repr(module_name)
         escaped_root = repr(str(project_root.resolve()))
+        escaped_state_dir = repr(str(StateRepository(project_root).state_dir))
         code = f"""
 import importlib
 import importlib.util
@@ -422,7 +424,7 @@ for _root in {{
     getattr(sys, "exec_prefix", None),
     getattr(sys, "base_exec_prefix", None),
     str(_project_root / ".venv"),
-    str(_project_root / ".agentnb"),
+    {escaped_state_dir},
 }}:
     if not _root:
         continue

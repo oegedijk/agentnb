@@ -806,22 +806,21 @@ def test_cli_history_latest_returns_only_most_recent_entry(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.runtime.history = lambda **_: [  # type: ignore[method-assign]
-        {
-            "command_type": "exec",
-            "label": "exec 1 + 1",
-            "kind": "user_command",
-            "user_visible": True,
-            "input": "1 + 1",
-        },
-        {
-            "command_type": "exec",
-            "label": "exec x = 2 x + 2",
-            "kind": "user_command",
-            "user_visible": True,
-            "input": "x = 2\nx + 2",
-        },
-    ]
+    history_calls: list[dict[str, object]] = []
+
+    def history_stub(**kwargs: object) -> list[dict[str, object]]:
+        history_calls.append(kwargs)
+        return [
+            {
+                "command_type": "exec",
+                "label": "exec x = 2 x + 2",
+                "kind": "user_command",
+                "user_visible": True,
+                "input": "x = 2\nx + 2",
+            },
+        ]
+
+    cli.runtime.history = history_stub  # type: ignore[method-assign]
 
     history_res = cli_runner.invoke(
         main,
@@ -834,6 +833,16 @@ def test_cli_history_latest_returns_only_most_recent_entry(
     assert payload["data"]["entries"][0]["command_type"] == "exec"
     assert payload["data"]["entries"][0]["label"] == "exec x = 2 x + 2"
     assert payload["data"]["entries"][0]["kind"] == "user_command"
+    assert history_calls == [
+        {
+            "project_root": project_dir.resolve(),
+            "session_id": "default",
+            "errors_only": False,
+            "include_internal": False,
+            "latest": True,
+            "last": None,
+        }
+    ]
 
 
 def test_cli_history_hides_helper_code_by_default(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -973,16 +982,26 @@ def test_cli_history_errors_filters_semantic_failures(
 def test_cli_history_last_limits_visible_entries(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.runtime.history = lambda **_: [  # type: ignore[method-assign]
-        {"command_type": "exec", "label": "exec", "kind": "user_command", "user_visible": True},
-        {"command_type": "vars", "label": "vars", "kind": "user_command", "user_visible": True},
-        {
-            "command_type": "reload",
-            "label": "reload localmod",
-            "kind": "user_command",
-            "user_visible": True,
-        },
-    ]
+    history_calls: list[dict[str, object]] = []
+
+    def history_stub(**kwargs: object) -> list[dict[str, object]]:
+        history_calls.append(kwargs)
+        return [
+            {
+                "command_type": "vars",
+                "label": "vars",
+                "kind": "user_command",
+                "user_visible": True,
+            },
+            {
+                "command_type": "reload",
+                "label": "reload localmod",
+                "kind": "user_command",
+                "user_visible": True,
+            },
+        ]
+
+    cli.runtime.history = history_stub  # type: ignore[method-assign]
 
     history_res = cli_runner.invoke(
         main,
@@ -992,6 +1011,16 @@ def test_cli_history_last_limits_visible_entries(cli_runner: CliRunner, project_
 
     payload = _payload(history_res.output)
     assert [entry["command_type"] for entry in payload["data"]["entries"]] == ["vars", "reload"]
+    assert history_calls == [
+        {
+            "project_root": project_dir.resolve(),
+            "session_id": "default",
+            "errors_only": False,
+            "include_internal": False,
+            "latest": False,
+            "last": 2,
+        }
+    ]
 
 
 def test_cli_history_error_exec_label_is_semantic(cli_runner: CliRunner, project_dir: Path) -> None:

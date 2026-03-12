@@ -16,7 +16,7 @@ from .errors import (
     SessionNotFoundError,
 )
 from .hooks import Hooks
-from .journal import CommandJournal
+from .journal import CommandJournal, JournalQuery, JournalSelection
 from .provisioner import KernelProvisioner
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
 
@@ -272,16 +272,32 @@ class KernelRuntime:
         session_id: str = DEFAULT_SESSION_ID,
         errors_only: bool = False,
         include_internal: bool = False,
+        latest: bool = False,
+        last: int | None = None,
+        replayable_only: bool = False,
+        execution_id: str | None = None,
     ) -> list[dict[str, object]]:
-        return [
-            entry.to_dict()
-            for entry in self._journal.entries(
-                project_root=project_root,
+        selection = self.select_history(
+            project_root=project_root,
+            query=JournalQuery(
                 session_id=session_id,
                 include_internal=include_internal,
                 errors_only=errors_only,
-            )
-        ]
+                latest=latest,
+                last=last,
+                replayable_only=replayable_only,
+                execution_id=execution_id,
+            ),
+        )
+        return selection.to_dicts()
+
+    def select_history(
+        self,
+        *,
+        project_root: Path,
+        query: JournalQuery,
+    ) -> JournalSelection:
+        return self._journal.select(project_root=project_root, query=query)
 
     def doctor(
         self,
@@ -323,7 +339,4 @@ class KernelRuntime:
         return store, session
 
     def _last_activity(self, project_root: Path, session_id: str) -> str | None:
-        return self._journal.last_activity(
-            project_root=project_root,
-            session_id=session_id,
-        )
+        return self._journal.last_activity(project_root=project_root, session_id=session_id)

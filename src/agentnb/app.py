@@ -15,6 +15,7 @@ from .compact import (
 from .contracts import CommandResponse, ExecutionSink, error_response, success_response
 from .errors import AgentNBException
 from .execution import ExecutionService
+from .journal import JournalQuery
 from .ops import NotebookOps
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID
@@ -224,13 +225,9 @@ class AgentNBApp:
         )
 
     def history(self, request: HistoryRequest) -> CommandResponse:
-        if request.latest and request.last is not None:
-            return self._input_error(
-                command_name="history",
-                project_root=request.project_root,
-                session_id=request.session_id,
-                message="Use either --latest or --last, not both.",
-            )
+        validation_error = self._validate_history_request(request)
+        if validation_error is not None:
+            return validation_error
 
         return self._handle_command(
             command_name="history",
@@ -486,12 +483,10 @@ class AgentNBApp:
             session_id=session_id,
             errors_only=request.errors,
             include_internal=request.include_internal,
+            latest=request.latest,
+            last=request.last,
         )
         entries = [compact_history_entry(entry) for entry in entries]
-        if request.latest:
-            entries = entries[-1:]
-        elif request.last is not None:
-            entries = entries[-request.last :]
         return {"entries": entries}
 
     def _interrupt_payload(
@@ -590,6 +585,24 @@ class AgentNBApp:
                 project_root=request.project_root,
                 session_id=request.session_id,
                 message="Output selectors are not supported with --stream.",
+            )
+        return None
+
+    def _validate_history_request(self, request: HistoryRequest) -> CommandResponse | None:
+        try:
+            JournalQuery(
+                session_id=request.session_id,
+                include_internal=request.include_internal,
+                errors_only=request.errors,
+                latest=request.latest,
+                last=request.last,
+            )
+        except ValueError as exc:
+            return self._input_error(
+                command_name="history",
+                project_root=request.project_root,
+                session_id=request.session_id,
+                message=str(exc),
             )
         return None
 

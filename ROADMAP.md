@@ -90,7 +90,7 @@ that complexity will spread outward into feature code, making the system
 harder to extend and the user-facing contract harder to keep stable.
 
 - Unified command journal:
-  - status: completed initial version
+  - status: completed preparatory slice
   - purpose: establish one owner for the question "what happened in this session?" across semantic history and persisted execution records
   - hidden complexity to absorb:
     - merging `HistoryStore` records with projected execution records
@@ -106,8 +106,8 @@ harder to extend and the user-facing contract harder to keep stable.
     - future sessions will add more feature-specific read paths with subtly different filtering and ordering rules
     - user-facing disagreements between `history`, replay selection, and export selection will become likely
   - follow-up work still needed:
-    - add selection helpers for common replay/verify inputs
-    - add provenance fields only when replay/verify actually need them
+    - completed: add typed query/selection APIs for common replay/verify selectors (`latest`, `last N`, replayable-only, exact `execution_id`)
+    - completed: add replayability classification and provenance fields at the journal layer
     - keep compact/history rendering aligned with journal semantics so internal versus user-visible entries stay distinguishable in `history --all`
 - Application service layer above the CLI:
   - status: current CLI workflows migrated onto the app boundary
@@ -187,7 +187,7 @@ harder to extend and the user-facing contract harder to keep stable.
   - first implementation target:
     - define typed execution lifecycle events and extension context objects before adding actual plugin loading
 - State layout ownership:
-  - status: completed initial path/layout extraction
+  - status: completed preparatory slice
   - purpose: centralize ownership of `.agentnb/` filesystem layout, schema versions, and migration boundaries
   - hidden complexity to absorb:
     - path naming and discovery for sessions, histories, runs, snapshots, artifacts, and future metadata
@@ -205,8 +205,25 @@ harder to extend and the user-facing contract harder to keep stable.
   - first implementation target:
     - completed: extract `.agentnb/` layout constants and path-building rules into one module before adding new persisted resource types
   - follow-up work still needed:
-    - move schema-version ownership and compatibility checks into the same boundary
-    - route future snapshot/artifact path registration through the state-layout module instead of adding new ad hoc filenames
+    - completed: move schema-version ownership and compatibility checks into the same boundary
+    - completed: register future snapshot/artifact/export resource namespaces through the state repository boundary
+- Internal replay/snapshot planning seam:
+  - status: completed preparatory slice
+  - purpose: give future snapshot, replay, and verify features typed planning interfaces without shipping partial feature behavior
+  - hidden complexity to absorb:
+    - deriving replay-ready steps from journal selections
+    - centralizing future snapshot resource planning against the state repository boundary
+    - keeping feature code off raw journal/store payloads
+  - target shape:
+    - internal planner types such as replay steps/plans and snapshot resource plans, with no public CLI or execution behavior yet
+    - future replay/verify/snapshot implementations should consume these plans rather than rebuilding selection/layout logic themselves
+  - why this must come before the feature surface:
+    - it keeps the first replay/snapshot implementation from encoding selection and storage policy ad hoc in command handlers
+    - it gives the journal and state repository abstractions one consumer before user-visible features arrive
+  - if skipped:
+    - replay and snapshot features will likely bind directly to raw journal/state details, weakening the new abstraction boundaries immediately
+  - follow-up work still needed:
+    - connect replay execution and snapshot persistence to these planners once the user-visible feature work starts
 
 ### Goals
 

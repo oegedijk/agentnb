@@ -7,7 +7,7 @@ from typing import Any, Literal, cast
 
 from .contracts import ExecutionResult, utc_now_iso
 from .session import DEFAULT_SESSION_ID
-from .state import StateLayout
+from .state import StateRepository
 
 HistoryKind = Literal["user_command", "kernel_execution"]
 
@@ -82,15 +82,16 @@ class HistoryRecord:
 
 
 class HistoryStore:
-    def __init__(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
-        self.layout = StateLayout(project_root)
-        self.project_root = self.layout.project_root
+    def __init__(self, project_root: Path, session_id: str | None = DEFAULT_SESSION_ID) -> None:
+        self.repository = StateRepository(project_root)
+        self.project_root = self.repository.project_root
         self.session_id = session_id
-        self.state_dir = self.layout.state_dir
-        self.history_file = self.layout.history_file
+        self.state_dir = self.repository.state_dir
+        self.history_file = self.repository.history_file
 
     def append(self, record: HistoryRecord) -> None:
-        self.layout.ensure_state_dir()
+        self.repository.ensure_compatible()
+        self.repository.ensure_state_dir()
         with self.history_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=True))
             handle.write("\n")
@@ -101,6 +102,7 @@ class HistoryStore:
         include_internal: bool = False,
         errors_only: bool = False,
     ) -> list[HistoryRecord]:
+        self.repository.ensure_compatible()
         if not self.history_file.exists():
             return []
 
@@ -113,7 +115,7 @@ class HistoryStore:
                 record = HistoryRecord.from_dict(payload)
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
-            if record.session_id != self.session_id:
+            if self.session_id is not None and record.session_id != self.session_id:
                 continue
             if not include_internal and not record.user_visible:
                 continue

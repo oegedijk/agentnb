@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
 from unittest.mock import Mock
@@ -40,7 +41,7 @@ def integration_runtime() -> KernelRuntime:
 def started_runtime_module(
     integration_runtime: KernelRuntime,
     integration_project_dir: Path,
-) -> tuple[KernelRuntime, Path]:
+) -> Iterator[tuple[KernelRuntime, Path]]:
     integration_runtime.start(integration_project_dir)
     try:
         yield integration_runtime, integration_project_dir
@@ -52,7 +53,7 @@ def started_runtime_module(
 @pytest.fixture
 def started_runtime(
     started_runtime_module: tuple[KernelRuntime, Path],
-) -> tuple[KernelRuntime, Path]:
+) -> Iterator[tuple[KernelRuntime, Path]]:
     runtime, project_dir = started_runtime_module
     reset_integration_kernel(runtime, project_dir)
     yield started_runtime_module

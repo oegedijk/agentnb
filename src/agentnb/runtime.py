@@ -5,7 +5,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
-from .backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
 from .contracts import ExecutionResult, ExecutionSink, KernelStatus
 from .errors import (
     AmbiguousSessionError,
@@ -18,8 +17,9 @@ from .errors import (
 )
 from .hooks import Hooks
 from .journal import CommandJournal, JournalEntry, JournalQuery, JournalSelection
+from .kernel.backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
+from .kernel.provisioner import KernelProvisioner
 from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
-from .provisioner import KernelProvisioner
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
 
 

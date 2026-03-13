@@ -8,7 +8,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from agentnb.errors import InvalidInputError, ProvisioningError
-from agentnb.provisioner import DoctorCheck, InterpreterSelection, KernelProvisioner
+from agentnb.kernel.provisioner import DoctorCheck, InterpreterSelection, KernelProvisioner
 
 
 def _touch(path: Path) -> None:
@@ -43,7 +43,7 @@ def test_select_interpreter_precedence(
     else:
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
 
-    supports = mocker.patch("agentnb.provisioner._python_supports_module", return_value=True)
+    supports = mocker.patch("agentnb.kernel.provisioner._python_supports_module", return_value=True)
 
     selected = KernelProvisioner(project_dir).select_interpreter()
 
@@ -62,7 +62,7 @@ def test_select_interpreter_honors_explicit_python(
     explicit = Path(sys.executable).absolute()
     _touch(project_dir / ".venv" / "bin" / "python")
     supports = mocker.patch(
-        "agentnb.provisioner._python_supports_module",
+        "agentnb.kernel.provisioner._python_supports_module",
         side_effect=[True, True],
     )
 
@@ -99,10 +99,10 @@ def test_ensure_ipykernel_auto_install_flow(project_dir: Path, mocker: MockerFix
         ipykernel_available=False,
     )
 
-    run_mock = mocker.patch("agentnb.provisioner.subprocess.run")
+    run_mock = mocker.patch("agentnb.kernel.provisioner.subprocess.run")
     run_mock.return_value = subprocess.CompletedProcess(args=["python"], returncode=0)
     supports_mock = mocker.patch(
-        "agentnb.provisioner._python_supports_module",
+        "agentnb.kernel.provisioner._python_supports_module",
         side_effect=[True],
     )
 
@@ -123,7 +123,7 @@ def test_ensure_ipykernel_auto_install_surfaces_installer_failure(
         source="current_python",
         ipykernel_available=False,
     )
-    run_mock = mocker.patch("agentnb.provisioner.subprocess.run")
+    run_mock = mocker.patch("agentnb.kernel.provisioner.subprocess.run")
     run_mock.return_value = subprocess.CompletedProcess(
         args=["python"],
         returncode=1,
@@ -145,10 +145,10 @@ def test_ensure_ipykernel_auto_install_rechecks_module_availability(
         ipykernel_available=False,
     )
     mocker.patch(
-        "agentnb.provisioner.subprocess.run",
+        "agentnb.kernel.provisioner.subprocess.run",
         return_value=subprocess.CompletedProcess(args=["python"], returncode=0),
     )
-    mocker.patch("agentnb.provisioner._python_supports_module", return_value=False)
+    mocker.patch("agentnb.kernel.provisioner._python_supports_module", return_value=False)
 
     with pytest.raises(ProvisioningError, match="module is still unavailable"):
         provisioner.ensure_ipykernel(selected, auto_install=True)

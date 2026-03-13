@@ -4,13 +4,14 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, TypedDict, cast
 
 import pytest
 from click.testing import CliRunner
 from pytest_mock import MockerFixture
 
 from agentnb.cli import main
-from agentnb.contracts import ExecutionEvent, ExecutionResult, KernelStatus
+from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink, KernelStatus
 from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
 from agentnb.journal import JournalEntry
@@ -18,8 +19,47 @@ from agentnb.journal import JournalEntry
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
 
-def _payload(output: str) -> dict[str, object]:
-    return json.loads(output)
+JSONDict = dict[str, Any]
+
+
+class ErrorEnvelope(TypedDict):
+    code: str
+    message: str
+    ename: str | None
+    evalue: str | None
+    traceback: list[str] | None
+
+
+class CommandEnvelope(TypedDict):
+    schema_version: str
+    status: str
+    command: str
+    project: str
+    session_id: str
+    timestamp: str
+    data: JSONDict
+    suggestions: list[str]
+    error: ErrorEnvelope | None
+
+
+def _payload(output: str) -> CommandEnvelope:
+    return cast(CommandEnvelope, json.loads(output))
+
+
+def _frame(line: str) -> JSONDict:
+    return cast(JSONDict, json.loads(line))
+
+
+def _error(payload: CommandEnvelope) -> ErrorEnvelope:
+    error = payload["error"]
+    assert error is not None
+    return error
+
+
+def _event_sink(kwargs: dict[str, object]) -> ExecutionSink:
+    sink = kwargs["event_sink"]
+    assert sink is not None
+    return cast(ExecutionSink, sink)
 
 
 def _write_module(project_dir: Path, name: str, body: str) -> None:
@@ -149,12 +189,15 @@ def test_cli_exec_returns_top_level_error_when_execution_fails(
 
     payload = _payload(exec_res.output)
     assert payload["status"] == "error"
-    assert payload["error"]["code"] == "EXECUTION_ERROR"
+    error = _error(payload)
+    assert error["code"] == "EXECUTION_ERROR"
     assert payload["data"]["status"] == "error"
     assert payload["data"]["ename"] == "ZeroDivisionError"
     assert "traceback" not in payload["data"]
     assert "events" not in payload["data"]
-    assert len(payload["error"]["traceback"]) <= 6
+    traceback = error["traceback"]
+    assert traceback is not None
+    assert len(traceback) <= 6
 
 
 def test_cli_exec_stream_json_emits_start_events_and_final(
@@ -166,8 +209,7 @@ def test_cli_exec_stream_json_emits_start_events_and_final(
     cli.runtime.resolve_session_id = lambda **_: "default"  # type: ignore[method-assign]
 
     def execute_code_stub(**kwargs: object) -> ManagedExecution:
-        sink = kwargs["event_sink"]
-        assert sink is not None
+        sink = _event_sink(kwargs)
         sink.started(execution_id="run-123", session_id="default")
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         sink.accept(ExecutionEvent(kind="display", content="2"))
@@ -197,7 +239,7 @@ def test_cli_exec_stream_json_emits_start_events_and_final(
     )
 
     assert result.exit_code == 0
-    frames = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    frames = [_frame(line) for line in result.output.splitlines() if line.strip()]
     assert frames[0] == {"type": "start", "execution_id": "run-123", "session_id": "default"}
     assert frames[1]["type"] == "event"
     assert frames[1]["event"]["kind"] == "stdout"
@@ -216,8 +258,7 @@ def test_cli_exec_stream_human_prints_live_output(
     cli.runtime.resolve_session_id = lambda **_: "default"  # type: ignore[method-assign]
 
     def execute_code_stub(**kwargs: object) -> ManagedExecution:
-        sink = kwargs["event_sink"]
-        assert sink is not None
+        sink = _event_sink(kwargs)
         sink.started(execution_id="run-456", session_id="default")
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         sink.accept(ExecutionEvent(kind="result", content="2"))
@@ -266,8 +307,7 @@ def test_cli_exec_stream_json_returns_error_final_frame_on_execution_failure(
     cli.runtime.resolve_session_id = lambda **_: "default"  # type: ignore[method-assign]
 
     def execute_code_stub(**kwargs: object) -> ManagedExecution:
-        sink = kwargs["event_sink"]
-        assert sink is not None
+        sink = _event_sink(kwargs)
         sink.started(execution_id="run-789", session_id="default")
         sink.accept(
             ExecutionEvent(
@@ -306,7 +346,7 @@ def test_cli_exec_stream_json_returns_error_final_frame_on_execution_failure(
     )
 
     assert result.exit_code == 1
-    frames = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    frames = [_frame(line) for line in result.output.splitlines() if line.strip()]
     assert frames[-1]["type"] == "final"
     assert frames[-1]["response"]["status"] == "error"
     assert frames[-1]["response"]["error"]["code"] == "EXECUTION_ERROR"
@@ -319,7 +359,7 @@ def test_cli_returns_no_kernel_error(cli_runner: CliRunner, project_dir: Path) -
 
     payload = _payload(result.output)
     assert payload["status"] == "error"
-    assert payload["error"]["code"] == "NO_KERNEL"
+    assert _error(payload)["code"] == "NO_KERNEL"
 
 
 def test_cli_returns_kernel_not_ready_error_when_connection_exists_without_session(
@@ -334,7 +374,7 @@ def test_cli_returns_kernel_not_ready_error_when_connection_exists_without_sessi
 
     payload = _payload(result.output)
     assert payload["status"] == "error"
-    assert payload["error"]["code"] == "KERNEL_NOT_READY"
+    assert _error(payload)["code"] == "KERNEL_NOT_READY"
 
 
 def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
@@ -351,8 +391,9 @@ def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
 
     assert result.exit_code == 1
     payload = _payload(result.output)
-    assert payload["error"]["code"] == "AMBIGUOUS_SESSION"
-    assert payload["error"]["message"].startswith("Multiple live sessions exist")
+    error = _error(payload)
+    assert error["code"] == "AMBIGUOUS_SESSION"
+    assert error["message"].startswith("Multiple live sessions exist")
     assert payload["data"]["available_sessions"] == ["default", "analysis"]
     assert payload["suggestions"] == [
         "Run `agentnb sessions list --json` to see the live session names.",
@@ -1223,7 +1264,7 @@ def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir:
     [
         (
             "wait",
-            lambda cli: setattr(  # type: ignore[method-assign]
+            lambda cli: setattr(
                 cli.executions,
                 "wait_for_run",
                 lambda **_: {
@@ -1243,11 +1284,11 @@ def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir:
         ),
         (
             "follow",
-            lambda cli: setattr(  # type: ignore[method-assign]
+            lambda cli: setattr(
                 cli.executions,
                 "follow_run",
                 lambda **kwargs: (
-                    kwargs["event_sink"].started(
+                    _event_sink(kwargs).started(
                         execution_id="run-1",
                         session_id="default",
                     ),
@@ -1286,7 +1327,7 @@ def test_cli_run_lookup_json_hides_internal_outputs(
 
     assert result.exit_code == 0
     if subcommand == "follow":
-        frames = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+        frames = [_frame(line) for line in result.output.splitlines() if line.strip()]
         run_payload = frames[-1]["response"]["data"]["run"]
     else:
         run_payload = _payload(result.output)["data"]["run"]
@@ -1301,8 +1342,7 @@ def test_cli_runs_follow_stream_json_emits_events_and_final(
     import agentnb.cli as cli
 
     def follow_stub(**kwargs: object) -> dict[str, object]:
-        sink = kwargs["event_sink"]
-        assert sink is not None
+        sink = _event_sink(kwargs)
         sink.started(execution_id="run-1", session_id="default")
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         sink.accept(ExecutionEvent(kind="result", content="2"))
@@ -1325,7 +1365,7 @@ def test_cli_runs_follow_stream_json_emits_events_and_final(
     )
 
     assert result.exit_code == 0
-    frames = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    frames = [_frame(line) for line in result.output.splitlines() if line.strip()]
     assert frames[0] == {"type": "start", "execution_id": "run-1", "session_id": "default"}
     assert frames[1]["event"]["kind"] == "stdout"
     assert frames[2]["event"]["kind"] == "result"
@@ -1456,8 +1496,9 @@ def test_cli_exec_returns_session_busy_when_lock_exists(
     assert exec_res.exit_code == 1
 
     payload = _payload(exec_res.output)
-    assert payload["error"]["code"] == "SESSION_BUSY"
-    assert "Wait for the prior command to finish" in payload["error"]["message"]
+    error = _error(payload)
+    assert error["code"] == "SESSION_BUSY"
+    assert "Wait for the prior command to finish" in error["message"]
 
 
 def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Path) -> None:

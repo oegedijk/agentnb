@@ -24,6 +24,7 @@ from .execution import ExecutionService
 from .journal import JournalQuery
 from .ops import NotebookOps
 from .payloads import (
+    CompactExecPayloadInput,
     DoctorPayload,
     ExecPayload,
     HistoryPayload,
@@ -430,7 +431,9 @@ class AgentNBApp:
                 event_sink=event_sink if request.stream else None,
             )
 
-        payload = compact_execution_payload(managed.record.to_execution_payload())
+        payload = compact_execution_payload(
+            cast(CompactExecPayloadInput, managed.record.to_execution_payload())
+        )
         if request.background:
             payload["background"] = True
         if request.ensure_started:
@@ -534,7 +537,9 @@ class AgentNBApp:
             session_id=session_id,
             timeout_s=request.timeout_s,
         )
-        payload = compact_execution_payload(managed.record.to_execution_payload())
+        payload = compact_execution_payload(
+            cast(CompactExecPayloadInput, managed.record.to_execution_payload())
+        )
         if managed.record.status == "error":
             raise AgentNBException(
                 code="EXECUTION_ERROR",

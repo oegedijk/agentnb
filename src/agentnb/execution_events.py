@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from .contracts import ExecutionEvent, ExecutionResult, ExecutionSink
 from .execution_output import ExecutionOutput, OutputItem, output_item_from_shell_reply_message
-from .jupyter_protocol import ShellReplyMessage
+from .kernel.jupyter_protocol import ShellReplyMessage
 
 
 @dataclass(slots=True)

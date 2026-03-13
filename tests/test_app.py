@@ -39,25 +39,33 @@ def _assert_called_with_subset(mock_obj, **expected: object) -> None:
 
 
 @pytest.mark.parametrize(
-    ("request_kwargs", "expected_message"),
+    ("background", "stream", "output_selector", "expected_message"),
     [
         (
-            {"background": True, "output_selector": "stdout"},
+            True,
+            False,
+            "stdout",
             "Output selectors are not supported with --background.",
         ),
         (
-            {"stream": True, "background": True},
+            True,
+            True,
+            None,
             "--stream and --background cannot be used together.",
         ),
         (
-            {"stream": True, "output_selector": "result"},
+            False,
+            True,
+            "result",
             "Output selectors are not supported with --stream.",
         ),
     ],
 )
 def test_app_exec_rejects_invalid_flag_combinations_before_runtime_lookup(
     project_dir,
-    request_kwargs: dict[str, object],
+    background: bool,
+    stream: bool,
+    output_selector: str | None,
     expected_message: str,
 ) -> None:
     runtime = Mock(spec=KernelRuntime)
@@ -68,7 +76,9 @@ def test_app_exec_rejects_invalid_flag_combinations_before_runtime_lookup(
         ExecRequest(
             project_root=project_dir,
             code="1 + 1",
-            **request_kwargs,
+            background=background,
+            stream=stream,
+            output_selector=output_selector,
         )
     )
 

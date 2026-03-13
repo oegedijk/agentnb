@@ -5,7 +5,7 @@ from pathlib import Path
 from pytest_mock import MockerFixture
 
 from agentnb.contracts import KernelStatus
-from agentnb.provisioner import DoctorCheck, DoctorReport, ProvisionResult
+from agentnb.kernel.provisioner import DoctorCheck, DoctorReport, ProvisionResult
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo
 

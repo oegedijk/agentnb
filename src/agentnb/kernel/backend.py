@@ -13,15 +13,17 @@ from typing import Protocol, cast
 import zmq
 from jupyter_client import BlockingKernelClient
 
-from .contracts import (
+from ..contracts import (
     ExecutionResult,
     ExecutionSink,
     KernelStatus,
     utc_now_iso,
 )
-from .errors import BackendOperationError
-from .execution_events import ExecutionResultAccumulator, dispatch_output_item
-from .execution_output import output_item_from_iopub_message
+from ..errors import BackendOperationError
+from ..execution_events import ExecutionResultAccumulator, dispatch_output_item
+from ..execution_output import output_item_from_iopub_message
+from ..session import SessionInfo, pid_exists
+from ..state import kernel_connection_file, kernel_log_file
 from .jupyter_protocol import (
     ExecuteInputMessage,
     ShellReplyMessage,
@@ -30,8 +32,6 @@ from .jupyter_protocol import (
     parse_iopub_message,
     parse_shell_reply_message,
 )
-from .session import SessionInfo, pid_exists
-from .state import kernel_connection_file, kernel_log_file
 
 STARTUP_CODE = """import os
 import sys

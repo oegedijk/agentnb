@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -16,6 +18,12 @@ from agentnb.execution import (
 )
 from agentnb.execution_output import OutputItem
 from agentnb.runtime import KernelRuntime
+
+
+def _event_sink(kwargs: dict[str, object]) -> ExecutionSink:
+    sink = kwargs["event_sink"]
+    assert sink is not None
+    return cast(ExecutionSink, sink)
 
 
 def test_execution_store_roundtrip_and_get(project_dir: Path) -> None:
@@ -170,7 +178,7 @@ def test_execution_service_stream_sink_reuses_execution_id(project_dir: Path) ->
         sink = kwargs["event_sink"]
         assert callable(before_backend)
         assert isinstance(sink, Sink)
-        before_backend()
+        cast(Callable[[], None], before_backend)()
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         return ExecutionResult(
             status="ok",
@@ -361,7 +369,7 @@ def test_execution_service_cancel_run_interrupts_session(project_dir: Path, mock
     mocker.patch("agentnb.execution.pid_exists", return_value=True)
     kill = mocker.patch("agentnb.execution.os.kill")
     runtime = KernelRuntime(backend=Mock())
-    mocker.patch.object(runtime, "interrupt")
+    interrupt = mocker.patch.object(runtime, "interrupt")
     ExecutionStore(project_dir).append(
         ExecutionRecord(
             execution_id="run-1",
@@ -386,7 +394,7 @@ def test_execution_service_cancel_run_interrupts_session(project_dir: Path, mock
     assert payload["status"] == "error"
     assert payload["session_id"] == "analysis"
     assert payload["session_outcome"] == "preserved"
-    runtime.interrupt.assert_called_once_with(project_root=project_dir, session_id="analysis")
+    interrupt.assert_called_once_with(project_root=project_dir, session_id="analysis")
     kill.assert_called_once()
     assert stored is not None
     assert stored.status == "error"
@@ -561,8 +569,7 @@ def test_execution_service_complete_background_run_persists_streamed_progress(
     )
 
     def execute_stub(**kwargs: object) -> ExecutionResult:
-        sink = kwargs["event_sink"]
-        assert sink is not None
+        sink = _event_sink(kwargs)
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         sink.accept(ExecutionEvent(kind="stderr", content="warn\n"))
         sink.accept(ExecutionEvent(kind="result", content="2"))

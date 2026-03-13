@@ -8,6 +8,7 @@ from agentnb.compact import (
     compact_traceback,
 )
 from agentnb.journal import JournalEntry
+from agentnb.payloads import CompactExecPayloadInput, SequencePreview
 
 
 def test_compact_traceback_strips_ansi_and_middle_lines() -> None:
@@ -33,7 +34,7 @@ def test_compact_traceback_strips_ansi_and_middle_lines() -> None:
 
 
 def test_compact_execution_payload_truncates_large_fields_and_preserves_selected_output() -> None:
-    payload = {
+    payload: CompactExecPayloadInput = {
         "status": "ok",
         "duration_ms": 12,
         "execution_id": "run-1",
@@ -55,7 +56,7 @@ def test_compact_execution_payload_truncates_large_fields_and_preserves_selected
 
 
 def test_compact_collection_preview_limits_nested_values() -> None:
-    preview = {
+    preview: SequencePreview = {
         "kind": "sequence-like",
         "length": 5,
         "item_type": "dict",
@@ -75,11 +76,14 @@ def test_compact_collection_preview_limits_nested_values() -> None:
 
     compacted = compact_collection_preview(preview)
 
+    assert compacted["kind"] == "sequence-like"
     assert compacted["length"] == 5
     assert compacted["item_type"] == "dict"
     assert compacted["sample_keys"] == ["id", "title", "body", "author", "meta"]
     assert len(compacted["sample"]) == 3
-    assert set(compacted["sample"][0]) == {"id", "title", "body", "author", "meta"}
+    first = compacted["sample"][0]
+    assert isinstance(first, dict)
+    assert set(first) == {"id", "title", "body", "author", "meta"}
 
 
 def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
@@ -155,8 +159,10 @@ def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
         )
     )
 
-    assert ok_entry["label"].startswith("exec url = 'https://example.com")
-    assert "gamma=3" not in ok_entry["label"]
+    ok_label = ok_entry["label"]
+    assert isinstance(ok_label, str)
+    assert ok_label.startswith("exec url = 'https://example.com")
+    assert "gamma=3" not in ok_label
     assert error_entry["label"] == "exec error ZeroDivisionError"
     assert internal_ok_entry["label"] == "exec kernel execution value = 42 value"
     assert internal_error_entry["label"] == "exec kernel error ZeroDivisionError"

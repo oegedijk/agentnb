@@ -158,6 +158,20 @@ class ExecPayload(TypedDict, total=False):
     selected_text: str
 
 
+class CompactExecPayloadInput(TypedDict, total=False):
+    status: str | None
+    duration_ms: int
+    execution_id: str | None
+    execution_count: int
+    stdout: str
+    stderr: str
+    result: str | None
+    ename: str | None
+    evalue: str | None
+    selected_output: str
+    selected_text: str
+
+
 class VarDisplayEntry(TypedDict, total=False):
     name: str
     type: str

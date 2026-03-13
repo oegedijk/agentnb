@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from .contracts import ExecutionEvent
-from .jupyter_protocol import (
+from .kernel.jupyter_protocol import (
     ErrorMessage,
     ExecuteInputMessage,
     IOPubMessage,

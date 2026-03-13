@@ -31,21 +31,17 @@ The rest of this roadmap is forward-looking.
 Completed foundations:
 
 - `CommandJournal` is now the unified read path for semantic history plus projected execution records.
+- Command recording now has a canonical write boundary via `CommandRecorder`, with shared semantic journal-entry construction for `exec`, `reset`, `vars`, `inspect`, and `reload`.
 - `AgentNBApp` is now the application-service layer below the CLI, with typed request/response seams for the current command surface.
 - `introspection.py` now owns helper execution and typed parsing for `vars`, `inspect`, and `reload`.
 - Public command payloads are now typed through the app/output boundary instead of being rebuilt as ad hoc dicts in multiple layers.
 - Jupyter message parsing is now confined to a typed translator boundary instead of leaking raw protocol dicts through backend execution flow.
+- Kernel-facing implementation now has a dedicated `agentnb.kernel` package, with backend, Jupyter protocol, and provisioning code moved behind one internal package boundary instead of a growing flat module set.
 - `runtime.history()` now carries `JournalEntry` objects until the response-compaction edge instead of flattening journal semantics early.
-- The test suite was cleaned up around these seams: explicit CLI fixtures, more behavioral assertions, broader type-aware coverage, and real CLI smoke coverage of lifecycle/run/introspection flows.
+- The test suite was cleaned up around these seams: explicit CLI fixtures, more behavioral assertions, broader type-aware coverage, real CLI smoke coverage of lifecycle/run/introspection flows, and `ty` enforcement now covers both `src` and `tests`.
 
 Remaining prep refactors:
 
-- Unified command recording / journal write path:
-  - purpose: give semantic command recording one owner so new replay/verify metadata does not drift between `HistoryStore` and `ExecutionStore`
-  - remaining gap:
-    - read-side journal semantics are unified, but write-time record construction is still split across `ExecutionService`, introspection helpers, and direct history helpers
-  - target shape:
-    - a `CommandRecorder` or `JournalWriter` boundary that owns semantic record construction for `exec`, `reset`, `vars`, `inspect`, `reload`, and future replay/verify flows
 - Rich execution output model:
   - purpose: make structured execution output the true internal source of truth before artifacts and export depend on it
   - current state:

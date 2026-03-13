@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from .history import summarize_history_text
 from .journal import JournalEntry
 from .payloads import (
+    CompactExecPayloadInput,
     DataframePreview,
     ExecPayload,
     HistoryEntryPayload,
@@ -45,7 +46,7 @@ def compact_traceback(lines: list[str] | None) -> list[str] | None:
     ]
 
 
-def compact_execution_payload(payload: RunSnapshot) -> ExecPayload:
+def compact_execution_payload(payload: CompactExecPayloadInput) -> ExecPayload:
     compacted: ExecPayload = {"duration_ms": payload.get("duration_ms", 0)}
 
     status = payload.get("status")

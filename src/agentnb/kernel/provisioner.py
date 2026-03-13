@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .errors import InvalidInputError, ProvisioningError
-from .payloads import DoctorCheckPayload, DoctorPayload
-from .state import StateRepository
+from ..errors import InvalidInputError, ProvisioningError
+from ..payloads import DoctorCheckPayload, DoctorPayload
+from ..state import StateRepository
 
 IPYKERNEL_REQUIREMENT = "ipykernel>=6.0"
 

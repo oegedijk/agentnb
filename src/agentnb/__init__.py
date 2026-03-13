@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from .contracts import CommandResponse, ExecutionResult, KernelStatus
+from .kernel.provisioner import DoctorReport, KernelProvisioner, ProvisionResult
 from .payloads import DoctorPayload
-from .provisioner import DoctorReport, KernelProvisioner, ProvisionResult
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID, resolve_project_root
 

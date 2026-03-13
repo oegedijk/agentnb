@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 from pytest_mock import MockerFixture
 
-from agentnb.backend import BackendExecutionTimeout
 from agentnb.contracts import ExecutionResult, KernelStatus
 from agentnb.errors import ExecutionTimedOutError
 from agentnb.hooks import Hooks
-from agentnb.provisioner import ProvisionResult
+from agentnb.kernel.backend import BackendExecutionTimeout
+from agentnb.kernel.provisioner import ProvisionResult
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, SessionStore
 

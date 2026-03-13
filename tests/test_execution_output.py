@@ -10,7 +10,7 @@ from agentnb.execution_output import (
     output_item_from_shell_reply,
     output_item_from_shell_reply_message,
 )
-from agentnb.jupyter_protocol import parse_iopub_message, parse_shell_reply_message
+from agentnb.kernel.jupyter_protocol import parse_iopub_message, parse_shell_reply_message
 
 
 def test_jupyter_execute_result_preserves_mime_in_legacy_event() -> None:
@@ -103,11 +103,12 @@ def test_jupyter_execute_result_falls_back_when_text_plain_is_missing() -> None:
 
 def test_accumulator_build_projects_legacy_text_without_losing_display_order() -> None:
     accumulator = ExecutionResultAccumulator()
-    for msg_type, content in [
+    messages: list[tuple[str, dict[str, object]]] = [
         ("stream", {"name": "stdout", "text": "hello\n"}),
         ("execute_result", {"data": {"text/plain": "2"}}),
         ("display_data", {"data": {"text/plain": "table preview"}}),
-    ]:
+    ]
+    for msg_type, content in messages:
         item = output_item_from_jupyter_message(msg_type, content)
         assert item is not None
         accumulator.accept_output(item)

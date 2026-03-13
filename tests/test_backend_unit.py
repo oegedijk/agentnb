@@ -10,13 +10,7 @@ import pytest
 from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 
-from agentnb.backend import (
-    STARTUP_CODE,
-    BackendOperationError,
-    LocalIPythonBackend,
-    _tail_log,
-    _uptime_seconds,
-)
+from agentnb.backend import BackendOperationError, LocalIPythonBackend, _tail_log, _uptime_seconds
 from agentnb.provisioner import _python_supports_module
 from agentnb.session import SessionInfo
 
@@ -56,15 +50,15 @@ def test_stop_falls_back_to_sigterm_when_sigkill_is_unavailable(
     assert kill_mock.call_args_list[1].args == (1234, signal.SIGTERM)
 
 
-def test_start_detaches_kernel_process(
+def test_start_configures_detached_project_kernel_process(
     tmp_path: Path,
     mocker: MockerFixture,
 ) -> None:
     backend = LocalIPythonBackend()
     process = mocker.Mock(pid=4321)
     popen_mock = mocker.patch("agentnb.backend.subprocess.Popen", return_value=process)
-    wait_mock = mocker.patch.object(backend, "_wait_for_ready")
-    execute_mock = mocker.patch.object(
+    mocker.patch.object(backend, "_wait_for_ready")
+    mocker.patch.object(
         backend,
         "execute",
         return_value=mocker.Mock(status="ok", evalue=None, ename=None),
@@ -78,15 +72,12 @@ def test_start_detaches_kernel_process(
     )
 
     assert session.pid == 4321
-    popen_mock.assert_called_once()
-    assert popen_mock.call_args.kwargs["start_new_session"] is True
-    wait_mock.assert_called_once()
-    execute_mock.assert_called_once()
-
-
-def test_startup_code_only_bootstraps_project_path() -> None:
-    assert "autoreload" not in STARTUP_CODE
-    assert "AGENTNB_PROJECT_ROOT" in STARTUP_CODE
+    assert session.project_root == str(tmp_path)
+    assert session.python_executable == "/usr/bin/python3"
+    popen_kwargs = popen_mock.call_args.kwargs
+    assert popen_kwargs["cwd"] == str(tmp_path)
+    assert popen_kwargs["start_new_session"] is True
+    assert popen_kwargs["env"]["AGENTNB_PROJECT_ROOT"] == str(tmp_path)
 
 
 def test_status_falls_back_to_heartbeat_when_shell_probe_is_busy(
@@ -162,7 +153,7 @@ def test_wait_for_ready_includes_kernel_log_when_process_exits_early(
 
 
 def test_reset_reapplies_startup_code_after_success(mocker: MockerFixture, tmp_path: Path) -> None:
-    backend = LocalIPythonBackend()
+    backend = LocalIPythonBackend(startup_code="print('bootstrapped')")
     session = SessionInfo(
         session_id="default",
         pid=1234,
@@ -184,7 +175,7 @@ def test_reset_reapplies_startup_code_after_success(mocker: MockerFixture, tmp_p
 
     assert result.status == "ok"
     assert execute_mock.call_count == 2
-    assert execute_mock.call_args_list[1].args[1] == STARTUP_CODE
+    assert execute_mock.call_args_list[1].args[1] == "print('bootstrapped')"
 
 
 def test_tail_log_and_uptime_handle_edge_cases(tmp_path: Path) -> None:

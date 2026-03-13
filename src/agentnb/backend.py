@@ -4,10 +4,11 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
-from typing import Any, Protocol, cast
+from typing import Protocol, cast
 
 import zmq
 from jupyter_client import BlockingKernelClient
@@ -20,7 +21,15 @@ from .contracts import (
 )
 from .errors import BackendOperationError
 from .execution_events import ExecutionResultAccumulator, dispatch_output_item
-from .execution_output import output_item_from_jupyter_message
+from .execution_output import output_item_from_iopub_message
+from .jupyter_protocol import (
+    ExecuteInputMessage,
+    ShellReplyMessage,
+    message_parent_id,
+    message_type,
+    parse_iopub_message,
+    parse_shell_reply_message,
+)
 from .session import SessionInfo, pid_exists
 from .state import kernel_connection_file, kernel_log_file
 
@@ -159,9 +168,9 @@ class LocalIPythonBackend:
                 if remaining <= 0:
                     break
                 msg = client.get_shell_msg(timeout=remaining)
-                if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                if message_parent_id(_message_mapping(msg)) != msg_id:
                     continue
-                alive = msg.get("msg_type") == "kernel_info_reply"
+                alive = message_type(_message_mapping(msg)) == "kernel_info_reply"
                 break
         except Exception:
             alive = bool(client.is_alive())
@@ -212,19 +221,14 @@ class LocalIPythonBackend:
                 except Empty as exc:
                     raise BackendExecutionTimeout from exc
 
-                if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                parsed_message = parse_iopub_message(_message_mapping(msg))
+                if parsed_message is None or parsed_message.parent_id != msg_id:
+                    continue
+                if isinstance(parsed_message, ExecuteInputMessage):
+                    accumulator.set_execution_count(parsed_message.execution_count)
                     continue
 
-                msg_type = msg.get("msg_type")
-                if not isinstance(msg_type, str):
-                    continue
-                content = msg.get("content", {})
-
-                if msg_type == "execute_input":
-                    accumulator.set_execution_count(content.get("execution_count"))
-                    continue
-
-                item = output_item_from_jupyter_message(msg_type, _as_dict(content))
+                item = output_item_from_iopub_message(parsed_message)
                 if item is None:
                     continue
 
@@ -237,11 +241,8 @@ class LocalIPythonBackend:
                     idle_received = True
 
             shell_reply = self._shell_reply(client=client, msg_id=msg_id)
-            shell_content: dict[str, object] = {}
             if shell_reply is not None:
-                shell_content = _as_dict(shell_reply.get("content"))
-            if shell_content:
-                accumulator.apply_shell_reply(cast(dict[str, Any], shell_content))
+                accumulator.apply_shell_reply(shell_reply)
 
         finally:
             _close_client(client)
@@ -345,7 +346,7 @@ _ip.run_line_magic("reset", "-f")
         finally:
             _close_client(client)
 
-    def _shell_reply(self, client: BlockingKernelClient, msg_id: str) -> dict[str, object] | None:
+    def _shell_reply(self, client: BlockingKernelClient, msg_id: str) -> ShellReplyMessage | None:
         deadline = time.monotonic() + 1.0
         while True:
             remaining = deadline - time.monotonic()
@@ -355,8 +356,9 @@ _ip.run_line_magic("reset", "-f")
                 shell_msg = client.get_shell_msg(timeout=remaining)
             except Empty:
                 return None
-            if shell_msg.get("parent_header", {}).get("msg_id") == msg_id:
-                return shell_msg
+            parsed_message = parse_shell_reply_message(_message_mapping(shell_msg))
+            if parsed_message is not None and parsed_message.parent_id == msg_id:
+                return parsed_message
 
 
 def _uptime_seconds(started_at: str) -> float | None:
@@ -385,9 +387,9 @@ def _close_client(client: BlockingKernelClient) -> None:
             close()
 
 
-def _as_dict(value: object) -> dict[str, object]:
-    if isinstance(value, dict):
-        return cast(dict[str, object], value)
+def _message_mapping(value: object) -> Mapping[str, object]:
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, object], value)
     return {}
 
 

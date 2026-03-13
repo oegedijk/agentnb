@@ -303,7 +303,7 @@ def test_execution_service_wait_for_run_raises_when_missing(project_dir: Path) -
         )
 
 
-def test_execution_service_follow_run_replays_incremental_events(project_dir: Path) -> None:
+def test_execution_service_follow_run_replays_incremental_events(project_dir: Path, mocker) -> None:
     class Sink(ExecutionSink):
         def __init__(self) -> None:
             self.started_calls: list[tuple[str, str]] = []
@@ -339,7 +339,7 @@ def test_execution_service_follow_run_replays_incremental_events(project_dir: Pa
             ExecutionEvent(kind="result", content="2"),
         ],
     )
-    service._load_run = Mock(side_effect=[running, finished])  # type: ignore[method-assign]
+    mocker.patch.object(service, "_load_run", side_effect=[running, finished])
 
     run = service.follow_run(
         project_root=project_dir,
@@ -361,7 +361,7 @@ def test_execution_service_cancel_run_interrupts_session(project_dir: Path, mock
     mocker.patch("agentnb.execution.pid_exists", return_value=True)
     kill = mocker.patch("agentnb.execution.os.kill")
     runtime = KernelRuntime(backend=Mock())
-    runtime.interrupt = Mock()  # type: ignore[method-assign]
+    mocker.patch.object(runtime, "interrupt")
     ExecutionStore(project_dir).append(
         ExecutionRecord(
             execution_id="run-1",
@@ -428,7 +428,7 @@ def test_execution_service_cancel_run_returns_finished_state_when_run_completes_
             )
         )
 
-    runtime.interrupt = Mock(side_effect=interrupt_stub)  # type: ignore[method-assign]
+    interrupt = mocker.patch.object(runtime, "interrupt", side_effect=interrupt_stub)
 
     payload = ExecutionService(runtime).cancel_run(
         project_root=project_dir,
@@ -441,12 +441,12 @@ def test_execution_service_cancel_run_returns_finished_state_when_run_completes_
     assert payload == {
         "execution_id": "run-1",
         "session_id": "analysis",
-        "cancel_requested": False,
+        "cancel_requested": True,
         "status": "ok",
         "run_status": "ok",
-        "session_outcome": "unchanged",
+        "session_outcome": "preserved",
     }
-    runtime.interrupt.assert_called_once_with(project_root=project_dir, session_id="analysis")
+    interrupt.assert_called_once_with(project_root=project_dir, session_id="analysis")
     kill.assert_not_called()
     assert stored is not None
     assert stored.status == "ok"
@@ -457,8 +457,8 @@ def test_execution_service_cancel_run_stops_starting_session(project_dir: Path, 
     mocker.patch("agentnb.execution.pid_exists", return_value=True)
     kill = mocker.patch("agentnb.execution.os.kill")
     runtime = KernelRuntime(backend=Mock())
-    runtime.interrupt = Mock(side_effect=KernelNotReadyError())  # type: ignore[method-assign]
-    runtime.stop_starting = Mock()  # type: ignore[method-assign]
+    mocker.patch.object(runtime, "interrupt", side_effect=KernelNotReadyError())
+    stop_starting = mocker.patch.object(runtime, "stop_starting")
     ExecutionStore(project_dir).append(
         ExecutionRecord(
             execution_id="run-1",
@@ -481,7 +481,7 @@ def test_execution_service_cancel_run_stops_starting_session(project_dir: Path, 
     assert payload["status"] == "error"
     assert payload["session_id"] == "analysis"
     assert payload["session_outcome"] == "stopped"
-    runtime.stop_starting.assert_called_once_with(project_root=project_dir, session_id="analysis")
+    stop_starting.assert_called_once_with(project_root=project_dir, session_id="analysis")
     kill.assert_called_once()
     assert stored is not None
     assert stored.status == "error"

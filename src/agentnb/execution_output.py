@@ -4,6 +4,15 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from .contracts import ExecutionEvent
+from .jupyter_protocol import (
+    ErrorMessage,
+    ExecuteInputMessage,
+    IOPubMessage,
+    RichOutputMessage,
+    ShellReplyMessage,
+    StatusMessage,
+    StreamMessage,
+)
 
 OutputItemKind = Literal["stream", "result", "display", "error", "status"]
 StreamName = Literal["stdout", "stderr"]
@@ -248,6 +257,29 @@ def output_item_from_jupyter_message(
     return None
 
 
+def output_item_from_iopub_message(message: IOPubMessage) -> OutputItem | None:
+    if isinstance(message, ExecuteInputMessage):
+        return None
+    if isinstance(message, StreamMessage):
+        if message.name == "stderr":
+            return OutputItem.stderr(message.text)
+        return OutputItem.stdout(message.text)
+    if isinstance(message, RichOutputMessage):
+        text = _mime_text(message.mime)
+        if message.msg_type == "display_data":
+            return OutputItem.display(text=text, mime=message.mime)
+        return OutputItem.result(text=text, mime=message.mime)
+    if isinstance(message, ErrorMessage):
+        return OutputItem.error(
+            ename=message.ename,
+            evalue=message.evalue,
+            traceback=message.traceback,
+        )
+    if isinstance(message, StatusMessage) and message.state is not None:
+        return OutputItem.status(message.state)
+    return None
+
+
 def output_item_from_shell_reply(content: dict[str, object]) -> OutputItem | None:
     if content.get("status") != "error":
         return None
@@ -255,6 +287,16 @@ def output_item_from_shell_reply(content: dict[str, object]) -> OutputItem | Non
         ename=_optional_str(content.get("ename")),
         evalue=_optional_str(content.get("evalue")),
         traceback=_optional_str_list(content.get("traceback")),
+    )
+
+
+def output_item_from_shell_reply_message(message: ShellReplyMessage) -> OutputItem | None:
+    if message.status != "error":
+        return None
+    return OutputItem.error(
+        ename=message.ename,
+        evalue=message.evalue,
+        traceback=message.traceback,
     )
 
 

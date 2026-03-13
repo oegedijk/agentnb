@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 from .backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
 from .contracts import ExecutionResult, ExecutionSink, KernelStatus
@@ -16,7 +17,8 @@ from .errors import (
     SessionNotFoundError,
 )
 from .hooks import Hooks
-from .journal import CommandJournal, JournalQuery, JournalSelection
+from .journal import CommandJournal, JournalEntry, JournalQuery, JournalSelection
+from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
 from .provisioner import KernelProvisioner
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
 
@@ -112,8 +114,8 @@ class KernelRuntime:
     ) -> tuple[KernelStatus, bool]:
         return self.start(project_root=project_root, session_id=session_id)
 
-    def list_sessions(self, project_root: Path) -> list[dict[str, object]]:
-        entries: list[dict[str, object]] = []
+    def list_sessions(self, project_root: Path) -> list[SessionSummary]:
+        entries: list[SessionSummary] = []
         for session in SessionStore.list_sessions(project_root):
             store = SessionStore(project_root=project_root, session_id=session.session_id)
             store.cleanup_stale()
@@ -139,7 +141,7 @@ class KernelRuntime:
             )
         return entries
 
-    def delete_session(self, project_root: Path, session_id: str) -> dict[str, object]:
+    def delete_session(self, project_root: Path, session_id: str) -> DeleteSessionResult:
         store = SessionStore(project_root=project_root, session_id=session_id)
         store.cleanup_stale()
         session = store.load_session()
@@ -276,7 +278,7 @@ class KernelRuntime:
         last: int | None = None,
         replayable_only: bool = False,
         execution_id: str | None = None,
-    ) -> list[dict[str, object]]:
+    ) -> list[JournalEntry]:
         selection = self.select_history(
             project_root=project_root,
             query=JournalQuery(
@@ -289,7 +291,7 @@ class KernelRuntime:
                 execution_id=execution_id,
             ),
         )
-        return selection.to_dicts()
+        return selection.entries
 
     def select_history(
         self,
@@ -305,7 +307,7 @@ class KernelRuntime:
         session_id: str = DEFAULT_SESSION_ID,
         python_executable: Path | None = None,
         auto_fix: bool = False,
-    ) -> dict[str, object]:
+    ) -> DoctorPayload:
         store = SessionStore(project_root=project_root, session_id=session_id)
         stale_cleaned = store.cleanup_stale()
         session_exists = store.load_session() is not None
@@ -313,7 +315,7 @@ class KernelRuntime:
             preferred_python=python_executable,
             auto_fix=auto_fix,
         )
-        payload = report.to_dict()
+        payload = cast(DoctorPayload, report.to_dict())
         payload["stale_session_cleaned"] = stale_cleaned
         payload["session_exists"] = session_exists
         return payload

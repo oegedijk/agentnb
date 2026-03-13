@@ -5,9 +5,12 @@ import pytest
 from agentnb.contracts import ExecutionEvent
 from agentnb.execution_events import ExecutionResultAccumulator, dispatch_output_item
 from agentnb.execution_output import (
+    output_item_from_iopub_message,
     output_item_from_jupyter_message,
     output_item_from_shell_reply,
+    output_item_from_shell_reply_message,
 )
+from agentnb.jupyter_protocol import parse_iopub_message, parse_shell_reply_message
 
 
 def test_jupyter_execute_result_preserves_mime_in_legacy_event() -> None:
@@ -166,14 +169,19 @@ def test_accumulator_shell_reply_refines_error_without_adding_duplicate_event() 
             metadata={"ename": "RuntimeError", "traceback": ["old tb"]},
         )
     )
-    accumulator.apply_shell_reply(
+    shell_reply = parse_shell_reply_message(
         {
-            "status": "error",
-            "ename": "ValueError",
-            "evalue": "new",
-            "traceback": ["new tb"],
+            "parent_header": {"msg_id": "run-1"},
+            "content": {
+                "status": "error",
+                "ename": "ValueError",
+                "evalue": "new",
+                "traceback": ["new tb"],
+            },
         }
     )
+    assert shell_reply is not None
+    accumulator.apply_shell_reply(shell_reply)
 
     result = accumulator.build(duration_ms=7)
 
@@ -186,6 +194,9 @@ def test_accumulator_shell_reply_refines_error_without_adding_duplicate_event() 
 
 def test_shell_reply_parser_ignores_non_error_reply() -> None:
     assert output_item_from_shell_reply({"status": "ok"}) is None
+    shell_reply = parse_shell_reply_message({"content": {"status": "ok"}})
+    assert shell_reply is not None
+    assert output_item_from_shell_reply_message(shell_reply) is None
 
 
 @pytest.mark.parametrize(
@@ -239,4 +250,24 @@ def test_shell_reply_parser_drops_invalid_traceback_metadata_in_legacy_event() -
         kind="error",
         content="boom",
         metadata={"ename": "ValueError"},
+    )
+
+
+def test_iopub_message_parser_extracts_parent_id_and_projects_output_item() -> None:
+    parsed = parse_iopub_message(
+        {
+            "msg_type": "display_data",
+            "parent_header": {"msg_id": "run-1"},
+            "content": {"data": {"text/plain": "preview", "text/html": "<p>preview</p>"}},
+        }
+    )
+
+    assert parsed is not None
+    assert parsed.parent_id == "run-1"
+    item = output_item_from_iopub_message(parsed)
+    assert item is not None
+    assert item.to_event() == ExecutionEvent(
+        kind="display",
+        content="preview",
+        metadata={"mime": {"text/plain": "preview", "text/html": "<p>preview</p>"}},
     )

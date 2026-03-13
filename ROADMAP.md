@@ -9,6 +9,10 @@ This roadmap captures planned work **after the current v0.1 baseline**.
 - Stable JSON response envelope plus low-noise agent-oriented output defaults
 - Structured execution events and durable run records with `execution_id`
 - Background execution, live follow, and snapshot-style run inspection on one execution model
+- Unified command journal read path over semantic history and persisted runs
+- Application service layer with typed request/response seams under the CLI
+- Dedicated introspection boundary for `vars`, `inspect`, and `reload`
+- Typed public payloads through app/output plus typed Jupyter message translation at the backend edge
 
 ## v0.2 - Delivered
 
@@ -24,105 +28,34 @@ The rest of this roadmap is forward-looking.
 
 ### Pre-v0.3 Refactors
 
-These refactors should land before the main v0.3 feature surface so replay,
-verification, artifacts, and alternate control surfaces build on deeper
-abstractions instead of more command-specific glue.
+Completed foundations:
 
-The intent is not just code cleanup. Each refactor below exists to hide a
-specific kind of complexity before later roadmap items arrive. If skipped,
-that complexity will spread outward into feature code, making the system
-harder to extend and the user-facing contract harder to keep stable.
+- `CommandJournal` is now the unified read path for semantic history plus projected execution records.
+- `AgentNBApp` is now the application-service layer below the CLI, with typed request/response seams for the current command surface.
+- `introspection.py` now owns helper execution and typed parsing for `vars`, `inspect`, and `reload`.
+- Public command payloads are now typed through the app/output boundary instead of being rebuilt as ad hoc dicts in multiple layers.
+- Jupyter message parsing is now confined to a typed translator boundary instead of leaking raw protocol dicts through backend execution flow.
+- `runtime.history()` now carries `JournalEntry` objects until the response-compaction edge instead of flattening journal semantics early.
+- The test suite was cleaned up around these seams: explicit CLI fixtures, more behavioral assertions, broader type-aware coverage, and real CLI smoke coverage of lifecycle/run/introspection flows.
 
-- Unified command journal:
-  - purpose: establish one owner for the question "what happened in this session?" across semantic history and persisted execution records
-  - hidden complexity to absorb:
-    - merging `HistoryStore` records with projected execution records
-    - ordering, filtering, and classifying user-visible versus internal commands
-    - identifying which commands are replayable versus inspection-only
+Remaining prep refactors:
+
+- Unified command recording / journal write path:
+  - purpose: give semantic command recording one owner so new replay/verify metadata does not drift between `HistoryStore` and `ExecutionStore`
+  - remaining gap:
+    - read-side journal semantics are unified, but write-time record construction is still split across `ExecutionService`, introspection helpers, and direct history helpers
   - target shape:
-    - a `CommandJournal` module that exposes ordered journal entries plus stable selectors (`errors_only`, `include_internal`, `latest`, `last N`, replayable-only)
-    - replay, verify, snapshot restore, and export should depend on this layer instead of reading raw history/execution stores directly
-  - why this must come first:
-    - without a journal, `history`, `replay`, `verify`, snapshot restore, and export will each reimplement slightly different traversal logic
-    - this is the deepest current refactor because it turns duplicated read-side logic into one module boundary
-  - if skipped:
-    - future sessions will add more feature-specific read paths with subtly different filtering and ordering rules
-    - user-facing disagreements between `history`, replay selection, and export selection will become likely
-  - follow-up work still needed:
-    - keep compact/history rendering aligned with journal semantics so internal versus user-visible entries stay distinguishable in `history --all`
-- Application service layer above the CLI:
-  - purpose: stop `click` command handlers from becoming the de facto application core
-  - hidden complexity to absorb:
-    - session resolution rules
-    - command orchestration and multi-step workflows
-    - mapping domain errors into command responses
-    - shared request/response handling across CLI, future stdin-JSON mode, and RPC-like control surfaces
-  - target shape:
-    - an `AgentNBApp` or similarly named application-service layer with typed request/response objects for operations such as `exec`, `history`, `runs`, `snapshot`, `replay`, and `verify`
-    - `cli.py` becomes a thin adapter: parse args -> build request -> call app service -> render response
-  - why this must come before v0.5 control surfaces:
-    - `call` / RPC-like commands and stdin JSON request mode should reuse the same core orchestration as the CLI
-    - if skipped, each new control surface will duplicate workflow and error-handling rules
-  - if skipped:
-    - the CLI file will keep accumulating domain logic and become the place where behavior is defined by accident
-    - future non-CLI interfaces will either diverge from CLI behavior or copy large amounts of orchestration code
-  - follow-up work still needed:
-    - separate transport-neutral operation results from CLI/JSON response envelopes so the app boundary is shaped around operations rather than around command rendering
-    - keep CLI-only concerns limited to argument parsing, stdin/file input handling, and human/stream rendering
-    - route future non-CLI control surfaces such as snapshot/replay/verify through the same typed request/response seam instead of adding new orchestration paths
-- Kernel helper / introspection boundary:
-  - purpose: keep inspection, reload, and future debug helpers deep instead of letting large embedded kernel scripts define the architecture
-  - hidden complexity to absorb:
-    - packaging helper code sent into the kernel for `vars`, `inspect`, `reload`, and future frame/locals/profiling flows
-    - parsing structured helper results and mapping them into command-level payloads and history metadata
-    - side-effect-aware inspection rules and bounded preview policy for common container and dataframe-like values
-  - target shape:
-    - a focused helper layer such as `kernel_helpers`, `introspection`, or `debug_ops` with typed helper requests/results and reusable kernel snippets
-    - `NotebookOps` should orchestrate high-level operations, not own large inline helper programs plus ad hoc JSON parsing
-  - why this must come before richer debugging and safer inspection:
-    - frame/locals inspection, bounded previews, profiling, and replay-aware metadata will otherwise accumulate as more one-off embedded scripts inside one shallow module
-    - keeping helper code and parsing policy behind one boundary lets inspection behavior deepen without spreading across app, history, and rendering layers
-  - if skipped:
-    - `ops.py` will keep growing into a mixed bag of orchestration, embedded kernel programs, parsing, and history concerns
-    - inspection and debug behavior will be harder to test, reuse, and evolve consistently across future commands
-  - first implementation target:
-    - extract reusable helper-spec and result-parsing primitives from the current `vars`, `inspect`, and `reload` paths without changing the CLI contract
+    - a `CommandRecorder` or `JournalWriter` boundary that owns semantic record construction for `exec`, `reset`, `vars`, `inspect`, `reload`, and future replay/verify flows
 - Rich execution output model:
-  - purpose: preserve execution structure internally so v0.4 artifacts do not have to reverse-engineer text output
-  - hidden complexity to absorb:
-    - the distinction between streams, expression results, display data, errors, and future artifact references
-    - MIME-aware outputs such as text, HTML, tables, images, and richer notebook-style display payloads
-  - target shape:
-    - a typed execution-output model below rendering, where renderers decide how to present outputs but do not define what outputs exist
-    - backend adapters should return structured output items; `output.py` should render or compact them for human/JSON modes
-  - why this must come before artifacts:
-    - current text flattening is acceptable for `stdout`/`result` but will leak backend limitations into artifact design
-    - artifact persistence should consume structured outputs directly rather than scraping text from compacted payloads
-  - if skipped:
-    - artifact work will either be constrained to plain text or forced to bolt structured meaning back onto flattened output
-    - backend, renderer, and persistence changes will be coupled more tightly than they need to be
-  - follow-up work still needed:
-    - make the structured execution-output model the internal source of truth instead of continuing to treat flat `stdout` / `stderr` / `result` fields as the primary working representation
-    - keep transient execution outputs distinct from persisted artifact records so `OutputItem` does not become the accidental artifact model
-    - replay/export should read structured outputs as the source of truth; in-flight compatibility snapshots may already project display content into legacy `result`
-    - keep renderers and selectors projecting from the structured model instead of growing new text-flattening rules in parallel
+  - purpose: make structured execution output the true internal source of truth before artifacts and export depend on it
+  - current state:
+    - typed output items and typed Jupyter translation exist, but compatibility payloads still project back into flat `stdout` / `stderr` / `result` fields early
+  - remaining gap:
+    - artifact, replay, and export work should depend on structured output items directly, not on compacted text projections
 - Artifact domain boundary:
-  - purpose: define persisted artifacts as a first-class domain concept instead of treating them as saved execution outputs with ad hoc extra metadata
-  - hidden complexity to absorb:
-    - the distinction between ephemeral execution output and persisted artifacts promoted for later inspection
-    - artifact identity, metadata, retention, promotion, and open/list behavior
-    - the relationship between output items, artifact references in execution payloads, and artifact records on disk
-  - target shape:
-    - a separate artifact model such as `ArtifactRef` / `ArtifactRecord` with stable ids, metadata, and lifecycle state
-    - execution-output structures may refer to artifacts, but should not become the artifact persistence schema themselves
-  - why this must come before v0.4 artifact helpers:
-    - `artifacts list|open`, retention controls, and promotion flows need stable persisted artifact identities, not just richer output rendering
-    - if artifacts are modeled as a thin extension of `OutputItem`, the first real retention or export workflow will force the boundary to be redrawn
-  - if skipped:
-    - output rendering, artifact persistence, and artifact lifecycle policy will become too tightly coupled
-    - later features such as sharable bundles and backend-specific artifact handling will have to unwind the initial design
-  - first implementation target:
-    - define artifact references in execution results and a separate persisted artifact record shape before adding artifact CLI commands
+  - purpose: separate persisted artifacts from transient execution outputs before artifact commands exist
+  - remaining gap:
+    - there is still no first-class persisted artifact model with stable ids, metadata, and lifecycle state
 - Run manager / execution controller abstraction:
   - status: not started
   - purpose: separate run semantics from the current local subprocess implementation used for background execution
@@ -200,39 +133,13 @@ harder to extend and the user-facing contract harder to keep stable.
     - schema changes and cleanup logic will become harder to audit and migrate safely
   - follow-up work still needed:
     - give persisted resources stable identities and per-resource schema/version boundaries so future artifacts, exports, and sharable bundles are not defined by local file paths alone
+### Internal Planning Seams
+
 - Internal replay/snapshot planning seam:
   - purpose: give future snapshot, replay, and verify features typed planning interfaces without shipping partial feature behavior
-  - hidden complexity to absorb:
-    - deriving replay-ready steps from journal selections
-    - centralizing future snapshot resource planning against the state repository boundary
-    - keeping feature code off raw journal/store payloads
   - target shape:
-    - internal planner types such as replay steps/plans and snapshot resource plans, with no public CLI or execution behavior yet
-    - future replay/verify/snapshot implementations should consume these plans rather than rebuilding selection/layout logic themselves
-  - why this must come before the feature surface:
-    - it keeps the first replay/snapshot implementation from encoding selection and storage policy ad hoc in command handlers
-    - it gives the journal and state repository abstractions one consumer before user-visible features arrive
-  - if skipped:
-    - replay and snapshot features will likely bind directly to raw journal/state details, weakening the new abstraction boundaries immediately
-  - follow-up work still needed:
-    - connect replay execution and snapshot persistence to these planners once the user-visible feature work starts
-- Unified command recording / journal write path:
-  - purpose: give semantic command recording one owner so new history metadata and replay provenance do not drift between stores
-  - hidden complexity to absorb:
-    - recording user-visible commands versus internal helper executions consistently across `HistoryStore` and `ExecutionStore`
-    - attaching command metadata such as labels, tags, execution mode, replay provenance, and future verify diagnostics
-    - keeping write-time semantics aligned with the `CommandJournal` read model so `history`, replay selection, and export stay consistent
-  - target shape:
-    - a `CommandRecorder`, `JournalWriter`, or equivalent boundary that owns how semantic command records and execution-linked history entries are emitted
-    - `NotebookOps` and `ExecutionService` should call this boundary instead of each constructing command records independently
-  - why this must come before replay/verify metadata expansion:
-    - replay, verify, and richer history queries need stable write-time metadata, not just a stronger read-side merger
-    - without a single recorder, future fields such as tags or execution mode will likely appear in one path first and lag in others
-  - if skipped:
-    - history semantics will continue to be reconstructed from partially duplicated write paths
-    - new metadata fields will be more likely to disagree between interactive ops, foreground exec, background exec, and future replay flows
-  - first implementation target:
-    - centralize construction of semantic command records for `exec`, `reset`, `vars`, `inspect`, and `reload` while preserving the existing history and runs contract
+    - internal planner types such as replay steps/plans and snapshot resource plans
+    - future replay/verify/snapshot implementations should consume these plans rather than rebuilding journal/state selection logic ad hoc
 
 ### Goals
 
@@ -258,7 +165,7 @@ harder to extend and the user-facing contract harder to keep stable.
   - bounded previews for large values
   - structured previews for common containers (`list`, `dict`, `tuple`, dataframe-like objects)
   - side-effect-aware inspection paths that avoid arbitrary `repr(...)` when possible
-  - richer history metadata (`tags`, labels, execution mode)
+  - richer history metadata beyond the current journal shape (`tags`, execution mode, replay/verify provenance)
 - History/query ergonomics:
   - clearer failed-only flows
   - optional flat JSON output for history-oriented shell pipelines
@@ -272,7 +179,7 @@ harder to extend and the user-facing contract harder to keep stable.
 
 ### API/Contract Notes
 
-- History entries gain optional `tags`, `command_type`, and `execution_id`.
+- History entries should grow optional `tags` and execution-mode/provenance metadata on top of the current `command_type` and `execution_id` fields.
 - Verification responses should identify the first failed step and the source execution that produced it.
 - JSON envelopes should keep machine-stable fields predictable across commands (`session_id`, `execution_id`, `duration_ms`, typed error codes).
 - Keep full `--json` as the exact machine-stable contract rather than assuming it is the best default working mode.

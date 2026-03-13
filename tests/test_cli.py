@@ -10,9 +10,12 @@ from click.testing import CliRunner
 from pytest_mock import MockerFixture
 
 from agentnb.cli import main
-from agentnb.contracts import ExecutionEvent, ExecutionResult
+from agentnb.contracts import ExecutionEvent, ExecutionResult, KernelStatus
 from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
+from agentnb.journal import JournalEntry
+
+pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
 
 def _payload(output: str) -> dict[str, object]:
@@ -30,6 +33,38 @@ def _ok_execution(
     stderr: str = "",
 ) -> ExecutionResult:
     return ExecutionResult(status="ok", result=result, stdout=stdout, stderr=stderr, duration_ms=5)
+
+
+def _journal_entry(
+    *,
+    kind: str = "user_command",
+    command_type: str = "exec",
+    label: str,
+    status: str = "ok",
+    user_visible: bool = True,
+    input_text: str | None = None,
+    code: str | None = None,
+    error_type: str | None = None,
+) -> JournalEntry:
+    return JournalEntry(
+        kind=kind,
+        ts="2026-03-10T00:00:00+00:00",
+        session_id="default",
+        execution_id=None,
+        status=status,
+        duration_ms=1,
+        command_type=command_type,
+        label=label,
+        user_visible=user_visible,
+        classification="internal"
+        if not user_visible
+        else ("replayable" if command_type in {"exec", "reset"} else "inspection"),
+        provenance_source="history_store",
+        provenance_detail="history_record",
+        input=input_text,
+        code=code,
+        error_type=error_type,
+    )
 
 
 def _error_execution(
@@ -338,7 +373,7 @@ def test_cli_status_uses_only_live_session_when_implicit(
 
     def status_stub(**kwargs: object) -> object:
         status_calls.append(dict(kwargs))
-        return type("Status", (), {"to_dict": lambda self: {"alive": True, "pid": 123}})()
+        return KernelStatus(alive=True, pid=123)
 
     cli.runtime.status = status_stub  # type: ignore[method-assign]
 
@@ -359,7 +394,7 @@ def test_cli_status_wait_uses_runtime_wait_for_ready(
 
     def wait_stub(**kwargs: object) -> object:
         wait_calls.append(dict(kwargs))
-        return type("Status", (), {"to_dict": lambda self: {"alive": True, "pid": 321}})()
+        return KernelStatus(alive=True, pid=321)
 
     cli.runtime.wait_for_ready = wait_stub  # type: ignore[method-assign]
 
@@ -385,11 +420,7 @@ def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
 
     def wait_stub(**kwargs: object) -> object:
         wait_calls.append(dict(kwargs))
-        return type(
-            "Status",
-            (),
-            {"to_dict": lambda self: {"alive": True, "pid": 321, "busy": False}},
-        )()
+        return KernelStatus(alive=True, pid=321, busy=False)
 
     cli.runtime.wait_for_idle = wait_stub  # type: ignore[method-assign]
 
@@ -412,11 +443,7 @@ def test_cli_quiet_suppresses_status_body_and_suggestions(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.runtime.status = lambda **_: type(  # type: ignore[method-assign]
-        "Status",
-        (),
-        {"to_dict": lambda self: {"alive": True, "pid": 123}},
-    )()
+    cli.runtime.status = lambda **_: KernelStatus(alive=True, pid=123)  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -462,15 +489,13 @@ def test_cli_start_auto_install_is_opt_in(
 ) -> None:
     start_mock = mocker.patch("agentnb.cli.runtime.start")
     start_mock.return_value = (
-        mocker.Mock(
-            to_dict=lambda: {
-                "alive": True,
-                "pid": 1234,
-                "connection_file": str(project_dir / ".agentnb" / "kernel-default.json"),
-                "started_at": "2026-03-09T00:00:00+00:00",
-                "uptime_s": 0.0,
-                "python": "python",
-            }
+        KernelStatus(
+            alive=True,
+            pid=1234,
+            connection_file=str(project_dir / ".agentnb" / "kernel-default.json"),
+            started_at="2026-03-09T00:00:00+00:00",
+            uptime_s=0.0,
+            python="python",
         ),
         True,
     )
@@ -488,15 +513,13 @@ def test_cli_start_auto_install_flag_enables_installs(
 ) -> None:
     start_mock = mocker.patch("agentnb.cli.runtime.start")
     start_mock.return_value = (
-        mocker.Mock(
-            to_dict=lambda: {
-                "alive": True,
-                "pid": 1234,
-                "connection_file": str(project_dir / ".agentnb" / "kernel-default.json"),
-                "started_at": "2026-03-09T00:00:00+00:00",
-                "uptime_s": 0.0,
-                "python": "python",
-            }
+        KernelStatus(
+            alive=True,
+            pid=1234,
+            connection_file=str(project_dir / ".agentnb" / "kernel-default.json"),
+            started_at="2026-03-09T00:00:00+00:00",
+            uptime_s=0.0,
+            python="python",
         ),
         True,
     )
@@ -516,15 +539,13 @@ def test_cli_start_passes_named_session(
 ) -> None:
     start_mock = mocker.patch("agentnb.cli.runtime.start")
     start_mock.return_value = (
-        mocker.Mock(
-            to_dict=lambda: {
-                "alive": True,
-                "pid": 1234,
-                "connection_file": str(project_dir / ".agentnb" / "kernel-analysis.json"),
-                "started_at": "2026-03-09T00:00:00+00:00",
-                "uptime_s": 0.0,
-                "python": "python",
-            }
+        KernelStatus(
+            alive=True,
+            pid=1234,
+            connection_file=str(project_dir / ".agentnb" / "kernel-analysis.json"),
+            started_at="2026-03-09T00:00:00+00:00",
+            uptime_s=0.0,
+            python="python",
         ),
         True,
     )
@@ -808,17 +829,9 @@ def test_cli_history_latest_returns_only_most_recent_entry(
 
     history_calls: list[dict[str, object]] = []
 
-    def history_stub(**kwargs: object) -> list[dict[str, object]]:
+    def history_stub(**kwargs: object) -> list[JournalEntry]:
         history_calls.append(kwargs)
-        return [
-            {
-                "command_type": "exec",
-                "label": "exec x = 2 x + 2",
-                "kind": "user_command",
-                "user_visible": True,
-                "input": "x = 2\nx + 2",
-            },
-        ]
+        return [_journal_entry(label="exec x = 2 x + 2", input_text="x = 2\nx + 2")]
 
     cli.runtime.history = history_stub  # type: ignore[method-assign]
 
@@ -849,25 +862,10 @@ def test_cli_history_hides_helper_code_by_default(cli_runner: CliRunner, project
     import agentnb.cli as cli
 
     cli.runtime.history = lambda **_: [  # type: ignore[method-assign]
-        {
-            "command_type": "exec",
-            "label": "exec value = 42 import localmod",
-            "kind": "user_command",
-            "user_visible": True,
-        },
-        {"command_type": "vars", "label": "vars", "kind": "user_command", "user_visible": True},
-        {
-            "command_type": "inspect",
-            "label": "inspect value",
-            "kind": "user_command",
-            "user_visible": True,
-        },
-        {
-            "command_type": "reload",
-            "label": "reload localmod",
-            "kind": "user_command",
-            "user_visible": True,
-        },
+        _journal_entry(command_type="exec", label="exec value = 42 import localmod"),
+        _journal_entry(command_type="vars", label="vars"),
+        _journal_entry(command_type="inspect", label="inspect value"),
+        _journal_entry(command_type="reload", label="reload localmod"),
     ]
 
     history_res = cli_runner.invoke(main, ["history", "--project", str(project_dir), "--json"])
@@ -888,35 +886,25 @@ def test_cli_history_all_includes_internal_helper_entries(
 
     history_calls: list[dict[str, object]] = []
 
-    def history_stub(**kwargs: object) -> list[dict[str, object]]:
+    def history_stub(**kwargs: object) -> list[JournalEntry]:
         history_calls.append(kwargs)
         return [
-            {
-                "kind": "kernel_execution",
-                "command_type": "exec",
-                "label": "exec kernel execution",
-                "user_visible": False,
-                "code": "value = 42",
-            },
-            {
-                "kind": "user_command",
-                "command_type": "exec",
-                "label": "exec value = 42",
-                "user_visible": True,
-            },
-            {
-                "kind": "kernel_execution",
-                "command_type": "vars",
-                "label": "vars kernel execution",
-                "user_visible": False,
-                "code": "get_ipython()",
-            },
-            {
-                "kind": "user_command",
-                "command_type": "vars",
-                "label": "vars",
-                "user_visible": True,
-            },
+            _journal_entry(
+                kind="kernel_execution",
+                command_type="exec",
+                label="exec kernel execution",
+                user_visible=False,
+                code="value = 42",
+            ),
+            _journal_entry(command_type="exec", label="exec value = 42"),
+            _journal_entry(
+                kind="kernel_execution",
+                command_type="vars",
+                label="vars kernel execution",
+                user_visible=False,
+                code="get_ipython()",
+            ),
+            _journal_entry(command_type="vars", label="vars"),
         ]
 
     cli.runtime.history = history_stub  # type: ignore[method-assign]
@@ -951,15 +939,14 @@ def test_cli_history_errors_filters_semantic_failures(
 
     history_calls: list[dict[str, object]] = []
 
-    def history_stub(**kwargs: object) -> list[dict[str, object]]:
+    def history_stub(**kwargs: object) -> list[JournalEntry]:
         history_calls.append(kwargs)
         return [
-            {
-                "label": "inspect missing_name",
-                "kind": "user_command",
-                "status": "error",
-                "user_visible": True,
-            }
+            _journal_entry(
+                command_type="inspect",
+                label="inspect missing_name",
+                status="error",
+            )
         ]
 
     cli.runtime.history = history_stub  # type: ignore[method-assign]
@@ -984,21 +971,11 @@ def test_cli_history_last_limits_visible_entries(cli_runner: CliRunner, project_
 
     history_calls: list[dict[str, object]] = []
 
-    def history_stub(**kwargs: object) -> list[dict[str, object]]:
+    def history_stub(**kwargs: object) -> list[JournalEntry]:
         history_calls.append(kwargs)
         return [
-            {
-                "command_type": "vars",
-                "label": "vars",
-                "kind": "user_command",
-                "user_visible": True,
-            },
-            {
-                "command_type": "reload",
-                "label": "reload localmod",
-                "kind": "user_command",
-                "user_visible": True,
-            },
+            _journal_entry(command_type="vars", label="vars"),
+            _journal_entry(command_type="reload", label="reload localmod"),
         ]
 
     cli.runtime.history = history_stub  # type: ignore[method-assign]
@@ -1027,12 +1004,11 @@ def test_cli_history_error_exec_label_is_semantic(cli_runner: CliRunner, project
     import agentnb.cli as cli
 
     cli.runtime.history = lambda **_: [  # type: ignore[method-assign]
-        {
-            "label": "exec error ZeroDivisionError",
-            "kind": "user_command",
-            "status": "error",
-            "user_visible": True,
-        }
+        _journal_entry(
+            label="exec error ZeroDivisionError",
+            status="error",
+            error_type="ZeroDivisionError",
+        )
     ]
 
     history_res = cli_runner.invoke(
@@ -1604,21 +1580,18 @@ def test_cli_history_exec_label_shortens_urls(cli_runner: CliRunner, project_dir
     import agentnb.cli as cli
 
     cli.runtime.history = lambda **_: [  # type: ignore[method-assign]
-        {
-            "label": (
+        _journal_entry(
+            label=(
                 "exec url = "
                 "'https://jsonplaceholder.typicode.com/comments?"
                 "postId=1&_limit=2&expand=author&include=metadata' url"
             ),
-            "command_type": "exec",
-            "kind": "user_command",
-            "user_visible": True,
-            "input": (
+            input_text=(
                 "url = 'https://jsonplaceholder.typicode.com/comments?"
                 "postId=1&_limit=2&expand=author&include=metadata'\n"
                 "url"
             ),
-        }
+        )
     ]
 
     history_res = cli_runner.invoke(

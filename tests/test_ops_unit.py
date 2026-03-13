@@ -1,104 +1,71 @@
 from __future__ import annotations
 
-from unittest.mock import Mock
+from pathlib import Path
 
 import pytest
+from pytest_mock import MockerFixture
 
-from agentnb.contracts import ExecutionResult
-from agentnb.errors import AgentNBException, NoKernelRunningError
-from agentnb.history import HistoryStore
+from agentnb.errors import AgentNBException
+from agentnb.introspection import KernelIntrospection
 from agentnb.ops import NotebookOps
 from agentnb.runtime import KernelRuntime
 
 
-def test_ops_run_rejects_unknown_operation() -> None:
-    ops = NotebookOps(KernelRuntime(backend=Mock()))
+def test_ops_run_rejects_unknown_operation(mocker: MockerFixture) -> None:
+    ops = NotebookOps(KernelRuntime(backend=mocker.Mock()))
 
     with pytest.raises(AgentNBException, match="Unknown operation: mystery"):
         ops.run("mystery")
 
 
-def test_ops_run_dispatches_known_operation(project_dir) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    runtime.execute = Mock(  # type: ignore[method-assign]
-        return_value=ExecutionResult(status="ok", stdout="[]\n", duration_ms=5)
+@pytest.mark.parametrize(
+    ("method_name", "call_kwargs", "expected_result"),
+    [
+        ("list_vars", {"project_root": Path("/tmp/project")}, [{"name": "value"}]),
+        (
+            "inspect_var",
+            {"project_root": Path("/tmp/project"), "name": "value"},
+            {"name": "value", "type": "int"},
+        ),
+        (
+            "reload_module",
+            {"project_root": Path("/tmp/project"), "module_name": "localmod"},
+            {"reloaded_modules": ["localmod"]},
+        ),
+    ],
+)
+def test_ops_delegates_to_introspection(
+    mocker: MockerFixture,
+    method_name: str,
+    call_kwargs: dict[str, object],
+    expected_result: object,
+) -> None:
+    runtime = KernelRuntime(backend=mocker.Mock())
+    introspection = mocker.Mock(spec=KernelIntrospection)
+    getattr(introspection, method_name).return_value = expected_result
+    ops = NotebookOps(runtime, introspection=introspection)
+
+    result = getattr(ops, method_name)(**call_kwargs)
+
+    assert result == expected_result
+    getattr(introspection, method_name).assert_called_once_with(
+        **call_kwargs,
+        session_id="default",
+        timeout_s=10.0,
     )
 
-    payload = NotebookOps(runtime).run("vars", project_root=project_dir)
+
+def test_ops_run_dispatches_known_operation(project_dir, mocker: MockerFixture) -> None:
+    runtime = KernelRuntime(backend=mocker.Mock())
+    introspection = mocker.Mock(spec=KernelIntrospection)
+    introspection.list_vars.return_value = []
+    ops = NotebookOps(runtime, introspection=introspection)
+
+    payload = ops.run("vars", project_root=project_dir)
 
     assert payload == []
-
-
-def test_ops_list_vars_records_runtime_exception(project_dir) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    runtime.execute = Mock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
-
-    with pytest.raises(RuntimeError, match="boom"):
-        NotebookOps(runtime).list_vars(project_root=project_dir)
-
-    entries = HistoryStore(project_dir).read(include_internal=True, errors_only=True)
-    assert len(entries) == 2
-    assert [entry.kind for entry in entries] == ["kernel_execution", "user_command"]
-    assert all(entry.command_type == "vars" for entry in entries)
-
-
-def test_ops_list_vars_reraises_missing_kernel_without_history(project_dir) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    runtime.execute = Mock(side_effect=NoKernelRunningError())  # type: ignore[method-assign]
-
-    with pytest.raises(NoKernelRunningError):
-        NotebookOps(runtime).list_vars(project_root=project_dir)
-
-    assert HistoryStore(project_dir).read(include_internal=True) == []
-
-
-def test_ops_list_vars_raises_execution_error_when_helper_fails(project_dir) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    runtime.execute = Mock(  # type: ignore[method-assign]
-        return_value=ExecutionResult(
-            status="error",
-            ename="NameError",
-            evalue="missing",
-            traceback=["tb"],
-            duration_ms=5,
-        )
+    introspection.list_vars.assert_called_once_with(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=10.0,
     )
-
-    with pytest.raises(AgentNBException, match="Failed to list vars"):
-        NotebookOps(runtime).list_vars(project_root=project_dir)
-
-    entries = HistoryStore(project_dir).read(include_internal=True, errors_only=True)
-    assert len(entries) == 2
-    assert entries[-1].kind == "user_command"
-    assert entries[-1].status == "error"
-
-
-def test_ops_list_vars_raises_parse_error_when_helper_prints_nothing(project_dir) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    runtime.execute = Mock(  # type: ignore[method-assign]
-        return_value=ExecutionResult(status="ok", stdout="", result=None, duration_ms=5)
-    )
-
-    with pytest.raises(AgentNBException, match="No output while attempting to list vars"):
-        NotebookOps(runtime).list_vars(project_root=project_dir)
-
-    entries = HistoryStore(project_dir).read(errors_only=True)
-    assert len(entries) == 1
-    assert entries[0].error_type == "PARSE_ERROR"
-
-
-def test_ops_list_vars_raises_parse_error_when_helper_prints_invalid_json(project_dir) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    runtime.execute = Mock(  # type: ignore[method-assign]
-        return_value=ExecutionResult(status="ok", stdout="not-json\n", result=None, duration_ms=5)
-    )
-
-    with pytest.raises(
-        AgentNBException,
-        match="Unable to parse JSON payload while attempting to list vars",
-    ):
-        NotebookOps(runtime).list_vars(project_root=project_dir)
-
-    entries = HistoryStore(project_dir).read(errors_only=True)
-    assert len(entries) == 1
-    assert entries[0].error_type == "JSONDecodeError"

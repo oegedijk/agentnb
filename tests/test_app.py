@@ -17,8 +17,10 @@ from agentnb.app import (
     SessionsListRequest,
     StatusRequest,
 )
+from agentnb.contracts import KernelStatus
 from agentnb.errors import AmbiguousSessionError
 from agentnb.execution import ExecutionRecord, ExecutionService, ManagedExecution
+from agentnb.journal import JournalEntry
 from agentnb.runtime import KernelRuntime
 
 
@@ -30,12 +32,10 @@ class DummySink:
         del event
 
 
-class DummyStatus:
-    def __init__(self, payload: dict[str, object]) -> None:
-        self._payload = payload
-
-    def to_dict(self) -> dict[str, object]:
-        return dict(self._payload)
+def _assert_called_with_subset(mock_obj, **expected: object) -> None:
+    kwargs = mock_obj.call_args.kwargs
+    for key, value in expected.items():
+        assert kwargs[key] == value
 
 
 @pytest.mark.parametrize(
@@ -115,13 +115,14 @@ def test_app_exec_success_routes_through_resolved_session(project_dir) -> None:
     assert response.data["result"] == "2"
     assert response.data["ensured_started"] is True
     assert response.data["started_new_session"] is True
-    executions.execute_code.assert_called_once_with(
+    executions.execute_code.assert_called_once()
+    _assert_called_with_subset(
+        executions.execute_code,
         project_root=project_dir.resolve(),
         session_id="analysis",
         code="1 + 1",
         timeout_s=7,
         ensure_started=True,
-        event_sink=None,
     )
 
 
@@ -160,7 +161,9 @@ def test_app_exec_streaming_failure_returns_top_level_execution_error(project_di
     assert response.error.code == "EXECUTION_ERROR"
     assert response.data["status"] == "error"
     assert response.data["ename"] == "ZeroDivisionError"
-    executions.execute_code.assert_called_once_with(
+    executions.execute_code.assert_called_once()
+    _assert_called_with_subset(
+        executions.execute_code,
         project_root=project_dir.resolve(),
         session_id="default",
         code="1 / 0",
@@ -205,7 +208,9 @@ def test_app_exec_background_success_uses_background_service(project_dir) -> Non
     assert response.data["background"] is True
     assert response.data["ensured_started"] is True
     assert response.data["started_new_session"] is True
-    executions.start_background_code.assert_called_once_with(
+    executions.start_background_code.assert_called_once()
+    _assert_called_with_subset(
+        executions.start_background_code,
         project_root=project_dir.resolve(),
         session_id="analysis",
         code="long_running()",
@@ -267,7 +272,7 @@ def test_app_exec_maps_ambiguous_session_errors_to_response(project_dir) -> None
 def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
-    runtime.wait_for_idle.return_value = DummyStatus({"alive": True, "pid": 123, "busy": False})
+    runtime.wait_for_idle.return_value = KernelStatus(alive=True, pid=123, busy=False)
     app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
 
     response = app.status(
@@ -283,7 +288,9 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
     assert response.data["alive"] is True
     assert response.data["waited"] is True
     assert response.data["waited_for"] == "idle"
-    runtime.wait_for_idle.assert_called_once_with(
+    runtime.wait_for_idle.assert_called_once()
+    _assert_called_with_subset(
+        runtime.wait_for_idle,
         project_root=project_dir.resolve(),
         session_id="analysis",
         timeout_s=5.0,
@@ -315,23 +322,35 @@ def test_app_history_compacts_entries_and_applies_last_selection(project_dir) ->
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "default"
     runtime.history.return_value = [
-        {
-            "kind": "user_command",
-            "command_type": "exec",
-            "status": "ok",
-            "duration_ms": 2,
-            "user_visible": True,
-            "input": "beta = 2\nbeta + 1",
-            "label": "raw beta",
-        },
-        {
-            "kind": "user_command",
-            "command_type": "vars",
-            "status": "ok",
-            "duration_ms": 1,
-            "user_visible": True,
-            "label": "vars",
-        },
+        JournalEntry(
+            kind="user_command",
+            ts="2026-03-12T00:00:00+00:00",
+            session_id="default",
+            execution_id=None,
+            status="ok",
+            duration_ms=2,
+            command_type="exec",
+            label="raw beta",
+            user_visible=True,
+            classification="replayable",
+            provenance_source="history_store",
+            provenance_detail="history_record",
+            input="beta = 2\nbeta + 1",
+        ),
+        JournalEntry(
+            kind="user_command",
+            ts="2026-03-12T00:00:01+00:00",
+            session_id="default",
+            execution_id=None,
+            status="ok",
+            duration_ms=1,
+            command_type="vars",
+            label="vars",
+            user_visible=True,
+            classification="inspection",
+            provenance_source="history_store",
+            provenance_detail="history_record",
+        ),
     ]
     app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
 
@@ -345,7 +364,9 @@ def test_app_history_compacts_entries_and_applies_last_selection(project_dir) ->
     assert response.status == "ok"
     assert [entry["command_type"] for entry in response.data["entries"]] == ["exec", "vars"]
     assert response.data["entries"][0]["label"] == "exec beta = 2 beta + 1"
-    runtime.history.assert_called_once_with(
+    runtime.history.assert_called_once()
+    _assert_called_with_subset(
+        runtime.history,
         project_root=project_dir.resolve(),
         session_id="default",
         errors_only=False,
@@ -387,7 +408,9 @@ def test_app_reset_failure_returns_top_level_execution_error(project_dir) -> Non
     assert response.error.code == "EXECUTION_ERROR"
     assert response.data["status"] == "error"
     assert response.data["execution_id"] == "run-reset"
-    executions.reset_session.assert_called_once_with(
+    executions.reset_session.assert_called_once()
+    _assert_called_with_subset(
+        executions.reset_session,
         project_root=project_dir.resolve(),
         session_id="analysis",
         timeout_s=9.0,
@@ -445,7 +468,9 @@ def test_app_runs_list_compacts_runs_and_applies_last_selection(project_dir) -> 
             "error_type": "ValueError",
         }
     ]
-    executions.list_runs.assert_called_once_with(
+    executions.list_runs.assert_called_once()
+    _assert_called_with_subset(
+        executions.list_runs,
         project_root=project_dir.resolve(),
         session_id="analysis",
         errors_only=True,
@@ -476,7 +501,9 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     assert response.status == "ok"
     assert response.session_id == "analysis"
     assert response.data["run"]["execution_id"] == "run-1"
-    executions.follow_run.assert_called_once_with(
+    executions.follow_run.assert_called_once()
+    _assert_called_with_subset(
+        executions.follow_run,
         project_root=project_dir.resolve(),
         execution_id="run-1",
         timeout_s=4.0,

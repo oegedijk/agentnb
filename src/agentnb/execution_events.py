@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from .contracts import ExecutionEvent, ExecutionResult, ExecutionSink
-from .execution_output import ExecutionOutput, OutputItem, output_item_from_shell_reply
+from .execution_output import ExecutionOutput, OutputItem, output_item_from_shell_reply_message
+from .jupyter_protocol import ShellReplyMessage
 
 
 @dataclass(slots=True)
@@ -23,10 +23,10 @@ class ExecutionResultAccumulator:
         if isinstance(execution_count, int):
             self.execution_count = execution_count
 
-    def apply_shell_reply(self, shell_content: dict[str, Any]) -> None:
+    def apply_shell_reply(self, shell_reply: ShellReplyMessage) -> None:
         if self.execution_count is None:
-            self.set_execution_count(shell_content.get("execution_count"))
-        self.shell_reply_error = output_item_from_shell_reply(shell_content)
+            self.set_execution_count(shell_reply.execution_count)
+        self.shell_reply_error = output_item_from_shell_reply_message(shell_reply)
 
     def build(self, *, duration_ms: int) -> ExecutionResult:
         ename, evalue, traceback = self.output.error_details()

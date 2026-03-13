@@ -120,19 +120,19 @@ def greet() -> str:
     assert after_reload.result == "('v2', 'v2')"
 
     visible_history = runtime.history(project_root=project_dir)
-    assert [entry["command_type"] for entry in visible_history] == ["vars", "inspect", "reload"]
-    assert [entry["label"] for entry in visible_history] == [
+    assert [entry.command_type for entry in visible_history] == ["vars", "inspect", "reload"]
+    assert [entry.label for entry in visible_history] == [
         "vars",
         "inspect my_value",
         "reload localmod",
     ]
-    assert all(entry["kind"] == "user_command" for entry in visible_history)
+    assert all(entry.kind == "user_command" for entry in visible_history)
 
     internal_history = runtime.history(project_root=project_dir, include_internal=True)
     assert len(internal_history) == 6
-    helper_entries = [entry for entry in internal_history if entry["kind"] == "kernel_execution"]
-    assert {entry["command_type"] for entry in helper_entries} == {"vars", "inspect", "reload"}
-    assert any("get_ipython" in str(entry.get("code")) for entry in helper_entries)
+    helper_entries = [entry for entry in internal_history if entry.kind == "kernel_execution"]
+    assert {entry.command_type for entry in helper_entries} == {"vars", "inspect", "reload"}
+    assert any("get_ipython" in str(entry.code) for entry in helper_entries)
 
 
 def test_ops_inspect_dataframe_like_preview(
@@ -288,9 +288,9 @@ def test_ops_history_records_errors_as_semantic_commands(
 
     visible_history = runtime.history(project_root=project_dir, errors_only=True)
     assert len(visible_history) == 1
-    assert visible_history[0]["label"] == "inspect missing_value"
-    assert visible_history[0]["kind"] == "user_command"
-    assert visible_history[0]["status"] == "error"
+    assert visible_history[0].label == "inspect missing_value"
+    assert visible_history[0].kind == "user_command"
+    assert visible_history[0].status == "error"
 
     internal_history = runtime.history(
         project_root=project_dir,
@@ -298,7 +298,7 @@ def test_ops_history_records_errors_as_semantic_commands(
         include_internal=True,
     )
     assert len(internal_history) == 2
-    assert sum(1 for entry in internal_history if entry["kind"] == "kernel_execution") == 1
+    assert sum(1 for entry in internal_history if entry.kind == "kernel_execution") == 1
 
 
 def test_ops_list_vars_compacts_dataframe_repr(

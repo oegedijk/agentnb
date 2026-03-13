@@ -20,6 +20,12 @@ from .errors import (
 )
 from .execution_events import ExecutionResultAccumulator
 from .execution_output import OutputItem
+from .payloads import (
+    CancelRunResult,
+    ExecutionEventPayload,
+    RunSnapshot,
+    StoredRunSnapshot,
+)
 from .session import DEFAULT_SESSION_ID, pid_exists
 from .state import StateRepository
 
@@ -49,8 +55,8 @@ class ExecutionRecord:
     outputs: list[OutputItem] = field(default_factory=list)
     events: list[ExecutionEvent] = field(default_factory=list)
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def to_dict(self) -> RunSnapshot:
+        payload: RunSnapshot = {
             "execution_id": self.execution_id,
             "ts": self.ts,
             "session_id": self.session_id,
@@ -66,12 +72,22 @@ class ExecutionRecord:
             "ename": self.ename,
             "evalue": self.evalue,
             "traceback": self.traceback,
-            "events": [event.to_dict() for event in self.events],
+            "events": [
+                ExecutionEventPayload(
+                    kind=event.kind,
+                    content=event.content,
+                    metadata=event.metadata,
+                )
+                for event in self.events
+            ],
         }
+        return payload
 
-    def to_storage_dict(self) -> dict[str, Any]:
-        payload = self.to_dict()
-        payload["outputs"] = [item.to_dict() for item in self.outputs]
+    def to_storage_dict(self) -> StoredRunSnapshot:
+        payload: StoredRunSnapshot = {
+            **self.to_dict(),
+            "outputs": [item.to_dict() for item in self.outputs],
+        }
         return payload
 
     @classmethod
@@ -122,7 +138,7 @@ class ExecutionRecord:
             events=events,
         )
 
-    def to_execution_payload(self) -> dict[str, Any]:
+    def to_execution_payload(self) -> RunSnapshot:
         payload = self.to_dict()
         return payload
 
@@ -302,7 +318,7 @@ class ExecutionService:
                     ename=exc.ename,
                     evalue=exc.evalue,
                     traceback=exc.traceback,
-                    data=record.to_execution_payload(),
+                    data=dict(record.to_execution_payload()),
                 ) from exc
             raise
 
@@ -386,7 +402,7 @@ class ExecutionService:
                     ename=exc.ename,
                     evalue=exc.evalue,
                     traceback=exc.traceback,
-                    data=record.to_execution_payload(),
+                    data=dict(record.to_execution_payload()),
                 ) from exc
             raise
 
@@ -405,7 +421,7 @@ class ExecutionService:
         project_root: Path,
         session_id: str | None = None,
         errors_only: bool = False,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RunSnapshot]:
         return [
             record.to_dict()
             for record in self._read_runs(
@@ -416,7 +432,7 @@ class ExecutionService:
             )
         ]
 
-    def get_run(self, *, project_root: Path, execution_id: str) -> dict[str, Any]:
+    def get_run(self, *, project_root: Path, execution_id: str) -> RunSnapshot:
         record = self._load_run(project_root=project_root, execution_id=execution_id)
         if record is None:
             raise AgentNBException(
@@ -432,7 +448,7 @@ class ExecutionService:
         execution_id: str,
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
-    ) -> dict[str, Any]:
+    ) -> RunSnapshot:
         deadline = time.monotonic() + timeout_s
         while True:
             record = self._load_run(project_root=project_root, execution_id=execution_id)
@@ -455,7 +471,7 @@ class ExecutionService:
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
         event_sink: ExecutionSink | None = None,
-    ) -> dict[str, Any]:
+    ) -> RunSnapshot:
         deadline = time.monotonic() + timeout_s
         emitted_events = 0
         started_sink = False
@@ -489,7 +505,7 @@ class ExecutionService:
         execution_id: str,
         timeout_s: float = 10.0,
         poll_interval_s: float = 0.1,
-    ) -> dict[str, Any]:
+    ) -> CancelRunResult:
         deadline = time.monotonic() + timeout_s
         while True:
             record = self._load_run(project_root=project_root, execution_id=execution_id)
@@ -517,7 +533,11 @@ class ExecutionService:
                     poll_interval_s=poll_interval_s,
                 )
                 if latest is not None and latest.status != "running":
-                    return self._terminal_run_payload(latest)
+                    return self._terminal_run_payload(
+                        latest,
+                        cancel_requested=True,
+                        session_outcome="preserved",
+                    )
                 return self._finalize_cancelled_run(
                     project_root=project_root,
                     record=record,
@@ -661,7 +681,7 @@ class ExecutionService:
         project_root: Path,
         record: ExecutionRecord,
         session_outcome: str,
-    ) -> dict[str, Any]:
+    ) -> CancelRunResult:
         if record.worker_pid is not None:
             _terminate_process(record.worker_pid)
         updated = replace(
@@ -683,7 +703,7 @@ class ExecutionService:
         *,
         cancel_requested: bool = False,
         session_outcome: str = "unchanged",
-    ) -> dict[str, Any]:
+    ) -> CancelRunResult:
         return {
             "execution_id": record.execution_id,
             "session_id": record.session_id,

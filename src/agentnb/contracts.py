@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
@@ -113,7 +114,7 @@ def success_response(
     command: str,
     project: str,
     session_id: str,
-    data: dict[str, Any] | None = None,
+    data: Mapping[str, object] | None = None,
     suggestions: list[str] | None = None,
 ) -> CommandResponse:
     return CommandResponse(
@@ -121,7 +122,7 @@ def success_response(
         command=command,
         project=project,
         session_id=session_id,
-        data=data or {},
+        data=dict(data) if data is not None else {},
         suggestions=suggestions or [],
     )
 
@@ -136,7 +137,7 @@ def error_response(
     ename: str | None = None,
     evalue: str | None = None,
     traceback: list[str] | None = None,
-    data: dict[str, Any] | None = None,
+    data: Mapping[str, object] | None = None,
     suggestions: list[str] | None = None,
 ) -> CommandResponse:
     return CommandResponse(
@@ -144,7 +145,7 @@ def error_response(
         command=command,
         project=project,
         session_id=session_id,
-        data=data or {},
+        data=dict(data) if data is not None else {},
         suggestions=suggestions or [],
         error=AgentNBError(
             code=code,

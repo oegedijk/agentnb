@@ -72,7 +72,7 @@ def runtime() -> KernelRuntime:
     return KernelRuntime(backend=TestLocalIPythonBackend())
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def patch_cli_runtime(runtime: KernelRuntime, monkeypatch: pytest.MonkeyPatch) -> None:
     import agentnb.cli as cli
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, cast
 
 from .compact import (
     compact_execution_payload,
@@ -12,11 +12,35 @@ from .compact import (
     compact_run_entry,
     compact_traceback,
 )
-from .contracts import CommandResponse, ExecutionSink, error_response, success_response
+from .contracts import (
+    CommandResponse,
+    ExecutionSink,
+    KernelStatus,
+    error_response,
+    success_response,
+)
 from .errors import AgentNBException
 from .execution import ExecutionService
 from .journal import JournalQuery
 from .ops import NotebookOps
+from .payloads import (
+    DoctorPayload,
+    ExecPayload,
+    HistoryPayload,
+    InspectResponsePayload,
+    InterruptPayload,
+    ReloadReport,
+    RunLookupPayload,
+    RunsListPayload,
+    RunSnapshot,
+    SessionsListPayload,
+    SessionSummary,
+    StartPayload,
+    StatusPayload,
+    StopPayload,
+    VarDisplayEntry,
+    VarsPayload,
+)
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID
 
@@ -284,9 +308,9 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=None,
             require_live_session=False,
-            handler=lambda _: {
-                "sessions": self.runtime.list_sessions(project_root=request.project_root)
-            },
+            handler=lambda _: _sessions_list_payload(
+                self.runtime.list_sessions(project_root=request.project_root)
+            ),
         )
 
     def sessions_delete(self, request: SessionsDeleteRequest) -> CommandResponse:
@@ -370,14 +394,14 @@ class AgentNBApp:
             ),
         )
 
-    def _start_payload(self, *, request: StartRequest, session_id: str) -> dict[str, object]:
+    def _start_payload(self, *, request: StartRequest, session_id: str) -> StartPayload:
         status, started_new = self.runtime.start(
             project_root=request.project_root,
             session_id=session_id,
             python_executable=request.python_executable,
             auto_install=request.auto_install,
         )
-        payload = status.to_dict()
+        payload = cast(StartPayload, _kernel_status_payload(status))
         payload["started_new"] = started_new
         payload["auto_install"] = request.auto_install
         return payload
@@ -388,7 +412,7 @@ class AgentNBApp:
         request: ExecRequest,
         session_id: str,
         event_sink: ExecutionSink | None,
-    ) -> dict[str, object]:
+    ) -> ExecPayload:
         if request.background:
             managed = self.executions.start_background_code(
                 project_root=request.project_root,
@@ -423,35 +447,41 @@ class AgentNBApp:
                 ename=managed.record.ename,
                 evalue=managed.record.evalue,
                 traceback=managed.record.traceback,
-                data=payload,
+                data=dict(payload),
             )
         return payload
 
-    def _status_payload(self, *, request: StatusRequest, session_id: str) -> dict[str, object]:
+    def _status_payload(self, *, request: StatusRequest, session_id: str) -> StatusPayload:
         if request.wait_for == "idle":
-            payload = self.runtime.wait_for_idle(
-                project_root=request.project_root,
-                session_id=session_id,
-                timeout_s=request.timeout_s,
-            ).to_dict()
+            payload = _kernel_status_payload(
+                self.runtime.wait_for_idle(
+                    project_root=request.project_root,
+                    session_id=session_id,
+                    timeout_s=request.timeout_s,
+                )
+            )
             payload["waited"] = True
             payload["waited_for"] = "idle"
             return payload
         if request.wait_for == "ready":
-            payload = self.runtime.wait_for_ready(
-                project_root=request.project_root,
-                session_id=session_id,
-                timeout_s=request.timeout_s,
-            ).to_dict()
+            payload = _kernel_status_payload(
+                self.runtime.wait_for_ready(
+                    project_root=request.project_root,
+                    session_id=session_id,
+                    timeout_s=request.timeout_s,
+                )
+            )
             payload["waited"] = True
             payload["waited_for"] = "ready"
             return payload
-        return self.runtime.status(
-            project_root=request.project_root,
-            session_id=session_id,
-        ).to_dict()
+        return _kernel_status_payload(
+            self.runtime.status(
+                project_root=request.project_root,
+                session_id=session_id,
+            )
+        )
 
-    def _vars_payload(self, *, request: VarsRequest, session_id: str) -> dict[str, object]:
+    def _vars_payload(self, *, request: VarsRequest, session_id: str) -> VarsPayload:
         values = self.ops.list_vars(project_root=request.project_root, session_id=session_id)
         if request.match_text:
             match_lower = request.match_text.lower()
@@ -459,10 +489,15 @@ class AgentNBApp:
         if request.recent is not None:
             values = values[-request.recent :]
         if not request.include_types:
-            values = [{"name": item["name"], "repr": item["repr"]} for item in values]
-        return {"vars": values}
+            display_values: list[VarDisplayEntry] = [
+                {"name": item["name"], "repr": item["repr"]} for item in values
+            ]
+            return {"vars": display_values}
+        return {"vars": cast(list[VarDisplayEntry], values)}
 
-    def _inspect_payload(self, *, request: InspectRequest, session_id: str) -> dict[str, object]:
+    def _inspect_payload(
+        self, *, request: InspectRequest, session_id: str
+    ) -> InspectResponsePayload:
         payload = self.ops.inspect_var(
             project_root=request.project_root,
             session_id=session_id,
@@ -470,14 +505,14 @@ class AgentNBApp:
         )
         return {"inspect": compact_inspect_payload(payload)}
 
-    def _reload_payload(self, *, request: ReloadRequest, session_id: str) -> dict[str, object]:
+    def _reload_payload(self, *, request: ReloadRequest, session_id: str) -> ReloadReport:
         return self.ops.reload_module(
             project_root=request.project_root,
             session_id=session_id,
             module_name=request.module_name,
         )
 
-    def _history_payload(self, *, request: HistoryRequest, session_id: str) -> dict[str, object]:
+    def _history_payload(self, *, request: HistoryRequest, session_id: str) -> HistoryPayload:
         entries = self.runtime.history(
             project_root=request.project_root,
             session_id=session_id,
@@ -489,13 +524,11 @@ class AgentNBApp:
         entries = [compact_history_entry(entry) for entry in entries]
         return {"entries": entries}
 
-    def _interrupt_payload(
-        self, *, request: InterruptRequest, session_id: str
-    ) -> dict[str, object]:
+    def _interrupt_payload(self, *, request: InterruptRequest, session_id: str) -> InterruptPayload:
         self.runtime.interrupt(project_root=request.project_root, session_id=session_id)
         return {"interrupted": True}
 
-    def _reset_payload(self, *, request: ResetRequest, session_id: str) -> dict[str, object]:
+    def _reset_payload(self, *, request: ResetRequest, session_id: str) -> ExecPayload:
         managed = self.executions.reset_session(
             project_root=request.project_root,
             session_id=session_id,
@@ -509,15 +542,15 @@ class AgentNBApp:
                 ename=managed.record.ename,
                 evalue=managed.record.evalue,
                 traceback=managed.record.traceback,
-                data=payload,
+                data=dict(payload),
             )
         return payload
 
-    def _stop_payload(self, *, request: StopRequest, session_id: str) -> dict[str, object]:
+    def _stop_payload(self, *, request: StopRequest, session_id: str) -> StopPayload:
         self.runtime.stop(project_root=request.project_root, session_id=session_id)
         return {"stopped": True}
 
-    def _doctor_payload(self, *, request: DoctorRequest, session_id: str) -> dict[str, object]:
+    def _doctor_payload(self, *, request: DoctorRequest, session_id: str) -> DoctorPayload:
         return self.runtime.doctor(
             project_root=request.project_root,
             session_id=session_id,
@@ -525,7 +558,7 @@ class AgentNBApp:
             auto_fix=request.auto_fix,
         )
 
-    def _runs_list_payload(self, *, request: RunsListRequest) -> dict[str, object]:
+    def _runs_list_payload(self, *, request: RunsListRequest) -> RunsListPayload:
         entries = self.executions.list_runs(
             project_root=request.project_root,
             session_id=request.session_id if request.session_id is not None else None,
@@ -543,7 +576,7 @@ class AgentNBApp:
         execution_id: str,
         timeout_s: float | None,
         event_sink: ExecutionSink | None,
-    ) -> dict[str, object]:
+    ) -> RunLookupPayload:
         if event_sink is not None:
             run = self.executions.follow_run(
                 project_root=project_root,
@@ -635,8 +668,8 @@ class AgentNBApp:
         project_root: Path,
         requested_session_id: str | None,
         require_live_session: bool,
-        handler: Callable[[str], dict[str, object]],
-        response_session_id_resolver: Callable[[str, dict[str, object]], str] | None = None,
+        handler: Callable[[str], Mapping[str, object]],
+        response_session_id_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
     ) -> CommandResponse:
         response_session_id = requested_session_id or DEFAULT_SESSION_ID
 
@@ -667,11 +700,11 @@ class AgentNBApp:
                 ename=exc.ename,
                 evalue=exc.evalue,
                 traceback=compact_traceback(exc.traceback),
-                data=cast(dict[str, object], exc.data),
+                data=exc.data,
                 suggestions=suggestions_for_command(
                     command_name,
                     "error",
-                    cast(dict[str, object], exc.data),
+                    exc.data,
                     error_code=exc.code,
                 ),
             )
@@ -693,10 +726,10 @@ class AgentNBApp:
             )
 
 
-def _run_response_session_id(current_session_id: str, data: dict[str, object]) -> str:
+def _run_response_session_id(current_session_id: str, data: Mapping[str, object]) -> str:
     run = data.get("run")
     if isinstance(run, dict):
-        run_payload = cast(dict[str, object], run)
+        run_payload = cast(Mapping[str, object], run)
         session_id = run_payload.get("session_id")
         if isinstance(session_id, str) and session_id:
             return session_id
@@ -706,7 +739,7 @@ def _run_response_session_id(current_session_id: str, data: dict[str, object]) -
 def suggestions_for_command(
     command_name: str,
     response_status: str,
-    data: dict[str, object],
+    data: Mapping[str, object],
     *,
     error_code: str | None = None,
 ) -> list[str]:
@@ -824,7 +857,7 @@ def suggestions_for_command(
         ]
     if command_name == "runs-show":
         run = data.get("run")
-        run_payload = cast(dict[str, object], run) if isinstance(run, dict) else None
+        run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
         run_status = run_payload.get("status") if run_payload is not None else None
         if run_status == "running":
             return [
@@ -849,6 +882,14 @@ def suggestions_for_command(
         ]
     if command_name == "runs-cancel":
         if data.get("cancel_requested"):
+            if data.get("status") == "ok":
+                return [
+                    "Run `agentnb runs show EXECUTION_ID --json` to inspect the completed run.",
+                    (
+                        "Run `agentnb status --session NAME --wait-idle --json` "
+                        "to confirm the session is ready."
+                    ),
+                ]
             if data.get("session_outcome") == "preserved":
                 session_id = data.get("session_id") or "default"
                 return [
@@ -878,7 +919,7 @@ def suggestions_for_command(
     return []
 
 
-def select_exec_output(payload: dict[str, object], selector: OutputSelector) -> str:
+def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:
     if selector == "result":
         result = payload.get("result")
         return "" if result is None else str(result)
@@ -886,7 +927,24 @@ def select_exec_output(payload: dict[str, object], selector: OutputSelector) -> 
     return "" if value is None else str(value)
 
 
-def _public_run_payload(run: dict[str, Any]) -> dict[str, Any]:
-    public = dict(run)
-    public.pop("outputs", None)
-    return public
+def _kernel_status_payload(status: KernelStatus) -> StatusPayload:
+    return {
+        "alive": status.alive,
+        "pid": status.pid,
+        "connection_file": status.connection_file,
+        "started_at": status.started_at,
+        "uptime_s": status.uptime_s,
+        "python": status.python,
+        "busy": status.busy,
+    }
+
+
+def _sessions_list_payload(sessions: list[SessionSummary]) -> SessionsListPayload:
+    return {"sessions": sessions}
+
+
+def _public_run_payload(run: Mapping[str, object]) -> RunSnapshot:
+    return cast(
+        RunSnapshot,
+        {key: value for key, value in run.items() if key != "outputs"},
+    )

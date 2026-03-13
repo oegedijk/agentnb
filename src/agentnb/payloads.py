@@ -33,6 +33,7 @@ class RunSnapshot(TypedDict, total=False):
 
 class StoredRunSnapshot(RunSnapshot, total=False):
     outputs: list[dict[str, object]]
+    journal_entries: list[dict[str, object]]
 
 
 class CancelRunResult(TypedDict):

@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from .contracts import ExecutionEvent, ExecutionResult, ExecutionSink, utc_now_iso
 from .errors import (
@@ -20,12 +20,14 @@ from .errors import (
 )
 from .execution_events import ExecutionResultAccumulator
 from .execution_output import OutputItem
+from .history import HistoryRecord
 from .payloads import (
     CancelRunResult,
     ExecutionEventPayload,
     RunSnapshot,
     StoredRunSnapshot,
 )
+from .recording import CommandRecorder, CommandRecording
 from .session import DEFAULT_SESSION_ID, pid_exists
 from .state import StateRepository
 
@@ -54,6 +56,7 @@ class ExecutionRecord:
     traceback: list[str] | None = None
     outputs: list[OutputItem] = field(default_factory=list)
     events: list[ExecutionEvent] = field(default_factory=list)
+    journal_entries: list[HistoryRecord] = field(default_factory=list)
 
     def to_dict(self) -> RunSnapshot:
         payload: RunSnapshot = {
@@ -87,6 +90,10 @@ class ExecutionRecord:
         payload: StoredRunSnapshot = {
             **self.to_dict(),
             "outputs": [item.to_dict() for item in self.outputs],
+            "journal_entries": cast(
+                list[dict[str, object]],
+                [entry.to_dict() for entry in self.journal_entries],
+            ),
         }
         return payload
 
@@ -117,6 +124,16 @@ class ExecutionRecord:
                 if not isinstance(metadata, dict):
                     metadata = {}
                 events.append(ExecutionEvent(kind=kind, content=content, metadata=metadata))
+        raw_journal_entries = payload.get("journal_entries", [])
+        journal_entries: list[HistoryRecord] = []
+        if isinstance(raw_journal_entries, list):
+            for raw_entry in raw_journal_entries:
+                if not isinstance(raw_entry, dict):
+                    continue
+                try:
+                    journal_entries.append(HistoryRecord.from_dict(raw_entry))
+                except (TypeError, ValueError):
+                    continue
 
         return cls(
             execution_id=_require_str(payload, "execution_id"),
@@ -136,6 +153,7 @@ class ExecutionRecord:
             traceback=_optional_str_list(payload, "traceback"),
             outputs=outputs,
             events=events,
+            journal_entries=journal_entries,
         )
 
     def to_execution_payload(self) -> RunSnapshot:
@@ -205,6 +223,7 @@ class ManagedExecution:
 class ExecutionRun:
     store: ExecutionStore
     record: ExecutionRecord
+    recording: CommandRecording | None = None
     started: bool = False
 
     def start(self, sink: ExecutionSink | None = None) -> None:
@@ -225,6 +244,7 @@ class ExecutionRun:
         return updated
 
     def result_record(self, execution: ExecutionResult) -> ExecutionRecord:
+        recording = self._recording()
         return replace(
             self.record,
             status=execution.status,
@@ -238,6 +258,12 @@ class ExecutionRun:
             traceback=execution.traceback,
             outputs=[OutputItem.from_event(event) for event in execution.events],
             events=execution.events,
+            journal_entries=recording.build_records(
+                ts=self.record.ts,
+                session_id=self.record.session_id,
+                execution_id=self.record.execution_id,
+                execution=execution,
+            ),
         )
 
     def finalize_result(self, execution: ExecutionResult) -> ExecutionRecord:
@@ -247,6 +273,7 @@ class ExecutionRun:
         return updated
 
     def error_record(self, error: Exception) -> ExecutionRecord:
+        recording = self._recording()
         ename = type(error).__name__
         evalue = str(error)
         traceback = None
@@ -260,6 +287,20 @@ class ExecutionRun:
             ename=ename,
             evalue=evalue,
             traceback=traceback,
+            journal_entries=recording.build_records(
+                ts=self.record.ts,
+                session_id=self.record.session_id,
+                execution_id=self.record.execution_id,
+                error=error,
+            ),
+        )
+
+    def _recording(self) -> CommandRecording:
+        if self.recording is not None:
+            return self.recording
+        return CommandRecorder().for_execution(
+            command_type=self.record.command_type,
+            code=self.record.code,
         )
 
     def finalize_error(self, error: Exception) -> ExecutionRecord:
@@ -270,8 +311,13 @@ class ExecutionRun:
 
 
 class ExecutionService:
-    def __init__(self, runtime: KernelRuntime) -> None:
+    def __init__(
+        self,
+        runtime: KernelRuntime,
+        recorder: CommandRecorder | None = None,
+    ) -> None:
         self.runtime = runtime
+        self._recorder = recorder or CommandRecorder()
 
     def execute_code(
         self,
@@ -563,7 +609,12 @@ class ExecutionService:
         if record is None or record.code is None or record.status != "running":
             return
 
-        run = ExecutionRun(store=self._store(project_root), record=record, started=True)
+        run = ExecutionRun(
+            store=self._store(project_root),
+            record=record,
+            recording=self._recording(command_type=record.command_type, code=record.code),
+            started=True,
+        )
         progress_sink = _ExecutionProgressSink(run)
 
         try:
@@ -591,7 +642,9 @@ class ExecutionService:
             ename=updated.ename,
             evalue=updated.evalue,
             traceback=updated.traceback,
+            outputs=updated.outputs,
             events=updated.events,
+            journal_entries=updated.journal_entries,
         )
 
     def _record_from_result(
@@ -602,7 +655,7 @@ class ExecutionService:
         code: str | None,
         execution: ExecutionResult,
     ) -> ExecutionRecord:
-        return ExecutionRecord(
+        record = ExecutionRecord(
             execution_id=_new_execution_id(),
             ts=utc_now_iso(),
             session_id=session_id,
@@ -620,6 +673,15 @@ class ExecutionService:
             outputs=[OutputItem.from_event(event) for event in execution.events],
             events=execution.events,
         )
+        return replace(
+            record,
+            journal_entries=self._recording(command_type=command_type, code=code).build_records(
+                ts=record.ts,
+                session_id=session_id,
+                execution_id=record.execution_id,
+                execution=execution,
+            ),
+        )
 
     def _record_from_exception(
         self,
@@ -636,7 +698,7 @@ class ExecutionService:
             ename = error.ename or ename
             evalue = error.evalue or error.message
             traceback = error.traceback
-        return ExecutionRecord(
+        record = ExecutionRecord(
             execution_id=_new_execution_id(),
             ts=utc_now_iso(),
             session_id=session_id,
@@ -647,6 +709,15 @@ class ExecutionService:
             ename=ename,
             evalue=evalue,
             traceback=traceback,
+        )
+        return replace(
+            record,
+            journal_entries=self._recording(command_type=command_type, code=code).build_records(
+                ts=record.ts,
+                session_id=session_id,
+                execution_id=record.execution_id,
+                error=error,
+            ),
         )
 
     def _store(self, project_root: Path) -> ExecutionStore:
@@ -663,6 +734,7 @@ class ExecutionService:
     ) -> ExecutionRun:
         return ExecutionRun(
             store=self._store(project_root),
+            recording=self._recording(command_type=command_type, code=code),
             record=ExecutionRecord(
                 execution_id=_new_execution_id(),
                 ts=utc_now_iso(),
@@ -674,6 +746,9 @@ class ExecutionService:
                 worker_pid=worker_pid,
             ),
         )
+
+    def _recording(self, *, command_type: str, code: str | None) -> CommandRecording:
+        return self._recorder.for_execution(command_type=command_type, code=code)
 
     def _finalize_cancelled_run(
         self,
@@ -689,6 +764,22 @@ class ExecutionService:
             status="error",
             ename="CancelledError",
             evalue="Run was cancelled by user.",
+        )
+        updated = replace(
+            updated,
+            journal_entries=self._recording(
+                command_type=updated.command_type,
+                code=updated.code,
+            ).build_records(
+                ts=updated.ts,
+                session_id=updated.session_id,
+                execution_id=updated.execution_id,
+                status=updated.status,
+                duration_ms=updated.duration_ms,
+                error_type=updated.ename,
+                stdout=updated.stdout,
+                result=updated.result,
+            ),
         )
         self._store(project_root).append(updated)
         return self._terminal_run_payload(
@@ -770,6 +861,22 @@ class ExecutionService:
             status="error",
             ename="WorkerExitedError",
             evalue="Background worker exited before recording a result.",
+        )
+        updated = replace(
+            updated,
+            journal_entries=self._recording(
+                command_type=updated.command_type,
+                code=updated.code,
+            ).build_records(
+                ts=updated.ts,
+                session_id=updated.session_id,
+                execution_id=updated.execution_id,
+                status=updated.status,
+                duration_ms=updated.duration_ms,
+                error_type=updated.ename,
+                stdout=updated.stdout,
+                result=updated.result,
+            ),
         )
         self._store(project_root).append(updated)
         return updated

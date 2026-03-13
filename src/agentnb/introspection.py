@@ -7,7 +7,7 @@ from typing import cast
 
 from .contracts import ExecutionResult
 from .errors import AgentNBException, KernelNotReadyError, NoKernelRunningError
-from .history import HistoryStore, kernel_execution_record, user_command_record
+from .history import HistoryStore
 from .payloads import (
     DataframePreview,
     FailedModuleEntry,
@@ -19,6 +19,7 @@ from .payloads import (
     SequencePreview,
     VarEntry,
 )
+from .recording import CommandRecorder, CommandRecording
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID
 from .state import StateRepository
@@ -30,6 +31,7 @@ class KernelHelperRequest:
     label: str
     context: str
     code: str
+    recording: CommandRecording | None = None
     input_text: str | None = None
 
 
@@ -40,8 +42,13 @@ class KernelHelperResult:
 
 
 class KernelIntrospection:
-    def __init__(self, runtime: KernelRuntime) -> None:
+    def __init__(
+        self,
+        runtime: KernelRuntime,
+        recorder: CommandRecorder | None = None,
+    ) -> None:
         self.runtime = runtime
+        self.recorder = recorder or CommandRecorder()
 
     def list_vars(
         self,
@@ -96,6 +103,7 @@ class KernelIntrospection:
         helper: KernelHelperRequest,
     ) -> KernelHelperResult:
         history = HistoryStore(project_root=project_root, session_id=session_id)
+        recording = self._recording_for_helper(helper)
 
         try:
             execution = self.runtime.execute(
@@ -115,24 +123,16 @@ class KernelIntrospection:
             )
             raise
 
-        history.append(
-            kernel_execution_record(
-                session_id=session_id,
-                command_type=helper.command_type,
-                label=f"{helper.label} helper",
-                code=helper.code,
-                origin="ops_helper",
-                execution=execution,
-            )
+        internal_record = recording.build_internal_record(
+            session_id=session_id,
+            execution=execution,
         )
+        if internal_record is not None:
+            history.append(internal_record)
         if execution.status == "error":
             history.append(
-                user_command_record(
+                recording.build_user_record(
                     session_id=session_id,
-                    command_type=helper.command_type,
-                    label=helper.label,
-                    input_text=helper.input_text,
-                    origin="ops",
                     execution=execution,
                 )
             )
@@ -151,12 +151,8 @@ class KernelIntrospection:
             helper=helper,
         )
         history.append(
-            user_command_record(
+            recording.build_user_record(
                 session_id=session_id,
-                command_type=helper.command_type,
-                label=helper.label,
-                input_text=helper.input_text,
-                origin="ops",
                 execution=execution,
             )
         )
@@ -170,25 +166,10 @@ class KernelIntrospection:
         helper: KernelHelperRequest,
         error: Exception,
     ) -> None:
-        history.append(
-            kernel_execution_record(
-                session_id=session_id,
-                command_type=helper.command_type,
-                label=f"{helper.label} helper",
-                code=helper.code,
-                origin="ops_helper",
-                error=error,
-            )
-        )
-        history.append(
-            user_command_record(
-                session_id=session_id,
-                command_type=helper.command_type,
-                label=helper.label,
-                input_text=helper.input_text,
-                origin="ops",
-                error=error,
-            )
+        self._recording_for_helper(helper).append_to(
+            history,
+            session_id=session_id,
+            error=error,
         )
 
     def _parse_json_payload(
@@ -240,12 +221,8 @@ class KernelIntrospection:
         error_type: str,
     ) -> None:
         history.append(
-            user_command_record(
+            self._recording_for_helper(helper).build_user_record(
                 session_id=session_id,
-                command_type=helper.command_type,
-                label=helper.label,
-                input_text=helper.input_text,
-                origin="ops",
                 status="error",
                 duration_ms=execution.duration_ms,
                 error_type=error_type,
@@ -253,6 +230,18 @@ class KernelIntrospection:
                 result=execution.result,
             )
         )
+
+    def _recording_for_helper(self, helper: KernelHelperRequest) -> CommandRecording:
+        if helper.recording is not None:
+            return helper.recording
+        if helper.command_type == "vars":
+            return self.recorder.vars(code=helper.code)
+        if helper.command_type == "inspect":
+            name = helper.input_text or helper.label.removeprefix("inspect ").strip()
+            return self.recorder.inspect(name=name, code=helper.code)
+        if helper.command_type == "reload":
+            return self.recorder.reload(module_name=helper.input_text, code=helper.code)
+        raise ValueError(f"Unsupported helper command type: {helper.command_type}")
 
 
 def _parse_var_entries(payload: JSONValue) -> list[VarEntry]:

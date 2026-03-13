@@ -224,6 +224,16 @@ class CommandJournal:
         return entries
 
     def _project_execution_record(self, record: ExecutionRecord) -> list[JournalEntry]:
+        if record.journal_entries:
+            return [
+                JournalEntry.from_history_record(
+                    entry,
+                    provenance_source="execution_store",
+                    provenance_detail=_execution_provenance_detail(entry),
+                )
+                for entry in record.journal_entries
+            ]
+
         label = "reset" if record.command_type == "reset" else "exec"
         helper_label = (
             "reset kernel state" if record.command_type == "reset" else "exec kernel execution"
@@ -297,3 +307,9 @@ def _classify_entry(command_type: str, user_visible: bool) -> JournalClassificat
     if command_type in _CONTROL_COMMAND_TYPES:
         return "control"
     return "control"
+
+
+def _execution_provenance_detail(record: HistoryRecord) -> JournalProvenanceDetail:
+    if record.kind == "kernel_execution":
+        return "projected_kernel_execution"
+    return "projected_user_command"

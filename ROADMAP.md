@@ -2,79 +2,23 @@
 
 This roadmap captures planned work **after the current v0.1 baseline**.
 
-## Current Baseline (Done)
+## Current Surface
 
-- Project-scoped persistent kernel
-- CLI: `start`, `stop`, `status`, `exec`, `interrupt`, `reset`, `vars`, `inspect`, `reload`, `history`, `doctor`
-- JSON response envelope with stable top-level fields
-- Provisioning flow with interpreter selection + `ipykernel` auto-install
-- Top-level output defaults: `--agent`, `--json`, `--quiet`, `--no-suggestions`
-- Script-friendly output selectors: `exec --stdout-only`, `--stderr-only`, `--result-only`
-- History query shortcuts: `history --latest`, `history --last N`
-- Pytest/ruff/ty CI quality gates
+- Project-scoped persistent kernel with explicit session targeting
+- Core CLI for lifecycle, execution, history, inspection, and repair flows
+- Stable JSON response envelope plus low-noise agent-oriented output defaults
+- Structured execution events and durable run records with `execution_id`
+- Background execution, live follow, and snapshot-style run inspection on one execution model
 
-## v0.2 - Session and Execution Ergonomics
+## v0.2 - Delivered
 
-Status as of March 12, 2026:
-- completed: named sessions, ambiguity handling, `exec --ensure-started`, `status --wait`
-- completed: persisted execution records with `execution_id`
-- completed: background execution with `runs list|show|wait|cancel`
-- completed: real-time streaming execution on top of the same execution model
-- completed: foreground interrupt reliability, active-execution `status`, consistent session `last_activity`, `status --wait-idle`, and live `runs follow`
-- completed: explicit cancel semantics plus a clear snapshot/live split between `runs show` and `runs follow`
-- completed: `runs cancel` now preserves the run's natural terminal state when completion wins the race against cancellation, instead of always overwriting it with synthetic cancellation
-- v0.2 status: complete
+v0.2 is complete. It established the current execution-control surface:
+- named sessions with ambiguity handling
+- first-use execution ergonomics such as `exec --ensure-started` and `status --wait-idle`
+- durable run records plus `runs list|show|follow|wait|cancel`
+- stable streaming/snapshot semantics and more reliable interrupt/cancel behavior
 
-### Goals
-
-- Support multiple sessions per project without breaking default behavior.
-- Improve execution control for long-running workflows.
-- Make session targeting explicit and safe when multiple live contexts exist.
-- Introduce a structured execution model that can support streaming and background runs.
-
-### Planned Features
-
-- Named sessions:
-  - `--session <name>` across all kernel-dependent commands
-  - `agentnb sessions list`, `agentnb sessions delete`
-  - optional `agentnb sessions attach` only after the target/default-session UX is specified
-  - explicit ambiguity errors when multiple sessions exist and no target is provided
-  - session metadata in listings (status, age, interpreter, last activity)
-- First-use execution ergonomics:
-  - `agentnb exec --ensure-started` to auto-start a missing kernel for the default workflow
-  - `status --wait [--timeout]` to block until a kernel is ready for execution
-  - `status --wait-idle [--timeout]` or equivalent to block until a session is safe for the next command
-  - `--session` aliases that are short and consistent across commands
-- Execution event model:
-  - typed events for `stdout`, `stderr`, `result`, `display`, `error`, `status`
-  - stable `execution_id` across foreground, streaming, and background execution paths
-  - internal event persistence to support replay, export, and artifact capture later
-- Execution control stabilization:
-  - foreground `interrupt` must reliably reach a running execution
-  - `status` must accurately report live-versus-not-ready state while commands are in flight
-  - session listings should reflect recent execution activity consistently
-  - completed: cancellation reports whether the session was preserved or stopped
-- Run observation ergonomics:
-  - completed: live follow for background runs on top of the persisted event model
-  - completed: `runs show` is a snapshot view and `runs follow` is the live observation path
-
-### Delivery Order
-
-1. Completed: expose the existing session model in the CLI with `--session` while preserving `default`.
-2. Completed: add session discovery/deletion commands and ambiguity handling when multiple live sessions exist.
-3. Completed: add `exec --ensure-started` and `status --wait`.
-4. Completed: land the execution event schema and persisted execution records.
-5. Completed: land real-time streaming execution on top of the same execution model.
-6. Completed: clarify cancel semantics and session lifecycle after cancellation.
-7. Completed: tighten `runs show` versus `runs follow` so snapshot and live observation stay distinct.
-
-### API/Contract Notes
-
-- `session_id` is already present in top-level command envelopes; add `execution_id` consistently to execution payloads.
-- Extend the event schema to cover sync, streaming, and replay modes without changing event meaning by mode.
-- Support top-level output-mode defaults so agents do not need to repeat `--json` on every command.
-- Keep existing `default` session behavior unchanged.
-- Control-plane commands need stable semantics during active execution, especially `status`, `interrupt`, and `cancel`.
+The rest of this roadmap is forward-looking.
 
 ## v0.3 - Reproducibility and Debug Workflows
 
@@ -90,7 +34,6 @@ that complexity will spread outward into feature code, making the system
 harder to extend and the user-facing contract harder to keep stable.
 
 - Unified command journal:
-  - status: completed preparatory slice
   - purpose: establish one owner for the question "what happened in this session?" across semantic history and persisted execution records
   - hidden complexity to absorb:
     - merging `HistoryStore` records with projected execution records
@@ -106,11 +49,8 @@ harder to extend and the user-facing contract harder to keep stable.
     - future sessions will add more feature-specific read paths with subtly different filtering and ordering rules
     - user-facing disagreements between `history`, replay selection, and export selection will become likely
   - follow-up work still needed:
-    - completed: add typed query/selection APIs for common replay/verify selectors (`latest`, `last N`, replayable-only, exact `execution_id`)
-    - completed: add replayability classification and provenance fields at the journal layer
     - keep compact/history rendering aligned with journal semantics so internal versus user-visible entries stay distinguishable in `history --all`
 - Application service layer above the CLI:
-  - status: current CLI workflows migrated onto the app boundary
   - purpose: stop `click` command handlers from becoming the de facto application core
   - hidden complexity to absorb:
     - session resolution rules
@@ -127,10 +67,27 @@ harder to extend and the user-facing contract harder to keep stable.
     - the CLI file will keep accumulating domain logic and become the place where behavior is defined by accident
     - future non-CLI interfaces will either diverge from CLI behavior or copy large amounts of orchestration code
   - follow-up work still needed:
+    - separate transport-neutral operation results from CLI/JSON response envelopes so the app boundary is shaped around operations rather than around command rendering
     - keep CLI-only concerns limited to argument parsing, stdin/file input handling, and human/stream rendering
     - route future non-CLI control surfaces such as snapshot/replay/verify through the same typed request/response seam instead of adding new orchestration paths
+- Kernel helper / introspection boundary:
+  - purpose: keep inspection, reload, and future debug helpers deep instead of letting large embedded kernel scripts define the architecture
+  - hidden complexity to absorb:
+    - packaging helper code sent into the kernel for `vars`, `inspect`, `reload`, and future frame/locals/profiling flows
+    - parsing structured helper results and mapping them into command-level payloads and history metadata
+    - side-effect-aware inspection rules and bounded preview policy for common container and dataframe-like values
+  - target shape:
+    - a focused helper layer such as `kernel_helpers`, `introspection`, or `debug_ops` with typed helper requests/results and reusable kernel snippets
+    - `NotebookOps` should orchestrate high-level operations, not own large inline helper programs plus ad hoc JSON parsing
+  - why this must come before richer debugging and safer inspection:
+    - frame/locals inspection, bounded previews, profiling, and replay-aware metadata will otherwise accumulate as more one-off embedded scripts inside one shallow module
+    - keeping helper code and parsing policy behind one boundary lets inspection behavior deepen without spreading across app, history, and rendering layers
+  - if skipped:
+    - `ops.py` will keep growing into a mixed bag of orchestration, embedded kernel programs, parsing, and history concerns
+    - inspection and debug behavior will be harder to test, reuse, and evolve consistently across future commands
+  - first implementation target:
+    - extract reusable helper-spec and result-parsing primitives from the current `vars`, `inspect`, and `reload` paths without changing the CLI contract
 - Rich execution output model:
-  - status: initial slice landed
   - purpose: preserve execution structure internally so v0.4 artifacts do not have to reverse-engineer text output
   - hidden complexity to absorb:
     - the distinction between streams, expression results, display data, errors, and future artifact references
@@ -144,14 +101,30 @@ harder to extend and the user-facing contract harder to keep stable.
   - if skipped:
     - artifact work will either be constrained to plain text or forced to bolt structured meaning back onto flattened output
     - backend, renderer, and persistence changes will be coupled more tightly than they need to be
-  - first implementation target:
-    - completed: preserve display/result separation and MIME metadata in the internal execution-output path while keeping the current human/JSON contract stable
   - follow-up work still needed:
-    - completed: move background progress persistence onto the same structured-output projection path used by foreground execution
-    - completed: persist structured outputs in execution records while keeping `stdout` / `stderr` / `result` / `events` as compatibility projections for the current CLI and JSON contract
+    - make the structured execution-output model the internal source of truth instead of continuing to treat flat `stdout` / `stderr` / `result` fields as the primary working representation
+    - keep transient execution outputs distinct from persisted artifact records so `OutputItem` does not become the accidental artifact model
     - replay/export should read structured outputs as the source of truth; in-flight compatibility snapshots may already project display content into legacy `result`
     - keep renderers and selectors projecting from the structured model instead of growing new text-flattening rules in parallel
+- Artifact domain boundary:
+  - purpose: define persisted artifacts as a first-class domain concept instead of treating them as saved execution outputs with ad hoc extra metadata
+  - hidden complexity to absorb:
+    - the distinction between ephemeral execution output and persisted artifacts promoted for later inspection
+    - artifact identity, metadata, retention, promotion, and open/list behavior
+    - the relationship between output items, artifact references in execution payloads, and artifact records on disk
+  - target shape:
+    - a separate artifact model such as `ArtifactRef` / `ArtifactRecord` with stable ids, metadata, and lifecycle state
+    - execution-output structures may refer to artifacts, but should not become the artifact persistence schema themselves
+  - why this must come before v0.4 artifact helpers:
+    - `artifacts list|open`, retention controls, and promotion flows need stable persisted artifact identities, not just richer output rendering
+    - if artifacts are modeled as a thin extension of `OutputItem`, the first real retention or export workflow will force the boundary to be redrawn
+  - if skipped:
+    - output rendering, artifact persistence, and artifact lifecycle policy will become too tightly coupled
+    - later features such as sharable bundles and backend-specific artifact handling will have to unwind the initial design
+  - first implementation target:
+    - define artifact references in execution results and a separate persisted artifact record shape before adding artifact CLI commands
 - Run manager / execution controller abstraction:
+  - status: not started
   - purpose: separate run semantics from the current local subprocess implementation used for background execution
   - hidden complexity to absorb:
     - run identity, observation, waiting, cancellation, timeout handling, and final snapshot semantics
@@ -168,6 +141,27 @@ harder to extend and the user-facing contract harder to keep stable.
     - remote/container backends will require either CLI-visible behavior changes or awkward compatibility shims
   - first implementation target:
     - move background-run spawning and follow/wait/cancel behavior behind one internal interface without changing the CLI contract
+  - follow-up work still needed:
+    - define run/controller behavior against backend capabilities rather than against the current local IPython backend assumptions
+    - keep replay and verify execution flows on the same run-control abstraction instead of giving them their own wait/cancel/progress orchestration paths
+    - keep public run semantics defined by the controller contract rather than by the current `_background-run` subprocess behavior
+- Backend capability contract:
+  - purpose: make future backend variation explicit early so execution, artifacts, and control-plane behavior do not assume every backend matches the local IPython backend
+  - hidden complexity to absorb:
+    - capability differences such as streaming support, interrupt support, background execution, artifact persistence, and snapshot support
+    - backend-specific limitations that need to be surfaced without changing the command contract for local users
+    - coordination between backend capabilities, run control, rendering, and future plugin/policy decisions
+  - target shape:
+    - a typed backend capability object or negotiation contract used by the app layer, run manager, and extension host
+    - features should branch on declared capabilities rather than on backend type checks or local-only assumptions
+  - why this must come before alternate backends:
+    - containerized and remote backends are already planned, and the cost of capability negotiation rises sharply once multiple feature surfaces already assume local behavior
+    - a small capability contract now is cheaper than retrofitting one across runs, artifacts, and control-plane operations later
+  - if skipped:
+    - local backend behavior will become the accidental global contract
+    - later backend support will require compatibility shims or user-visible exceptions in places that should have been abstracted
+  - first implementation target:
+    - define stable capability flags such as `supports_stream`, `supports_background`, `supports_interrupt`, and `supports_artifacts` before adding non-local backend implementations
 - Extension host boundary:
   - purpose: give plugins, policy, and reliability hooks one deep home instead of growing ad hoc methods across runtime and CLI layers
   - hidden complexity to absorb:
@@ -186,8 +180,10 @@ harder to extend and the user-facing contract harder to keep stable.
     - extension failures will be harder to isolate and reason about because there will be no single host boundary
   - first implementation target:
     - define typed execution lifecycle events and extension context objects before adding actual plugin loading
+  - follow-up work still needed:
+    - keep extension APIs event/context-based rather than growing a method-per-hook surface that mirrors current runtime internals
+    - avoid exposing raw backend or runtime objects directly to extensions so the first plugin API does not freeze internal implementation details
 - State layout ownership:
-  - status: completed preparatory slice
   - purpose: centralize ownership of `.agentnb/` filesystem layout, schema versions, and migration boundaries
   - hidden complexity to absorb:
     - path naming and discovery for sessions, histories, runs, snapshots, artifacts, and future metadata
@@ -202,13 +198,9 @@ harder to extend and the user-facing contract harder to keep stable.
   - if skipped:
     - `.agentnb/` layout knowledge will continue to fragment as new persisted resource types are added
     - schema changes and cleanup logic will become harder to audit and migrate safely
-  - first implementation target:
-    - completed: extract `.agentnb/` layout constants and path-building rules into one module before adding new persisted resource types
   - follow-up work still needed:
-    - completed: move schema-version ownership and compatibility checks into the same boundary
-    - completed: register future snapshot/artifact/export resource namespaces through the state repository boundary
+    - give persisted resources stable identities and per-resource schema/version boundaries so future artifacts, exports, and sharable bundles are not defined by local file paths alone
 - Internal replay/snapshot planning seam:
-  - status: completed preparatory slice
   - purpose: give future snapshot, replay, and verify features typed planning interfaces without shipping partial feature behavior
   - hidden complexity to absorb:
     - deriving replay-ready steps from journal selections
@@ -224,6 +216,23 @@ harder to extend and the user-facing contract harder to keep stable.
     - replay and snapshot features will likely bind directly to raw journal/state details, weakening the new abstraction boundaries immediately
   - follow-up work still needed:
     - connect replay execution and snapshot persistence to these planners once the user-visible feature work starts
+- Unified command recording / journal write path:
+  - purpose: give semantic command recording one owner so new history metadata and replay provenance do not drift between stores
+  - hidden complexity to absorb:
+    - recording user-visible commands versus internal helper executions consistently across `HistoryStore` and `ExecutionStore`
+    - attaching command metadata such as labels, tags, execution mode, replay provenance, and future verify diagnostics
+    - keeping write-time semantics aligned with the `CommandJournal` read model so `history`, replay selection, and export stay consistent
+  - target shape:
+    - a `CommandRecorder`, `JournalWriter`, or equivalent boundary that owns how semantic command records and execution-linked history entries are emitted
+    - `NotebookOps` and `ExecutionService` should call this boundary instead of each constructing command records independently
+  - why this must come before replay/verify metadata expansion:
+    - replay, verify, and richer history queries need stable write-time metadata, not just a stronger read-side merger
+    - without a single recorder, future fields such as tags or execution mode will likely appear in one path first and lag in others
+  - if skipped:
+    - history semantics will continue to be reconstructed from partially duplicated write paths
+    - new metadata fields will be more likely to disagree between interactive ops, foreground exec, background exec, and future replay flows
+  - first implementation target:
+    - centralize construction of semantic command records for `exec`, `reset`, `vars`, `inspect`, and `reload` while preserving the existing history and runs contract
 
 ### Goals
 

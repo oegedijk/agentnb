@@ -30,26 +30,15 @@ The rest of this roadmap is forward-looking.
 
 Completed foundations:
 
-- `CommandJournal` is now the unified read path for semantic history plus projected execution records.
-- Command recording now has a canonical write boundary via `CommandRecorder`, with shared semantic journal-entry construction for `exec`, `reset`, `vars`, `inspect`, and `reload`.
-- `AgentNBApp` is now the application-service layer below the CLI, with typed request/response seams for the current command surface.
-- `introspection.py` now owns helper execution and typed parsing for `vars`, `inspect`, and `reload`.
-- Public command payloads are now typed through the app/output boundary instead of being rebuilt as ad hoc dicts in multiple layers.
-- Jupyter message parsing is now confined to a typed translator boundary instead of leaking raw protocol dicts through backend execution flow.
-- Kernel-facing implementation now has a dedicated `agentnb.kernel` package, with backend, Jupyter protocol, and provisioning code moved behind one internal package boundary instead of a growing flat module set.
-- `runtime.history()` now carries `JournalEntry` objects until the response-compaction edge instead of flattening journal semantics early.
-- Background run orchestration now lives behind a dedicated internal `RunManager` boundary, with the local `_background-run` subprocess path treated as one implementation detail instead of defining the public run contract.
-- The backend edge now exposes a minimal typed capability contract so run control can branch on declared support instead of local-backend assumptions.
-- The test suite was cleaned up around these seams: explicit CLI fixtures, more behavioral assertions, broader type-aware coverage, real CLI smoke coverage of lifecycle/run/introspection flows, and `ty` enforcement now covers both `src` and `tests`.
+- Unified journal + recording boundaries now own semantic read/write flow for history and executions.
+- `AgentNBApp`, typed payloads, and typed Jupyter translation now define the app/output boundary cleanly.
+- `introspection.py` owns helper execution and typed parsing for `vars`, `inspect`, and `reload`.
+- Kernel/backend code now lives behind `agentnb.kernel`, and run orchestration behind `RunManager`.
+- Structured execution output is now the internal source of truth, with flat `stdout` / `stderr` / `result` preserved as compatibility projections at the boundary.
+- Backend capability checks now branch on a typed capability contract instead of local-backend assumptions.
+- The test suite now has cleaner fixtures, broader behavioral/type coverage, real CLI smoke coverage, and `ty` over both `src` and `tests`.
 
 Remaining prep refactors:
-
-- Rich execution output model:
-  - purpose: make structured execution output the true internal source of truth before artifacts and export depend on it
-  - current state:
-    - typed output items and typed Jupyter translation exist, but compatibility payloads still project back into flat `stdout` / `stderr` / `result` fields early
-  - remaining gap:
-    - artifact, replay, and export work should depend on structured output items directly, not on compacted text projections
 - Artifact domain boundary:
   - purpose: separate persisted artifacts from transient execution outputs before artifact commands exist
   - remaining gap:

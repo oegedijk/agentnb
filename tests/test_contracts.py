@@ -69,8 +69,24 @@ def test_execution_result_to_dict_keeps_legacy_surface_without_outputs() -> None
 
     payload = result.to_dict()
 
-    assert payload["result"] == "2"
-    assert "outputs" not in payload
+    assert payload == {
+        "status": "ok",
+        "stdout": "",
+        "stderr": "",
+        "result": "2",
+        "execution_count": None,
+        "duration_ms": 5,
+        "ename": None,
+        "evalue": None,
+        "traceback": None,
+        "events": [
+            {
+                "kind": "result",
+                "content": "2",
+                "metadata": {"mime": {"text/plain": "2"}},
+            }
+        ],
+    }
 
 
 def test_execution_result_preserves_terminal_error_without_synthesizing_events() -> None:

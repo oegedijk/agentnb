@@ -46,6 +46,10 @@ Flag:
 
 Expect tests to be comprehensive and idiomatic pytest.
 
+In a full review, you must review the relevant tests themselves, not just run
+them. Test execution is verification; it is not a substitute for reviewing
+test quality, ownership, coverage, and brittleness.
+
 Prefer:
 
 - fixtures for reusable setup
@@ -62,6 +66,10 @@ Flag:
 - repeated tests that should be parametrized
 - brittle mocks that couple tests to refactors without protecting behavior
 
+Before concluding a full review, identify which tests cover the changed paths
+and assess whether that coverage is behavior-focused, sufficient for the risk,
+and located at the owning boundary.
+
 ## Verification Expectation
 
 When the review turn includes code changes or local validation, run enough relevant smoke tests using `uv run agentnb ...` commands to verify the real CLI workflows affected by the change still work.
@@ -71,6 +79,10 @@ Use `SMOKE_SCENARIOS.md` for inspiration and pick the smallest set of scenarios 
 ## Output
 
 Default to a findings-first review.
+
+Always include explicit test-review conclusions. Report either concrete
+test-quality findings or state explicitly that you reviewed the relevant tests
+and found no material test-design issues.
 
 Order findings by severity, but include lower-severity issues too when they are real. Be explicit about:
 

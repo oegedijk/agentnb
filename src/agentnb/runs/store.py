@@ -8,7 +8,13 @@ from typing import Any, cast
 
 from ..contracts import ExecutionEvent, ExecutionResult, ExecutionSink, utc_now_iso
 from ..errors import AgentNBException
-from ..execution_output import OutputItem
+from ..execution_output import (
+    ExecutionOutput,
+    OutputItem,
+    compatibility_output,
+    execution_output_from_events,
+    execution_output_from_legacy_fields,
+)
 from ..history import HistoryRecord
 from ..payloads import ExecutionEventPayload, RunSnapshot, StoredRunSnapshot
 from ..recording import CommandRecorder, CommandRecording
@@ -35,6 +41,54 @@ class ExecutionRecord:
     outputs: list[OutputItem] = field(default_factory=list)
     events: list[ExecutionEvent] = field(default_factory=list)
     journal_entries: list[HistoryRecord] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.outputs:
+            output = ExecutionOutput(
+                items=list(self.outputs),
+                execution_count=self.execution_count,
+            )
+        elif self.events:
+            output = execution_output_from_events(self.events, execution_count=self.execution_count)
+        else:
+            output = execution_output_from_legacy_fields(
+                stdout=self.stdout,
+                stderr=self.stderr,
+                result=self.result,
+                ename=self.ename,
+                evalue=self.evalue,
+                traceback=self.traceback,
+                status="error" if self.status == "error" else "ok",
+                execution_count=self.execution_count,
+            )
+
+        if not self.outputs:
+            self.outputs = list(output.items)
+        if not self.events:
+            self.events = output.to_events()
+
+        projected = compatibility_output(output)
+        self.stdout = projected.stdout
+        self.stderr = projected.stderr
+        self.result = projected.result
+
+        explicit_error = (
+            self.status == "error"
+            or self.ename is not None
+            or self.evalue is not None
+            or self.traceback is not None
+        )
+        if projected.status == "error":
+            self.status = "error"
+            self.ename = projected.ename
+            self.evalue = projected.evalue
+            self.traceback = projected.traceback
+        elif explicit_error:
+            self.status = "error"
+        else:
+            self.ename = projected.ename
+            self.evalue = projected.evalue
+            self.traceback = projected.traceback
 
     def to_dict(self) -> RunSnapshot:
         payload: RunSnapshot = {
@@ -233,8 +287,8 @@ class ExecutionRun:
             ename=execution.ename,
             evalue=execution.evalue,
             traceback=execution.traceback,
-            outputs=[OutputItem.from_event(event) for event in execution.events],
-            events=execution.events,
+            outputs=list(execution.outputs),
+            events=list(execution.events),
             journal_entries=recording.build_records(
                 ts=self.record.ts,
                 session_id=self.record.session_id,
@@ -314,8 +368,8 @@ def execution_record_from_result(
         ename=execution.ename,
         evalue=execution.evalue,
         traceback=execution.traceback,
-        outputs=[OutputItem.from_event(event) for event in execution.events],
-        events=execution.events,
+        outputs=list(execution.outputs),
+        events=list(execution.events),
     )
     return replace(
         record,

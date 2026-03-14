@@ -62,6 +62,12 @@ Flag:
 - repeated tests that should be parametrized
 - brittle mocks that couple tests to refactors without protecting behavior
 
+## Verification Expectation
+
+When the review turn includes code changes or local validation, run enough relevant smoke tests using `uv run agentnb ...` commands to verify the real CLI workflows affected by the change still work.
+
+Use `SMOKE_SCENARIOS.md` for inspiration and pick the smallest set of scenarios or command sequences that meaningfully exercise the changed code paths. Do not run every example unless the change truly spans them all. Do not treat unit tests alone as sufficient verification for behavior-changing work.
+
 ## Output
 
 Default to a findings-first review.

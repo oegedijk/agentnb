@@ -198,6 +198,21 @@ class ExecutionOutput:
             return None, None, None
         return item.ename, item.text, item.traceback
 
+    def refined_with_error(self, error: OutputItem | None) -> ExecutionOutput:
+        if error is None or error.kind != "error":
+            return ExecutionOutput(
+                items=list(self.items),
+                execution_count=self.execution_count,
+            )
+
+        items = list(self.items)
+        for index in range(len(items) - 1, -1, -1):
+            if items[index].kind == "error":
+                items[index] = error
+                break
+
+        return ExecutionOutput(items=items, execution_count=self.execution_count)
+
     def to_events(self) -> list[ExecutionEvent]:
         return [item.to_event() for item in self.items]
 
@@ -223,6 +238,64 @@ class ExecutionOutput:
             items=items,
             execution_count=execution_count if isinstance(execution_count, int) else None,
         )
+
+
+@dataclass(slots=True, frozen=True)
+class CompatibilityOutput:
+    status: Literal["ok", "error"]
+    stdout: str
+    stderr: str
+    result: str | None
+    ename: str | None
+    evalue: str | None
+    traceback: list[str] | None
+
+
+def compatibility_output(output: ExecutionOutput) -> CompatibilityOutput:
+    ename, evalue, traceback = output.error_details()
+    return CompatibilityOutput(
+        status=output.status(),
+        stdout=output.stdout_text(),
+        stderr=output.stderr_text(),
+        result=output.result_text(),
+        ename=ename,
+        evalue=evalue,
+        traceback=traceback,
+    )
+
+
+def execution_output_from_events(
+    events: list[ExecutionEvent],
+    *,
+    execution_count: int | None = None,
+) -> ExecutionOutput:
+    return ExecutionOutput(
+        items=[OutputItem.from_event(event) for event in events],
+        execution_count=execution_count,
+    )
+
+
+def execution_output_from_legacy_fields(
+    *,
+    stdout: str = "",
+    stderr: str = "",
+    result: str | None = None,
+    ename: str | None = None,
+    evalue: str | None = None,
+    traceback: list[str] | None = None,
+    status: Literal["ok", "error"] = "ok",
+    execution_count: int | None = None,
+) -> ExecutionOutput:
+    items: list[OutputItem] = []
+    if stdout:
+        items.append(OutputItem.stdout(stdout))
+    if stderr:
+        items.append(OutputItem.stderr(stderr))
+    if result is not None:
+        mime = {"text/plain": result} if result else {}
+        items.append(OutputItem.result(text=result, mime=mime))
+    del status, ename, evalue, traceback
+    return ExecutionOutput(items=items, execution_count=execution_count)
 
 
 def output_item_from_jupyter_message(

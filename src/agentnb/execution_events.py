@@ -29,22 +29,22 @@ class ExecutionResultAccumulator:
         self.shell_reply_error = output_item_from_shell_reply_message(shell_reply)
 
     def build(self, *, duration_ms: int) -> ExecutionResult:
-        ename, evalue, traceback = self.output.error_details()
+        output = self.output.refined_with_error(self.shell_reply_error)
+        ename, evalue, traceback = output.error_details()
+        status = output.status()
         if self.shell_reply_error is not None:
+            status = "error"
             ename = self.shell_reply_error.ename or ename
             evalue = self.shell_reply_error.text or evalue
             traceback = self.shell_reply_error.traceback or traceback
         return ExecutionResult(
-            status=self.output.status(),
-            stdout=self.output.stdout_text(),
-            stderr=self.output.stderr_text(),
-            result=self.output.result_text(),
+            status=status,
             execution_count=self.execution_count,
             duration_ms=duration_ms,
             ename=ename,
             evalue=evalue,
             traceback=traceback,
-            events=self.output.to_events(),
+            outputs=list(output.items),
         )
 
 

@@ -55,7 +55,7 @@ def test_execution_store_roundtrip_and_get(project_dir: Path) -> None:
     assert loaded.events[0].kind == "result"
 
 
-def test_execution_record_from_dict_accepts_legacy_records_without_outputs() -> None:
+def test_execution_record_from_dict_synthesizes_outputs_for_legacy_records() -> None:
     record = ExecutionRecord.from_dict(
         {
             "execution_id": "run-1",
@@ -69,7 +69,7 @@ def test_execution_record_from_dict_accepts_legacy_records_without_outputs() -> 
         }
     )
 
-    assert record.outputs == []
+    assert record.outputs == [OutputItem.result(text="2", mime={})]
     assert record.events == [ExecutionEvent(kind="result", content="2")]
 
 
@@ -97,6 +97,29 @@ def test_execution_record_storage_dict_includes_outputs_but_public_dict_does_not
             "mime": {"text/plain": "2"},
         }
     ]
+
+
+def test_execution_record_preserves_terminal_error_without_synthesizing_error_event() -> None:
+    record = ExecutionRecord(
+        execution_id="run-1",
+        ts="2026-03-10T00:00:00+00:00",
+        session_id="default",
+        command_type="exec",
+        status="error",
+        duration_ms=12,
+        stdout="hello\n",
+        ename="ValueError",
+        evalue="boom",
+        traceback=["tb"],
+        outputs=[OutputItem.stdout("hello\n")],
+    )
+
+    assert record.status == "error"
+    assert record.stdout == "hello\n"
+    assert record.ename == "ValueError"
+    assert record.evalue == "boom"
+    assert record.traceback == ["tb"]
+    assert record.events == [ExecutionEvent(kind="stdout", content="hello\n")]
 
 
 def test_execution_store_returns_latest_version_for_same_run(project_dir: Path) -> None:

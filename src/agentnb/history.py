@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal, TypedDict, cast
 
 from .contracts import ExecutionResult, utc_now_iso
+from .execution_output import compatibility_output
 from .session import DEFAULT_SESSION_ID
 from .state import StateRepository
 
@@ -270,16 +271,17 @@ def _resolve_execution_metadata(
     resolved_result = result
 
     if execution is not None:
+        projected = compatibility_output(execution_output_from_execution_result(execution))
         if resolved_status is None:
             resolved_status = execution.status
         if duration_ms is None:
             resolved_duration = execution.duration_ms
         if resolved_error_type is None:
-            resolved_error_type = execution.ename
+            resolved_error_type = projected.ename
         if resolved_stdout is None:
-            resolved_stdout = execution.stdout
+            resolved_stdout = projected.stdout
         if resolved_result is None:
-            resolved_result = execution.result
+            resolved_result = projected.result
 
     if error is not None:
         if resolved_status is None:
@@ -296,6 +298,15 @@ def _resolve_execution_metadata(
         resolved_error_type,
         summarize_history_text(resolved_result),
         summarize_history_text(resolved_stdout),
+    )
+
+
+def execution_output_from_execution_result(execution: ExecutionResult):
+    from .execution_output import ExecutionOutput
+
+    return ExecutionOutput(
+        items=list(execution.outputs),
+        execution_count=execution.execution_count,
     )
 
 

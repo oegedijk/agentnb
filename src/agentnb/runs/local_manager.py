@@ -17,7 +17,6 @@ from ..errors import (
     RunWaitTimedOutError,
 )
 from ..execution_events import ExecutionResultAccumulator
-from ..execution_output import OutputItem
 from ..payloads import CancelRunResult, RunSnapshot
 from ..recording import CommandRecorder, CommandRecording
 from ..session import pid_exists
@@ -510,8 +509,8 @@ class _ExecutionProgressSink(ExecutionSink):
             ename=snapshot.ename,
             evalue=snapshot.evalue,
             traceback=snapshot.traceback,
-            outputs=[OutputItem.from_event(item) for item in snapshot.events],
-            events=snapshot.events,
+            outputs=list(snapshot.outputs),
+            events=list(snapshot.events),
         )
 
 

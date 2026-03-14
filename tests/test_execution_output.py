@@ -193,6 +193,32 @@ def test_accumulator_shell_reply_refines_error_without_adding_duplicate_event() 
     assert [event.kind for event in result.events] == ["error"]
 
 
+def test_accumulator_shell_reply_only_sets_terminal_error_without_creating_event() -> None:
+    accumulator = ExecutionResultAccumulator()
+    shell_reply = parse_shell_reply_message(
+        {
+            "parent_header": {"msg_id": "run-1"},
+            "content": {
+                "status": "error",
+                "ename": "ValueError",
+                "evalue": "boom",
+                "traceback": ["tb"],
+            },
+        }
+    )
+    assert shell_reply is not None
+    accumulator.apply_shell_reply(shell_reply)
+
+    result = accumulator.build(duration_ms=7)
+
+    assert result.status == "error"
+    assert result.ename == "ValueError"
+    assert result.evalue == "boom"
+    assert result.traceback == ["tb"]
+    assert result.events == []
+    assert result.outputs == []
+
+
 def test_shell_reply_parser_ignores_non_error_reply() -> None:
     assert output_item_from_shell_reply({"status": "ok"}) is None
     shell_reply = parse_shell_reply_message({"content": {"status": "ok"}})

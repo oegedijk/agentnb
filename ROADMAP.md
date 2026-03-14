@@ -38,6 +38,8 @@ Completed foundations:
 - Jupyter message parsing is now confined to a typed translator boundary instead of leaking raw protocol dicts through backend execution flow.
 - Kernel-facing implementation now has a dedicated `agentnb.kernel` package, with backend, Jupyter protocol, and provisioning code moved behind one internal package boundary instead of a growing flat module set.
 - `runtime.history()` now carries `JournalEntry` objects until the response-compaction edge instead of flattening journal semantics early.
+- Background run orchestration now lives behind a dedicated internal `RunManager` boundary, with the local `_background-run` subprocess path treated as one implementation detail instead of defining the public run contract.
+- The backend edge now exposes a minimal typed capability contract so run control can branch on declared support instead of local-backend assumptions.
 - The test suite was cleaned up around these seams: explicit CLI fixtures, more behavioral assertions, broader type-aware coverage, real CLI smoke coverage of lifecycle/run/introspection flows, and `ty` enforcement now covers both `src` and `tests`.
 
 Remaining prep refactors:
@@ -52,45 +54,13 @@ Remaining prep refactors:
   - purpose: separate persisted artifacts from transient execution outputs before artifact commands exist
   - remaining gap:
     - there is still no first-class persisted artifact model with stable ids, metadata, and lifecycle state
-- Run manager / execution controller abstraction:
-  - status: not started
-  - purpose: separate run semantics from the current local subprocess implementation used for background execution
-  - hidden complexity to absorb:
-    - run identity, observation, waiting, cancellation, timeout handling, and final snapshot semantics
-    - the distinction between foreground execution, background execution, and live follow
-    - future differences between local, containerized, and remote backends
-  - target shape:
-    - a `RunManager` or `ExecutionController` abstraction with stable concepts such as `RunHandle`, `RunSnapshot`, `RunObserver`, and capability flags
-    - the current `_background-run` subprocess path becomes one implementation detail behind that interface
-  - why this must come before alternate backends:
-    - local subprocess orchestration should not define the public run contract
-    - `runs show|follow|wait|cancel` semantics need to survive backend changes
-  - if skipped:
-    - the current local background-run mechanism will become the implicit architecture instead of one implementation
-    - remote/container backends will require either CLI-visible behavior changes or awkward compatibility shims
-  - first implementation target:
-    - move background-run spawning and follow/wait/cancel behavior behind one internal interface without changing the CLI contract
-  - follow-up work still needed:
-    - define run/controller behavior against backend capabilities rather than against the current local IPython backend assumptions
-    - keep replay and verify execution flows on the same run-control abstraction instead of giving them their own wait/cancel/progress orchestration paths
-    - keep public run semantics defined by the controller contract rather than by the current `_background-run` subprocess behavior
-- Backend capability contract:
-  - purpose: make future backend variation explicit early so execution, artifacts, and control-plane behavior do not assume every backend matches the local IPython backend
-  - hidden complexity to absorb:
-    - capability differences such as streaming support, interrupt support, background execution, artifact persistence, and snapshot support
-    - backend-specific limitations that need to be surfaced without changing the command contract for local users
-    - coordination between backend capabilities, run control, rendering, and future plugin/policy decisions
-  - target shape:
-    - a typed backend capability object or negotiation contract used by the app layer, run manager, and extension host
-    - features should branch on declared capabilities rather than on backend type checks or local-only assumptions
-  - why this must come before alternate backends:
-    - containerized and remote backends are already planned, and the cost of capability negotiation rises sharply once multiple feature surfaces already assume local behavior
-    - a small capability contract now is cheaper than retrofitting one across runs, artifacts, and control-plane operations later
-  - if skipped:
-    - local backend behavior will become the accidental global contract
-    - later backend support will require compatibility shims or user-visible exceptions in places that should have been abstracted
-  - first implementation target:
-    - define stable capability flags such as `supports_stream`, `supports_background`, `supports_interrupt`, and `supports_artifacts` before adding non-local backend implementations
+- Run-control follow-up:
+  - keep replay and verify execution flows on the same run-control abstraction instead of giving them their own wait/cancel/progress orchestration paths
+  - keep public run semantics defined by the controller contract rather than by the current local subprocess behavior
+  - make cancellation semantics stable across timing races by recording explicit cancel provenance instead of exposing either `KeyboardInterrupt` or synthetic cancellation outcomes depending on settle timing
+- Backend capability follow-up:
+  - grow the minimal capability contract into the app/run-control/extension boundary before adding non-local backends
+  - keep features branching on declared capabilities rather than on backend type checks or local-only assumptions
 - Extension host boundary:
   - purpose: give plugins, policy, and reliability hooks one deep home instead of growing ad hoc methods across runtime and CLI layers
   - hidden complexity to absorb:
@@ -157,6 +127,9 @@ Remaining prep refactors:
   - traceback enrichment
   - frame/locals inspection commands
   - optional profiling (`cProfile`) command paths
+- Interrupt and cancellation semantics:
+  - record explicit user-cancel provenance on runs
+  - make cancel results stable even when the terminal kernel outcome settles as `KeyboardInterrupt`
 - Safer inspection:
   - bounded previews for large values
   - structured previews for common containers (`list`, `dict`, `tuple`, dataframe-like objects)
@@ -178,6 +151,7 @@ Remaining prep refactors:
 - History entries should grow optional `tags` and execution-mode/provenance metadata on top of the current `command_type` and `execution_id` fields.
 - Verification responses should identify the first failed step and the source execution that produced it.
 - JSON envelopes should keep machine-stable fields predictable across commands (`session_id`, `execution_id`, `duration_ms`, typed error codes).
+- Run records should distinguish user-requested cancellation provenance from the terminal kernel error details so cancel behavior does not depend on interrupt timing.
 - Keep full `--json` as the exact machine-stable contract rather than assuming it is the best default working mode.
 - Prefer improving behavior, flags, suggestions, and output shaping of existing commands over adding new top-level commands.
 - Snapshot metadata tracked in `.agentnb/` with schema versioning.

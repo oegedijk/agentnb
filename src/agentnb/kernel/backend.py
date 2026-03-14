@@ -5,6 +5,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
@@ -48,7 +49,18 @@ class BackendExecutionTimeout(TimeoutError):
     pass
 
 
+@dataclass(slots=True, frozen=True)
+class BackendCapabilities:
+    supports_stream: bool = False
+    supports_interrupt: bool = False
+    supports_background: bool = False
+    supports_artifacts: bool = False
+
+
 class RuntimeBackend(Protocol):
+    @property
+    def capabilities(self) -> BackendCapabilities: ...
+
     def start(
         self,
         project_root: Path,
@@ -79,6 +91,16 @@ class LocalIPythonBackend:
         self._startup_code = startup_code
         self._startup_timeout_s = startup_timeout_s
         self._zmq_context = zmq.Context.instance()
+        self._capabilities = BackendCapabilities(
+            supports_stream=True,
+            supports_interrupt=True,
+            supports_background=False,
+            supports_artifacts=False,
+        )
+
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return self._capabilities
 
     def start(
         self,

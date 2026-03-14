@@ -17,7 +17,12 @@ from .errors import (
 )
 from .hooks import Hooks
 from .journal import CommandJournal, JournalEntry, JournalQuery, JournalSelection
-from .kernel.backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
+from .kernel.backend import (
+    BackendCapabilities,
+    BackendExecutionTimeout,
+    LocalIPythonBackend,
+    RuntimeBackend,
+)
 from .kernel.provisioner import KernelProvisioner
 from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
@@ -36,6 +41,10 @@ class KernelRuntime:
         self._provisioner_factory = provisioner_factory or (
             lambda project_root: KernelProvisioner(project_root)
         )
+
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return self._backend.capabilities
 
     def start(
         self,

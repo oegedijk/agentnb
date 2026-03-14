@@ -36,6 +36,7 @@ Completed foundations:
 - Kernel/backend code now lives behind `agentnb.kernel`, and run orchestration behind `RunManager`.
 - Structured execution output is now the internal source of truth, with flat `stdout` / `stderr` / `result` preserved as compatibility projections at the boundary.
 - Backend capability checks now branch on a typed capability contract instead of local-backend assumptions.
+- Session/kernel state paths and canonical session identity now flow through `StateRepository` / `SessionStateFiles` instead of being recomputed across runtime and backend layers.
 - The test suite now has cleaner fixtures, broader behavioral/type coverage, real CLI smoke coverage, and `ty` over both `src` and `tests`.
 
 Remaining prep refactors:
@@ -83,9 +84,6 @@ Remaining prep refactors:
   - why this must come before snapshots and artifacts:
     - snapshots and artifacts will otherwise repeat the current pattern of each module knowing its own filenames and directory structure
     - centralized ownership will make future migrations less risky
-  - if skipped:
-    - `.agentnb/` layout knowledge will continue to fragment as new persisted resource types are added
-    - schema changes and cleanup logic will become harder to audit and migrate safely
   - follow-up work still needed:
     - give persisted resources stable identities and per-resource schema/version boundaries so future artifacts, exports, and sharable bundles are not defined by local file paths alone
 ### Internal Planning Seams

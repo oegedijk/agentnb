@@ -31,6 +31,22 @@ class StateResource:
 
 
 @dataclass(slots=True, frozen=True)
+class SessionStateFiles:
+    session_id: str
+    state_dir: Path
+    session_record: Path
+    legacy_session_record: Path
+    connection_file: Path
+    log_file: Path
+    command_lock_file: Path
+
+    def record_candidates(self) -> tuple[Path, ...]:
+        if self.legacy_session_record == self.session_record:
+            return (self.session_record,)
+        return (self.session_record, self.legacy_session_record)
+
+
+@dataclass(slots=True, frozen=True)
 class StateManifest:
     schema_version: str = STATE_SCHEMA_VERSION
     resource_versions: dict[str, str] = field(default_factory=dict)
@@ -118,16 +134,16 @@ class StateRepository:
         return self.resource_path("metadata")
 
     def session_file(self, session_id: str) -> Path:
-        return self.state_dir / session_file_name(session_id)
+        return self.session_state(session_id).session_record
 
     def connection_file(self, session_id: str) -> Path:
-        return kernel_connection_file(self.state_dir, session_id)
+        return self.session_state(session_id).connection_file
 
     def log_file(self, session_id: str) -> Path:
-        return kernel_log_file(self.state_dir, session_id)
+        return self.session_state(session_id).log_file
 
     def command_lock_file(self, session_id: str) -> Path:
-        return command_lock_file(self.state_dir, session_id)
+        return self.session_state(session_id).command_lock_file
 
     def session_files(self) -> list[Path]:
         if not self.state_dir.exists():
@@ -212,6 +228,18 @@ class StateRepository:
     def ensure_compatible(self) -> StateManifest:
         return self.manifest()
 
+    def session_state(self, session_id: str) -> SessionStateFiles:
+        state_dir = self.state_dir
+        return SessionStateFiles(
+            session_id=session_id,
+            state_dir=state_dir,
+            session_record=state_dir / session_file_name(session_id),
+            legacy_session_record=self.resource("legacy_session").resolve(state_dir),
+            connection_file=kernel_connection_file(state_dir, session_id),
+            log_file=kernel_log_file(state_dir, session_id),
+            command_lock_file=command_lock_file(state_dir, session_id),
+        )
+
     def resource(self, name: str) -> StateResource:
         try:
             return _STATE_RESOURCES[name]
@@ -220,6 +248,14 @@ class StateRepository:
 
     def resource_path(self, name: str) -> Path:
         return self.resource(name).resolve(self.state_dir)
+
+    def snapshot_resources(self) -> tuple[StateResource, ...]:
+        return (
+            self.resource("snapshots"),
+            self.resource("artifacts"),
+            self.resource("exports"),
+            self.resource("metadata"),
+        )
 
     def resources(self) -> dict[str, StateResource]:
         return dict(_STATE_RESOURCES)

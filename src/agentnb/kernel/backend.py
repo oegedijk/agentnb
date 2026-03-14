@@ -24,7 +24,7 @@ from ..errors import BackendOperationError
 from ..execution_events import ExecutionResultAccumulator, dispatch_output_item
 from ..execution_output import output_item_from_iopub_message
 from ..session import SessionInfo, pid_exists
-from ..state import kernel_connection_file, kernel_log_file
+from ..state import SessionStateFiles
 from .jupyter_protocol import (
     ExecuteInputMessage,
     ShellReplyMessage,
@@ -64,8 +64,7 @@ class RuntimeBackend(Protocol):
     def start(
         self,
         project_root: Path,
-        state_dir: Path,
-        session_id: str,
+        session_state: SessionStateFiles,
         python_executable: str,
     ) -> SessionInfo: ...
 
@@ -105,13 +104,12 @@ class LocalIPythonBackend:
     def start(
         self,
         project_root: Path,
-        state_dir: Path,
-        session_id: str,
+        session_state: SessionStateFiles,
         python_executable: str,
     ) -> SessionInfo:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        connection_file = kernel_connection_file(state_dir, session_id)
-        log_file = kernel_log_file(state_dir, session_id)
+        session_state.state_dir.mkdir(parents=True, exist_ok=True)
+        connection_file = session_state.connection_file
+        log_file = session_state.log_file
         if connection_file.exists():
             connection_file.unlink()
         if log_file.exists():
@@ -132,7 +130,7 @@ class LocalIPythonBackend:
             )
 
         session = SessionInfo(
-            session_id=session_id,
+            session_id=session_state.session_id,
             pid=process.pid,
             connection_file=str(connection_file),
             python_executable=python_executable,

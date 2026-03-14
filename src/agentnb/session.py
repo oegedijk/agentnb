@@ -77,12 +77,13 @@ class SessionStore:
         self.repository = StateRepository(project_root)
         self.project_root = self.repository.project_root
         self.session_id = validate_session_id(session_id)
-        self.state_dir = self.repository.state_dir
-        self.session_file = self.repository.session_file(self.session_id)
-        self.legacy_session_file = self.repository.legacy_session_file
-        self.connection_file = self.repository.connection_file(self.session_id)
-        self.log_file = self.repository.log_file(self.session_id)
-        self.command_lock_file = self.repository.command_lock_file(self.session_id)
+        self.state = self.repository.session_state(self.session_id)
+        self.state_dir = self.state.state_dir
+        self.session_file = self.state.session_record
+        self.legacy_session_file = self.state.legacy_session_record
+        self.connection_file = self.state.connection_file
+        self.log_file = self.state.log_file
+        self.command_lock_file = self.state.command_lock_file
 
     def ensure_state_dir(self) -> None:
         self.repository.ensure_compatible()
@@ -184,9 +185,7 @@ class SessionStore:
         )
 
     def _session_paths(self) -> tuple[Path, ...]:
-        if self.legacy_session_file == self.session_file:
-            return (self.session_file,)
-        return (self.session_file, self.legacy_session_file)
+        return self.state.record_candidates()
 
     @staticmethod
     def _load_session_file(path: Path) -> SessionInfo | None:

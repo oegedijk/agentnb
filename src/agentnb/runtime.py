@@ -70,13 +70,12 @@ class KernelRuntime:
 
         session = self._backend.start(
             project_root=store.project_root,
-            state_dir=store.state_dir,
-            session_id=session_id,
+            session_state=store.state,
             python_executable=provisioned.executable,
         )
         store.save_session(session)
         store.ensure_gitignore_entry()
-        self._hooks.on_kernel_start(store.project_root, session_id, session)
+        self._hooks.on_kernel_start(store.project_root, store.session_id, session)
         status = self._backend.status(session)
         return status, True
 
@@ -105,7 +104,7 @@ class KernelRuntime:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
         self._backend.stop(session)
         store.clear_session()
-        self._hooks.on_kernel_stop(store.project_root, session_id, session)
+        self._hooks.on_kernel_stop(store.project_root, store.session_id, session)
 
     def stop_starting(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
         store = SessionStore(project_root=project_root, session_id=session_id)
@@ -114,7 +113,7 @@ class KernelRuntime:
             raise NoKernelRunningError()
         self._backend.stop(session)
         store.delete_session()
-        self._hooks.on_kernel_stop(store.project_root, session_id, session)
+        self._hooks.on_kernel_stop(store.project_root, store.session_id, session)
 
     def ensure_started(
         self,
@@ -233,7 +232,7 @@ class KernelRuntime:
         event_sink: ExecutionSink | None = None,
     ) -> ExecutionResult:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
-        self._hooks.before_execute(store.project_root, session_id, code)
+        self._hooks.before_execute(store.project_root, store.session_id, code)
 
         error: Exception | None = None
         result: ExecutionResult | None = None
@@ -259,7 +258,7 @@ class KernelRuntime:
             error = exc
             raise
         finally:
-            self._hooks.after_execute(store.project_root, session_id, code, result, error)
+            self._hooks.after_execute(store.project_root, store.session_id, code, result, error)
 
     def interrupt(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
         _, session = self._require_session(project_root=project_root, session_id=session_id)

@@ -57,12 +57,7 @@ class SnapshotResourcePlan:
 class SnapshotPlanner:
     def build(self, repository: StateRepository) -> SnapshotResourcePlan:
         manifest = repository.ensure_compatible()
-        resources = [
-            repository.resource("snapshots"),
-            repository.resource("artifacts"),
-            repository.resource("exports"),
-            repository.resource("metadata"),
-        ]
+        resources = list(repository.snapshot_resources())
         return SnapshotResourcePlan(manifest=manifest, resources=resources)
 
 

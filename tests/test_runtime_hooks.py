@@ -85,6 +85,33 @@ def test_runtime_start_emits_on_kernel_start(project_dir: Path, mocker: MockerFi
     assert hooks.start_calls == [(project_dir, "default", session)]
 
 
+def test_runtime_start_hooks_receive_canonicalized_session_id(
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    hooks = RecordingHooks()
+    backend = mocker.Mock()
+    session = _session(project_dir)
+    backend.start.return_value = session
+    backend.status.return_value = KernelStatus(
+        alive=True,
+        pid=session.pid,
+        python=session.python_executable,
+    )
+
+    provisioner = mocker.Mock()
+    provisioner.provision.return_value = ProvisionResult(
+        executable=session.python_executable,
+        source="explicit",
+        installed_ipykernel=False,
+    )
+
+    runtime = KernelRuntime(backend=backend, hooks=hooks, provisioner_factory=lambda _: provisioner)
+    runtime.start(project_root=project_dir, session_id=" default ")
+
+    assert hooks.start_calls == [(project_dir, "default", session)]
+
+
 def test_runtime_stop_emits_on_kernel_stop(project_dir: Path, mocker: MockerFixture) -> None:
     hooks = RecordingHooks()
     backend = mocker.Mock()
@@ -92,6 +119,21 @@ def test_runtime_stop_emits_on_kernel_stop(project_dir: Path, mocker: MockerFixt
 
     runtime = KernelRuntime(backend=backend, hooks=hooks)
     runtime.stop(project_root=project_dir)
+
+    backend.stop.assert_called_once_with(session)
+    assert hooks.stop_calls == [(project_dir, "default", session)]
+
+
+def test_runtime_stop_hooks_receive_canonicalized_session_id(
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    hooks = RecordingHooks()
+    backend = mocker.Mock()
+    session = _save_live_session(project_dir)
+
+    runtime = KernelRuntime(backend=backend, hooks=hooks)
+    runtime.stop(project_root=project_dir, session_id=" default ")
 
     backend.stop.assert_called_once_with(session)
     assert hooks.stop_calls == [(project_dir, "default", session)]
@@ -111,6 +153,29 @@ def test_runtime_execute_emits_before_and_after_hooks_on_success(
     execution = runtime.execute(
         project_root=project_dir,
         session_id="default",
+        code="1 + 1",
+        timeout_s=5,
+    )
+
+    assert execution == result
+    assert hooks.before_calls == [(project_dir, "default", "1 + 1")]
+    assert hooks.after_calls == [(project_dir, "default", "1 + 1", result, None)]
+
+
+def test_runtime_execute_hooks_receive_canonicalized_session_id(
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    hooks = RecordingHooks()
+    backend = mocker.Mock()
+    _save_live_session(project_dir)
+    result = ExecutionResult(status="ok", result="2", duration_ms=5)
+    backend.execute.return_value = result
+
+    runtime = KernelRuntime(backend=backend, hooks=hooks)
+    execution = runtime.execute(
+        project_root=project_dir,
+        session_id=" default ",
         code="1 + 1",
         timeout_s=5,
     )

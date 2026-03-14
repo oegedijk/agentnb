@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 
 from ..contracts import ExecutionEvent
 
+RunCommandType = Literal["exec", "reset"]
 RunMode = Literal["foreground", "background"]
 
 
@@ -13,7 +14,7 @@ RunMode = Literal["foreground", "background"]
 class RunSpec:
     project_root: Path
     session_id: str
-    command_type: str
+    command_type: RunCommandType
     code: str | None
     mode: RunMode
     timeout_s: float = 30.0

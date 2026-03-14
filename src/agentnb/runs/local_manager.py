@@ -40,9 +40,11 @@ class LocalRunManager(RunManager):
         self._recorder = recorder or CommandRecorder()
 
     def submit(self, spec: RunSpec, *, observer: RunObserver | None = None) -> ManagedExecution:
-        if spec.command_type != "exec":
+        if spec.command_type not in {"exec", "reset"}:
             raise ValueError(f"Unsupported run command type: {spec.command_type}")
         if spec.mode == "background":
+            if spec.command_type != "exec":
+                raise ValueError(f"Unsupported run mode for {spec.command_type}: {spec.mode}")
             return self._submit_background(spec)
         return self._submit_foreground(spec, observer=observer)
 
@@ -246,7 +248,7 @@ class LocalRunManager(RunManager):
         observer: RunObserver | None,
     ) -> ManagedExecution:
         started_new_session = False
-        if spec.ensure_started:
+        if spec.command_type == "exec" and spec.ensure_started:
             _, started_new_session = self.runtime.ensure_started(
                 project_root=spec.project_root,
                 session_id=spec.session_id,
@@ -261,13 +263,10 @@ class LocalRunManager(RunManager):
         )
 
         try:
-            execution = self.runtime.execute(
-                project_root=spec.project_root,
-                session_id=spec.session_id,
-                code=spec.code or "",
-                timeout_s=spec.timeout_s,
-                before_backend=lambda: run.start(observer),
-                event_sink=observer,
+            execution = self._execute_foreground_operation(
+                spec=spec,
+                run=run,
+                observer=observer,
             )
         except Exception as exc:
             if isinstance(exc, (NoKernelRunningError, KernelNotReadyError)):
@@ -286,6 +285,30 @@ class LocalRunManager(RunManager):
 
         record = run.finalize_result(execution)
         return ManagedExecution(record=record, started_new_session=started_new_session)
+
+    def _execute_foreground_operation(
+        self,
+        *,
+        spec: RunSpec,
+        run: ExecutionRun,
+        observer: RunObserver | None,
+    ):
+        if spec.command_type == "exec":
+            return self.runtime.execute(
+                project_root=spec.project_root,
+                session_id=spec.session_id,
+                code=spec.code or "",
+                timeout_s=spec.timeout_s,
+                before_backend=lambda: run.start(observer),
+                event_sink=observer,
+            )
+        if spec.command_type == "reset":
+            return self.runtime.reset(
+                project_root=spec.project_root,
+                session_id=spec.session_id,
+                timeout_s=spec.timeout_s,
+            )
+        raise ValueError(f"Unsupported run command type: {spec.command_type}")
 
     def _submit_background(self, spec: RunSpec) -> ManagedExecution:
         started_new_session = False

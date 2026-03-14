@@ -425,6 +425,40 @@ def test_execution_service_start_background_code_delegates_to_run_manager(
     assert spec.ensure_started is True
 
 
+def test_execution_service_reset_session_delegates_to_run_manager(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    run_manager = Mock()
+    managed = ManagedExecution(
+        record=ExecutionRecord(
+            execution_id="run-reset",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="reset",
+            status="ok",
+            duration_ms=5,
+        )
+    )
+    run_manager.submit.return_value = managed
+
+    service = ExecutionService(runtime, run_manager=run_manager)
+    result = service.reset_session(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=9.0,
+    )
+
+    assert result is managed
+    run_manager.submit.assert_called_once()
+    spec = run_manager.submit.call_args.args[0]
+    assert isinstance(spec, RunSpec)
+    assert spec.project_root == project_dir.resolve()
+    assert spec.session_id == "default"
+    assert spec.command_type == "reset"
+    assert spec.code is None
+    assert spec.mode == "foreground"
+    assert spec.timeout_s == 9.0
+
+
 def test_execution_service_wait_for_run_delegates_to_run_manager(project_dir: Path) -> None:
     runtime = KernelRuntime(backend=Mock())
     run_manager = Mock()

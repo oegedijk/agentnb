@@ -33,7 +33,7 @@ Completed foundations:
 - Unified journal + recording boundaries now own semantic read/write flow for history and executions.
 - `AgentNBApp`, typed payloads, and typed Jupyter translation now define the app/output boundary cleanly.
 - `introspection.py` owns helper execution and typed parsing for `vars`, `inspect`, and `reload`.
-- Kernel/backend code now lives behind `agentnb.kernel`, and run orchestration behind `RunManager`.
+- Kernel/backend code now lives behind `agentnb.kernel`, and run orchestration including `reset` now flows through `RunManager`.
 - Structured execution output is now the internal source of truth, with flat `stdout` / `stderr` / `result` preserved as compatibility projections at the boundary.
 - Backend capability checks now branch on a typed capability contract instead of local-backend assumptions.
 - Session/kernel state paths and canonical session identity now flow through `StateRepository` / `SessionStateFiles` instead of being recomputed across runtime and backend layers.

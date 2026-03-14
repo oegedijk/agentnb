@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
 
 from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink
-from agentnb.errors import AgentNBException, KernelNotReadyError, RunWaitTimedOutError
+from agentnb.errors import (
+    AgentNBException,
+    KernelNotReadyError,
+    NoKernelRunningError,
+    RunWaitTimedOutError,
+)
 from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.kernel.backend import BackendCapabilities
 from agentnb.runs import LocalRunManager, RunSpec
@@ -67,9 +72,24 @@ def test_local_run_manager_submit_rejects_unsupported_command_type(project_dir: 
             RunSpec(
                 project_root=project_dir,
                 session_id="default",
-                command_type="reload",
+                command_type=cast(Any, "reload"),
                 code="reload()",
                 mode="foreground",
+            )
+        )
+
+
+def test_local_run_manager_submit_rejects_background_reset(project_dir: Path) -> None:
+    manager = LocalRunManager(_runtime())
+
+    with pytest.raises(ValueError, match="Unsupported run mode for reset: background"):
+        manager.submit(
+            RunSpec(
+                project_root=project_dir,
+                session_id="default",
+                command_type="reset",
+                code=None,
+                mode="background",
             )
         )
 
@@ -152,6 +172,94 @@ def test_local_run_manager_submit_background_uses_ensure_started_result(
 
     assert managed.started_new_session is True
     ensure_started.assert_called_once_with(project_root=project_dir, session_id="default")
+
+
+def test_local_run_manager_submit_reset_persists_completed_record(project_dir: Path) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.reset.return_value = ExecutionResult(status="ok", duration_ms=6)
+    manager = LocalRunManager(runtime)
+
+    managed = manager.submit(
+        RunSpec(
+            project_root=project_dir,
+            session_id="default",
+            command_type="reset",
+            code=None,
+            mode="foreground",
+            timeout_s=6.0,
+        )
+    )
+
+    stored = ExecutionStore(project_dir).get(managed.record.execution_id)
+    assert stored is not None
+    assert stored.command_type == "reset"
+    assert stored.status == "ok"
+    runtime.reset.assert_called_once_with(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=6.0,
+    )
+
+
+def test_local_run_manager_submit_reset_persists_non_kernel_errors(project_dir: Path) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.reset.side_effect = AgentNBException(
+        code="EXECUTION_ERROR",
+        message="Reset failed",
+        ename="RuntimeError",
+        evalue="reset failed",
+        traceback=["tb"],
+    )
+    manager = LocalRunManager(runtime)
+
+    with pytest.raises(AgentNBException) as exc_info:
+        manager.submit(
+            RunSpec(
+                project_root=project_dir,
+                session_id="default",
+                command_type="reset",
+                code=None,
+                mode="foreground",
+                timeout_s=6.0,
+            )
+        )
+
+    stored = ExecutionStore(project_dir).read(session_id="default")
+    assert len(stored) == 1
+    assert stored[0].command_type == "reset"
+    assert stored[0].status == "error"
+    assert stored[0].ename == "RuntimeError"
+    assert exc_info.value.code == "EXECUTION_ERROR"
+    assert exc_info.value.data["execution_id"] == stored[0].execution_id
+
+
+@pytest.mark.parametrize("error_type", [NoKernelRunningError, KernelNotReadyError])
+def test_local_run_manager_submit_reset_does_not_persist_kernel_state_errors(
+    project_dir: Path,
+    error_type: type[Exception],
+) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.reset.side_effect = error_type()
+    manager = LocalRunManager(runtime)
+
+    with pytest.raises(error_type):
+        manager.submit(
+            RunSpec(
+                project_root=project_dir,
+                session_id="default",
+                command_type="reset",
+                code=None,
+                mode="foreground",
+                timeout_s=6.0,
+            )
+        )
+
+    runtime.reset.assert_called_once_with(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=6.0,
+    )
+    assert ExecutionStore(project_dir).read(session_id="default") == []
 
 
 def test_local_run_manager_wait_for_run_returns_completed_record(project_dir: Path) -> None:

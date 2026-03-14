@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .contracts import ExecutionSink
-from .errors import AgentNBException, KernelNotReadyError, NoKernelRunningError
 from .payloads import CancelRunResult, RunSnapshot
 from .recording import CommandRecorder
 from .runs import (
@@ -13,10 +12,10 @@ from .runs import (
     ExecutionStore,
     LocalRunManager,
     ManagedExecution,
+    RunManager,
     RunSpec,
     _ExecutionProgressSink,
 )
-from .runs.store import execution_record_from_exception, execution_record_from_result
 from .session import DEFAULT_SESSION_ID
 
 if TYPE_CHECKING:
@@ -28,7 +27,7 @@ class ExecutionService:
         self,
         runtime: KernelRuntime,
         recorder: CommandRecorder | None = None,
-        run_manager: LocalRunManager | None = None,
+        run_manager: RunManager | None = None,
     ) -> None:
         self.runtime = runtime
         self._recorder = recorder or CommandRecorder()
@@ -83,43 +82,16 @@ class ExecutionService:
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float,
     ) -> ManagedExecution:
-        try:
-            execution = self.runtime.reset(
+        return self._run_manager.submit(
+            RunSpec(
                 project_root=project_root,
-                session_id=session_id,
-                timeout_s=timeout_s,
-            )
-        except Exception as exc:
-            if isinstance(exc, (NoKernelRunningError, KernelNotReadyError)):
-                raise
-            record = execution_record_from_exception(
                 session_id=session_id,
                 command_type="reset",
                 code=None,
-                error=exc,
-                recording=self._recording(command_type="reset", code=None),
+                mode="foreground",
+                timeout_s=timeout_s,
             )
-            self._store(project_root).append(record)
-            if isinstance(exc, AgentNBException):
-                raise AgentNBException(
-                    code=exc.code,
-                    message=exc.message,
-                    ename=exc.ename,
-                    evalue=exc.evalue,
-                    traceback=exc.traceback,
-                    data=dict(record.to_execution_payload()),
-                ) from exc
-            raise
-
-        record = execution_record_from_result(
-            session_id=session_id,
-            command_type="reset",
-            code=None,
-            execution=execution,
-            recording=self._recording(command_type="reset", code=None),
         )
-        self._store(project_root).append(record)
-        return ManagedExecution(record=record)
 
     def list_runs(
         self,
@@ -189,12 +161,6 @@ class ExecutionService:
             project_root=project_root,
             execution_id=execution_id,
         )
-
-    def _store(self, project_root: Path) -> ExecutionStore:
-        return ExecutionStore(project_root)
-
-    def _recording(self, *, command_type: str, code: str | None):
-        return self._recorder.for_execution(command_type=command_type, code=code)
 
 
 __all__ = [

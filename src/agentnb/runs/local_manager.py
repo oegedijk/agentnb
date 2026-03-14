@@ -160,6 +160,7 @@ class LocalRunManager(RunManager):
                     "run_status": record.status,
                     "session_outcome": "unchanged",
                 }
+            record = self._record_cancel_request(project_root=project_root, record=record)
 
             try:
                 self.runtime.interrupt(project_root=project_root, session_id=record.session_id)
@@ -370,6 +371,7 @@ class LocalRunManager(RunManager):
             status="error",
             ename="CancelledError",
             evalue="Run was cancelled by user.",
+            terminal_reason="cancelled",
         )
         updated = replace(
             updated,
@@ -390,7 +392,6 @@ class LocalRunManager(RunManager):
         self._store(project_root).append(updated)
         return self._terminal_run_payload(
             updated,
-            cancel_requested=True,
             session_outcome=session_outcome,
         )
 
@@ -398,13 +399,15 @@ class LocalRunManager(RunManager):
         self,
         record: ExecutionRecord,
         *,
-        cancel_requested: bool = False,
+        cancel_requested: bool | None = None,
         session_outcome: str = "unchanged",
     ) -> CancelRunResult:
         return {
             "execution_id": record.execution_id,
             "session_id": record.session_id,
-            "cancel_requested": cancel_requested,
+            "cancel_requested": record.cancel_requested
+            if cancel_requested is None
+            else cancel_requested,
             "status": record.status,
             "run_status": record.status,
             "session_outcome": session_outcome,
@@ -467,6 +470,7 @@ class LocalRunManager(RunManager):
             status="error",
             ename="WorkerExitedError",
             evalue="Background worker exited before recording a result.",
+            terminal_reason="cancelled" if record.cancel_requested else "worker_exited",
         )
         updated = replace(
             updated,
@@ -484,6 +488,21 @@ class LocalRunManager(RunManager):
                 result=updated.result,
             ),
         )
+        self._store(project_root).append(updated)
+        return updated
+
+    def _record_cancel_request(
+        self,
+        *,
+        project_root: Path,
+        record: ExecutionRecord,
+    ) -> ExecutionRecord:
+        updated = record.with_cancel_requested(
+            requested_at=utc_now_iso(),
+            source="user",
+        )
+        if updated is record:
+            return record
         self._store(project_root).append(updated)
         return updated
 

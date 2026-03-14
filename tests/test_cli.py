@@ -1151,12 +1151,14 @@ def test_cli_runs_list_returns_compacted_runs(cli_runner: CliRunner, project_dir
             "ts": "2026-03-10T00:00:00+00:00",
             "session_id": "default",
             "command_type": "exec",
-            "status": "ok",
+            "status": "error",
             "duration_ms": 12,
+            "terminal_reason": "cancelled",
+            "cancel_requested": True,
             "stdout": "",
             "stderr": "",
             "result": "42",
-            "ename": None,
+            "ename": "CancelledError",
         }
     ]
 
@@ -1166,6 +1168,8 @@ def test_cli_runs_list_returns_compacted_runs(cli_runner: CliRunner, project_dir
     payload = _payload(result.output)
     assert payload["command"] == "runs-list"
     assert payload["data"]["runs"][0]["execution_id"] == "run-1"
+    assert payload["data"]["runs"][0]["terminal_reason"] == "cancelled"
+    assert payload["data"]["runs"][0]["cancel_requested"] is True
     assert payload["data"]["runs"][0]["result_preview"] == "42"
 
 
@@ -1177,16 +1181,19 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
         "ts": "2026-03-10T00:00:00+00:00",
         "session_id": "default",
         "command_type": "exec",
-        "status": "ok",
+        "status": "error",
         "duration_ms": 12,
         "code": "1 + 1",
         "stdout": "",
         "stderr": "",
         "result": "2",
         "execution_count": 1,
-        "ename": None,
-        "evalue": None,
+        "ename": "CancelledError",
+        "evalue": "Run was cancelled by user.",
         "traceback": None,
+        "terminal_reason": "cancelled",
+        "cancel_requested": True,
+        "recorded_ename": "KeyboardInterrupt",
         "outputs": [
             {
                 "kind": "result",
@@ -1207,6 +1214,9 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
     assert payload["command"] == "runs-show"
     assert payload["data"]["run"]["execution_id"] == "run-1"
     assert "outputs" not in payload["data"]["run"]
+    assert payload["data"]["run"]["terminal_reason"] == "cancelled"
+    assert payload["data"]["run"]["cancel_requested"] is True
+    assert payload["data"]["run"]["recorded_ename"] == "KeyboardInterrupt"
 
 
 def test_cli_runs_show_human_clarifies_snapshot_for_running_run(

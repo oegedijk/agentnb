@@ -37,6 +37,7 @@ Completed foundations:
 - Structured execution output is now the internal source of truth, with flat `stdout` / `stderr` / `result` preserved as compatibility projections at the boundary.
 - Backend capability checks now branch on a typed capability contract instead of local-backend assumptions.
 - Session/kernel state paths and canonical session identity now flow through `StateRepository` / `SessionStateFiles` instead of being recomputed across runtime and backend layers.
+- Run records now persist explicit cancel provenance and expose stable cancellation metadata across `runs show|list` and failed-only reads.
 - The test suite now has cleaner fixtures, broader behavioral/type coverage, real CLI smoke coverage, and `ty` over both `src` and `tests`.
 
 Remaining prep refactors:
@@ -47,7 +48,6 @@ Remaining prep refactors:
 - Run-control follow-up:
   - keep replay and verify execution flows on the same run-control abstraction instead of giving them their own wait/cancel/progress orchestration paths
   - keep public run semantics defined by the controller contract rather than by the current local subprocess behavior
-  - make cancellation semantics stable across timing races by recording explicit cancel provenance instead of exposing either `KeyboardInterrupt` or synthetic cancellation outcomes depending on settle timing
 - Backend capability follow-up:
   - grow the minimal capability contract into the app/run-control/extension boundary before adding non-local backends
   - keep features branching on declared capabilities rather than on backend type checks or local-only assumptions
@@ -114,9 +114,6 @@ Remaining prep refactors:
   - traceback enrichment
   - frame/locals inspection commands
   - optional profiling (`cProfile`) command paths
-- Interrupt and cancellation semantics:
-  - record explicit user-cancel provenance on runs
-  - make cancel results stable even when the terminal kernel outcome settles as `KeyboardInterrupt`
 - Safer inspection:
   - bounded previews for large values
   - structured previews for common containers (`list`, `dict`, `tuple`, dataframe-like objects)
@@ -138,7 +135,6 @@ Remaining prep refactors:
 - History entries should grow optional `tags` and execution-mode/provenance metadata on top of the current `command_type` and `execution_id` fields.
 - Verification responses should identify the first failed step and the source execution that produced it.
 - JSON envelopes should keep machine-stable fields predictable across commands (`session_id`, `execution_id`, `duration_ms`, typed error codes).
-- Run records should distinguish user-requested cancellation provenance from the terminal kernel error details so cancel behavior does not depend on interrupt timing.
 - Keep full `--json` as the exact machine-stable contract rather than assuming it is the best default working mode.
 - Prefer improving behavior, flags, suggestions, and output shaping of existing commands over adding new top-level commands.
 - Snapshot metadata tracked in `.agentnb/` with schema versioning.

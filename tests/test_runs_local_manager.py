@@ -277,6 +277,8 @@ def test_local_run_manager_cancel_run_interrupts_session(project_dir: Path, mock
     assert stored is not None
     assert stored.status == "error"
     assert stored.ename == "CancelledError"
+    assert stored.cancel_requested is True
+    assert stored.terminal_reason == "cancelled"
 
 
 def test_local_run_manager_cancel_run_returns_finished_state_when_run_completes_after_interrupt(
@@ -323,6 +325,10 @@ def test_local_run_manager_cancel_run_returns_finished_state_when_run_completes_
     }
     interrupt.assert_called_once_with(project_root=project_dir, session_id="default")
     kill.assert_not_called()
+    stored = store.get("run-1")
+    assert stored is not None
+    assert stored.cancel_requested is True
+    assert stored.terminal_reason == "completed"
 
 
 def test_local_run_manager_cancel_run_stops_starting_session(project_dir: Path, mocker) -> None:
@@ -347,6 +353,8 @@ def test_local_run_manager_cancel_run_stops_starting_session(project_dir: Path, 
     assert stored is not None
     assert stored.status == "error"
     assert stored.ename == "CancelledError"
+    assert stored.cancel_requested is True
+    assert stored.terminal_reason == "cancelled"
 
 
 def test_local_run_manager_cancel_run_returns_unchanged_for_finished_run(project_dir: Path) -> None:
@@ -388,6 +396,39 @@ def test_local_run_manager_marks_exited_background_worker_as_error(
     assert run["status"] == "error"
     assert run["ename"] == "WorkerExitedError"
     assert run["evalue"] == "Background worker exited before recording a result."
+
+
+def test_local_run_manager_marks_exited_background_worker_as_cancelled_after_cancel_request(
+    project_dir: Path,
+    mocker,
+) -> None:
+    mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=False)
+    store = ExecutionStore(project_dir)
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            code="sleep()",
+            worker_pid=123,
+            cancel_requested=True,
+            cancel_requested_at="2026-03-10T00:00:01+00:00",
+            cancel_request_source="user",
+        )
+    )
+
+    run = LocalRunManager(_runtime()).get_run(project_root=project_dir, execution_id="run-1")
+    stored = store.get("run-1")
+
+    assert run["status"] == "error"
+    assert run["ename"] == "CancelledError"
+    assert run["evalue"] == "Run was cancelled by user."
+    assert stored is not None
+    assert stored.terminal_reason == "cancelled"
+    assert stored.recorded_ename == "WorkerExitedError"
 
 
 def test_local_run_manager_complete_background_run_persists_streamed_progress(

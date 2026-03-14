@@ -17,6 +17,7 @@ from agentnb.execution import (
     _ExecutionProgressSink,
 )
 from agentnb.execution_output import OutputItem
+from agentnb.history import HistoryRecord
 from agentnb.runs import ManagedExecution, RunSpec
 from agentnb.runtime import KernelRuntime
 
@@ -161,6 +162,148 @@ def test_execution_store_returns_latest_version_for_same_run(project_dir: Path) 
     assert len(entries) == 1
     assert entries[0].status == "ok"
     assert entries[0].result == "2"
+
+
+def test_execution_store_merges_cancel_provenance_into_later_terminal_record(
+    project_dir: Path,
+) -> None:
+    store = ExecutionStore(project_dir)
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            code="sleep()",
+            cancel_requested=True,
+            cancel_requested_at="2026-03-10T00:00:01+00:00",
+            cancel_request_source="user",
+        )
+    )
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="error",
+            duration_ms=12,
+            code="sleep()",
+            ename="KeyboardInterrupt",
+            evalue="interrupted",
+            traceback=["tb"],
+        )
+    )
+
+    stored = store.get("run-1")
+
+    assert stored is not None
+    assert stored.cancel_requested is True
+    assert stored.cancel_requested_at == "2026-03-10T00:00:01+00:00"
+    assert stored.cancel_request_source == "user"
+    assert stored.terminal_reason == "cancelled"
+    assert stored.status == "error"
+    assert stored.ename == "CancelledError"
+    assert stored.evalue == "Run was cancelled by user."
+    assert stored.traceback is None
+    assert stored.recorded_status == "error"
+    assert stored.recorded_ename == "KeyboardInterrupt"
+    assert stored.recorded_evalue == "interrupted"
+    assert stored.recorded_traceback == ["tb"]
+
+
+def test_execution_store_errors_only_reads_preserve_merged_cancel_provenance(
+    project_dir: Path,
+) -> None:
+    store = ExecutionStore(project_dir)
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            code="sleep()",
+            cancel_requested=True,
+            cancel_requested_at="2026-03-10T00:00:01+00:00",
+            cancel_request_source="user",
+        )
+    )
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="error",
+            duration_ms=12,
+            code="sleep()",
+            ename="KeyboardInterrupt",
+            evalue="interrupted",
+            traceback=["tb"],
+        )
+    )
+
+    entries = store.read(session_id="default", errors_only=True)
+
+    assert len(entries) == 1
+    assert entries[0].terminal_reason == "cancelled"
+    assert entries[0].cancel_requested is True
+    assert entries[0].ename == "CancelledError"
+    assert entries[0].recorded_ename == "KeyboardInterrupt"
+
+
+def test_execution_store_projects_cancelled_journal_entries_from_merged_terminal_record(
+    project_dir: Path,
+) -> None:
+    store = ExecutionStore(project_dir)
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            cancel_requested=True,
+            cancel_requested_at="2026-03-10T00:00:01+00:00",
+            cancel_request_source="user",
+        )
+    )
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="error",
+            duration_ms=12,
+            ename="KeyboardInterrupt",
+            evalue="interrupted",
+            journal_entries=[
+                HistoryRecord(
+                    kind="kernel_execution",
+                    ts="2026-03-10T00:00:00+00:00",
+                    session_id="default",
+                    execution_id="run-1",
+                    status="error",
+                    duration_ms=12,
+                    command_type="exec",
+                    label="exec kernel execution",
+                    user_visible=False,
+                    error_type="KeyboardInterrupt",
+                )
+            ],
+        )
+    )
+
+    stored = store.get("run-1")
+
+    assert stored is not None
+    assert stored.journal_entries[0].error_type == "CancelledError"
 
 
 def test_execution_service_persists_exec_runs(project_dir: Path) -> None:

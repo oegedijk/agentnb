@@ -228,6 +228,13 @@ def compact_run_entry(entry: RunSnapshot) -> RunListEntryPayload:
         "duration_ms": entry.get("duration_ms"),
     }
 
+    terminal_reason = entry.get("terminal_reason")
+    if terminal_reason is not None:
+        compacted["terminal_reason"] = terminal_reason
+
+    if "cancel_requested" in entry:
+        compacted["cancel_requested"] = bool(entry.get("cancel_requested"))
+
     result = entry.get("result")
     if isinstance(result, str) and result:
         summary = summarize_history_text(result, limit=_RESULT_LIMIT)

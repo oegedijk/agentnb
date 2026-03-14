@@ -29,6 +29,14 @@ class RunSnapshot(TypedDict, total=False):
     evalue: str | None
     traceback: list[str] | None
     events: list[ExecutionEventPayload]
+    terminal_reason: str | None
+    cancel_requested: bool
+    cancel_requested_at: str | None
+    cancel_request_source: str | None
+    recorded_status: str | None
+    recorded_ename: str | None
+    recorded_evalue: str | None
+    recorded_traceback: list[str] | None
 
 
 class StoredRunSnapshot(RunSnapshot, total=False):
@@ -237,6 +245,8 @@ class RunListEntryPayload(TypedDict, total=False):
     command_type: str | None
     status: str | None
     duration_ms: int | None
+    terminal_reason: str | None
+    cancel_requested: bool
     result_preview: str
     stdout_preview: str
     error_type: str

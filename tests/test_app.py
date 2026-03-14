@@ -449,6 +449,8 @@ def test_app_runs_list_compacts_runs_and_applies_last_selection(project_dir) -> 
             "command_type": "exec",
             "status": "error",
             "duration_ms": 6,
+            "terminal_reason": "cancelled",
+            "cancel_requested": True,
             "result": "",
             "stdout": "nope",
             "ename": "ValueError",
@@ -474,6 +476,8 @@ def test_app_runs_list_compacts_runs_and_applies_last_selection(project_dir) -> 
             "command_type": "exec",
             "status": "error",
             "duration_ms": 6,
+            "terminal_reason": "cancelled",
+            "cancel_requested": True,
             "stdout_preview": "nope",
             "error_type": "ValueError",
         }
@@ -561,8 +565,11 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
     run_payload = {
         "execution_id": "run-1",
         "session_id": "analysis",
-        "status": "ok",
+        "status": "error",
         "result": "2",
+        "terminal_reason": "cancelled",
+        "cancel_requested": True,
+        "recorded_ename": "KeyboardInterrupt",
         "outputs": [{"kind": "result", "text": "2", "mime": {"text/plain": "2"}}],
     }
     executions.get_run.return_value = dict(run_payload)
@@ -597,6 +604,9 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
     assert response.session_id == expected_session_id
     assert response.data["run"]["execution_id"] == "run-1"
     assert "outputs" not in response.data["run"]
+    assert response.data["run"]["terminal_reason"] == "cancelled"
+    assert response.data["run"]["cancel_requested"] is True
+    assert response.data["run"]["recorded_ename"] == "KeyboardInterrupt"
 
 
 def test_app_sessions_list_routes_through_handle_command(project_dir) -> None:

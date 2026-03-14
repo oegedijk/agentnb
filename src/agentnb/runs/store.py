@@ -4,7 +4,7 @@ import json
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from ..contracts import ExecutionEvent, ExecutionResult, ExecutionSink, utc_now_iso
 from ..errors import AgentNBException
@@ -19,6 +19,18 @@ from ..history import HistoryRecord
 from ..payloads import ExecutionEventPayload, RunSnapshot, StoredRunSnapshot
 from ..recording import CommandRecorder, CommandRecording
 from ..state import StateRepository
+
+TerminalReason = Literal["completed", "failed", "cancelled", "worker_exited"]
+
+_CANCELLED_ERROR_TYPE = "CancelledError"
+_CANCELLED_ERROR_VALUE = "Run was cancelled by user."
+_CANCELLATION_RAW_ERROR_TYPES = frozenset(
+    {
+        "KeyboardInterrupt",
+        _CANCELLED_ERROR_TYPE,
+        "WorkerExitedError",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -41,6 +53,14 @@ class ExecutionRecord:
     outputs: list[OutputItem] = field(default_factory=list)
     events: list[ExecutionEvent] = field(default_factory=list)
     journal_entries: list[HistoryRecord] = field(default_factory=list)
+    terminal_reason: TerminalReason | None = None
+    cancel_requested: bool = False
+    cancel_requested_at: str | None = None
+    cancel_request_source: str | None = None
+    recorded_status: str | None = None
+    recorded_ename: str | None = None
+    recorded_evalue: str | None = None
+    recorded_traceback: list[str] | None = None
 
     def __post_init__(self) -> None:
         if self.outputs:
@@ -90,6 +110,8 @@ class ExecutionRecord:
             self.evalue = projected.evalue
             self.traceback = projected.traceback
 
+        self._apply_terminal_projection()
+
     def to_dict(self) -> RunSnapshot:
         payload: RunSnapshot = {
             "execution_id": self.execution_id,
@@ -107,6 +129,14 @@ class ExecutionRecord:
             "ename": self.ename,
             "evalue": self.evalue,
             "traceback": self.traceback,
+            "terminal_reason": self.terminal_reason,
+            "cancel_requested": self.cancel_requested,
+            "cancel_requested_at": self.cancel_requested_at,
+            "cancel_request_source": self.cancel_request_source,
+            "recorded_status": self.recorded_status,
+            "recorded_ename": self.recorded_ename,
+            "recorded_evalue": self.recorded_evalue,
+            "recorded_traceback": self.recorded_traceback,
             "events": [
                 ExecutionEventPayload(
                     kind=event.kind,
@@ -186,10 +216,88 @@ class ExecutionRecord:
             outputs=outputs,
             events=events,
             journal_entries=journal_entries,
+            terminal_reason=_optional_terminal_reason(payload, "terminal_reason"),
+            cancel_requested=_optional_bool(payload, "cancel_requested") or False,
+            cancel_requested_at=_optional_str(payload, "cancel_requested_at"),
+            cancel_request_source=_optional_str(payload, "cancel_request_source"),
+            recorded_status=_optional_str(payload, "recorded_status"),
+            recorded_ename=_optional_str(payload, "recorded_ename"),
+            recorded_evalue=_optional_str(payload, "recorded_evalue"),
+            recorded_traceback=_optional_str_list(payload, "recorded_traceback"),
         )
 
     def to_execution_payload(self) -> RunSnapshot:
         return self.to_dict()
+
+    def with_cancel_requested(
+        self,
+        *,
+        requested_at: str,
+        source: str,
+    ) -> ExecutionRecord:
+        if self.cancel_requested:
+            return self
+        return replace(
+            self,
+            cancel_requested=True,
+            cancel_requested_at=requested_at,
+            cancel_request_source=source,
+        )
+
+    def with_terminal_reason(self, terminal_reason: TerminalReason) -> ExecutionRecord:
+        return replace(self, terminal_reason=terminal_reason)
+
+    def _apply_terminal_projection(self) -> None:
+        if self.status == "running":
+            return
+
+        if self.terminal_reason is None:
+            self.terminal_reason = self._infer_terminal_reason()
+
+        if self.terminal_reason != "cancelled":
+            return
+
+        if not self._is_projected_cancelled():
+            if self.recorded_status is None:
+                self.recorded_status = self.status
+            if self.recorded_ename is None:
+                self.recorded_ename = self.ename
+            if self.recorded_evalue is None:
+                self.recorded_evalue = self.evalue
+            if self.recorded_traceback is None and self.traceback is not None:
+                self.recorded_traceback = list(self.traceback)
+
+        self.status = "error"
+        self.ename = _CANCELLED_ERROR_TYPE
+        self.evalue = _CANCELLED_ERROR_VALUE
+        self.traceback = None
+        self.journal_entries = [
+            replace(entry, status="error", error_type=_CANCELLED_ERROR_TYPE)
+            if entry.status == "error"
+            else entry
+            for entry in self.journal_entries
+        ]
+
+    def _infer_terminal_reason(self) -> TerminalReason:
+        if (
+            self.cancel_requested
+            and self.status == "error"
+            and self.ename in _CANCELLATION_RAW_ERROR_TYPES
+        ):
+            return "cancelled"
+        if self.status == "ok":
+            return "completed"
+        if self.status == "error" and self.ename == "WorkerExitedError":
+            return "worker_exited"
+        return "failed"
+
+    def _is_projected_cancelled(self) -> bool:
+        return (
+            self.status == "error"
+            and self.ename == _CANCELLED_ERROR_TYPE
+            and self.evalue == _CANCELLED_ERROR_VALUE
+            and self.traceback is None
+        )
 
 
 class ExecutionStore:
@@ -230,12 +338,14 @@ class ExecutionStore:
                 continue
             if command_types is not None and record.command_type not in command_types:
                 continue
-            if errors_only and record.status != "error":
-                continue
-            if record.execution_id in entries_by_id:
-                del entries_by_id[record.execution_id]
+            previous = entries_by_id.get(record.execution_id)
+            if previous is not None:
+                record = _merge_records(previous, record)
             entries_by_id[record.execution_id] = record
-        return list(entries_by_id.values())
+        records = list(entries_by_id.values())
+        if errors_only:
+            records = [record for record in records if record.status == "error"]
+        return records
 
     def get(self, execution_id: str) -> ExecutionRecord | None:
         for record in reversed(self.read()):
@@ -459,3 +569,51 @@ def _optional_str_list(payload: dict[str, Any], key: str) -> list[str] | None:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"Invalid {key}")
     return list(value)
+
+
+def _optional_bool(payload: dict[str, Any], key: str) -> bool | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"Invalid {key}")
+    return value
+
+
+def _optional_terminal_reason(payload: dict[str, Any], key: str) -> TerminalReason | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if value not in {"completed", "failed", "cancelled", "worker_exited"}:
+        raise ValueError(f"Invalid {key}")
+    return cast(TerminalReason, value)
+
+
+def _merge_records(previous: ExecutionRecord, current: ExecutionRecord) -> ExecutionRecord:
+    changes: dict[str, object] = {}
+    merged_cancel_requested = current.cancel_requested or previous.cancel_requested
+    if previous.cancel_requested and not current.cancel_requested:
+        changes["cancel_requested"] = True
+    if current.cancel_requested_at is None and previous.cancel_requested_at is not None:
+        changes["cancel_requested_at"] = previous.cancel_requested_at
+    if current.cancel_request_source is None and previous.cancel_request_source is not None:
+        changes["cancel_request_source"] = previous.cancel_request_source
+    if (
+        merged_cancel_requested
+        and current.status == "error"
+        and current.ename in _CANCELLATION_RAW_ERROR_TYPES
+    ):
+        changes["terminal_reason"] = "cancelled"
+    elif current.terminal_reason is None and previous.terminal_reason is not None:
+        changes["terminal_reason"] = previous.terminal_reason
+    if current.recorded_status is None and previous.recorded_status is not None:
+        changes["recorded_status"] = previous.recorded_status
+    if current.recorded_ename is None and previous.recorded_ename is not None:
+        changes["recorded_ename"] = previous.recorded_ename
+    if current.recorded_evalue is None and previous.recorded_evalue is not None:
+        changes["recorded_evalue"] = previous.recorded_evalue
+    if current.recorded_traceback is None and previous.recorded_traceback is not None:
+        changes["recorded_traceback"] = list(previous.recorded_traceback)
+    if not changes:
+        return current
+    return replace(current, **changes)

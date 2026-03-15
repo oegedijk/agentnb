@@ -6,6 +6,7 @@ import time
 from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from click.testing import CliRunner
@@ -139,7 +140,7 @@ def journal_builder(project_dir: Path):
         ts: str,
         session_id: str = "default",
         command_type: str = "exec",
-        status: str = "ok",
+        status: Literal["starting", "running", "ok", "error"] = "ok",
         duration_ms: int = 1,
         code: str | None = None,
         result: str | None = None,

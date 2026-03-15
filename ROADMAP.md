@@ -38,6 +38,8 @@ Completed foundations:
 - Backend capability checks now branch on a typed capability contract instead of local-backend assumptions.
 - Session/kernel state paths and canonical session identity now flow through `StateRepository` / `SessionStateFiles` instead of being recomputed across runtime and backend layers.
 - Run records now persist explicit cancel provenance and expose stable cancellation metadata across `runs show|list` and failed-only reads.
+- Background runs now use an explicit startup lifecycle before `running`, so run reconciliation no longer depends on subprocess timing races.
+- `StateRepository` now owns persisted snapshot/export resource ids, descriptor schemas, and write-time manifest/resource validation instead of leaving those invariants to callers.
 - The test suite now has cleaner fixtures, broader behavioral/type coverage, real CLI smoke coverage, and `ty` over both `src` and `tests`.
 
 Remaining prep refactors:
@@ -72,20 +74,7 @@ Remaining prep refactors:
   - follow-up work still needed:
     - keep extension APIs event/context-based rather than growing a method-per-hook surface that mirrors current runtime internals
     - avoid exposing raw backend or runtime objects directly to extensions so the first plugin API does not freeze internal implementation details
-- State layout ownership:
-  - purpose: centralize ownership of `.agentnb/` filesystem layout, schema versions, and migration boundaries
-  - hidden complexity to absorb:
-    - path naming and discovery for sessions, histories, runs, snapshots, artifacts, and future metadata
-    - schema versioning and compatibility checks
-    - cleanup and retention rules for persisted state
-  - target shape:
-    - one state-layout module or state repository boundary that defines where each persisted resource lives and how schema versions are tracked
-    - leaf modules should ask for their paths/resources instead of encoding layout conventions independently
-  - why this must come before snapshots and artifacts:
-    - snapshots and artifacts will otherwise repeat the current pattern of each module knowing its own filenames and directory structure
-    - centralized ownership will make future migrations less risky
-  - follow-up work still needed:
-    - give persisted resources stable identities and per-resource schema/version boundaries so future artifacts, exports, and sharable bundles are not defined by local file paths alone
+- State layout follow-up: keep cleanup/retention policy and future sharable-bundle rules inside `StateRepository` rather than reintroducing ad hoc filesystem ownership in higher layers.
 ### Internal Planning Seams
 
 - Internal replay/snapshot planning seam:

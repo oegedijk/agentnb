@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from ..contracts import ExecutionEvent, ExecutionSink, utc_now_iso
 from ..errors import (
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from ..runtime import KernelRuntime
 
 _CANCEL_SETTLE_TIMEOUT_S = 0.5
+_ACTIVE_RUN_STATUSES = frozenset({"starting", "running"})
 
 
 class LocalRunManager(RunManager):
@@ -90,7 +91,7 @@ class LocalRunManager(RunManager):
                     code="EXECUTION_NOT_FOUND",
                     message=f"Execution not found: {execution_id}",
                 )
-            if record.status != "running":
+            if record.status not in _ACTIVE_RUN_STATUSES:
                 return record.to_dict()
             if time.monotonic() >= deadline:
                 raise RunWaitTimedOutError(timeout_s)
@@ -125,7 +126,7 @@ class LocalRunManager(RunManager):
                 for event in record.events[emitted_events:]:
                     observer.accept(event)
                 emitted_events = len(record.events)
-            if record.status != "running":
+            if record.status not in _ACTIVE_RUN_STATUSES:
                 return record.to_dict()
             if time.monotonic() >= deadline:
                 raise RunWaitTimedOutError(timeout_s)
@@ -153,7 +154,7 @@ class LocalRunManager(RunManager):
                     code="EXECUTION_NOT_FOUND",
                     message=f"Execution not found: {execution_id}",
                 )
-            if record.status != "running":
+            if record.status not in _ACTIVE_RUN_STATUSES:
                 return {
                     "execution_id": execution_id,
                     "session_id": record.session_id,
@@ -172,7 +173,7 @@ class LocalRunManager(RunManager):
                     timeout_s=min(timeout_s, _CANCEL_SETTLE_TIMEOUT_S),
                     poll_interval_s=poll_interval_s,
                 )
-                if latest is not None and latest.status != "running":
+                if latest is not None and latest.status not in _ACTIVE_RUN_STATUSES:
                     return self._terminal_run_payload(
                         latest,
                         cancel_requested=True,
@@ -192,7 +193,7 @@ class LocalRunManager(RunManager):
                 )
             except NoKernelRunningError:
                 latest = self._load_run(project_root=project_root, execution_id=execution_id)
-                if latest is not None and latest.status != "running":
+                if latest is not None and latest.status not in _ACTIVE_RUN_STATUSES:
                     return self._terminal_run_payload(latest)
                 if time.monotonic() >= deadline:
                     raise
@@ -200,7 +201,7 @@ class LocalRunManager(RunManager):
 
     def complete_background_run(self, *, project_root: Path, execution_id: str) -> None:
         record = self._load_run(project_root=project_root, execution_id=execution_id)
-        if record is None or record.code is None or record.status != "running":
+        if record is None or record.code is None or record.status not in _ACTIVE_RUN_STATUSES:
             return
 
         run = ExecutionRun(
@@ -209,6 +210,8 @@ class LocalRunManager(RunManager):
             recording=self._recording(command_type=record.command_type, code=record.code),
             started=True,
         )
+        if record.status != "running" or record.worker_pid != os.getpid():
+            run.replace(status="running", worker_pid=os.getpid())
         progress_sink = _ExecutionProgressSink(run)
 
         try:
@@ -224,7 +227,7 @@ class LocalRunManager(RunManager):
             updated = run.error_record(exc)
 
         latest = self._load_run(project_root=project_root, execution_id=execution_id)
-        if latest is None or latest.status != "running":
+        if latest is None or latest.status not in _ACTIVE_RUN_STATUSES:
             return
         run.replace(
             status=updated.status,
@@ -323,6 +326,7 @@ class LocalRunManager(RunManager):
             session_id=spec.session_id,
             command_type=spec.command_type,
             code=spec.code,
+            status="starting",
         )
         run.start()
 
@@ -347,7 +351,7 @@ class LocalRunManager(RunManager):
             run.finalize_error(exc)
             raise
 
-        record = run.replace(worker_pid=process.pid)
+        record = replace(run.record, status="running", worker_pid=process.pid)
         return ManagedExecution(record=record, started_new_session=started_new_session)
 
     def _store(self, project_root: Path) -> ExecutionStore:
@@ -360,6 +364,7 @@ class LocalRunManager(RunManager):
         session_id: str,
         command_type: str,
         code: str | None,
+        status: Literal["starting", "running"] = "running",
         worker_pid: int | None = None,
     ) -> ExecutionRun:
         return ExecutionRun(
@@ -370,7 +375,7 @@ class LocalRunManager(RunManager):
                 ts=utc_now_iso(),
                 session_id=session_id,
                 command_type=command_type,
-                status="running",
+                status=status,
                 duration_ms=0,
                 code=code,
                 worker_pid=worker_pid,
@@ -447,7 +452,7 @@ class LocalRunManager(RunManager):
         deadline = time.monotonic() + timeout_s
         while True:
             record = self._load_run(project_root=project_root, execution_id=execution_id)
-            if record is None or record.status != "running":
+            if record is None or record.status not in _ACTIVE_RUN_STATUSES:
                 return record
             if time.monotonic() >= deadline:
                 return record
@@ -483,9 +488,11 @@ class LocalRunManager(RunManager):
         project_root: Path,
         record: ExecutionRecord,
     ) -> ExecutionRecord:
-        if record.status != "running":
+        if record.status not in _ACTIVE_RUN_STATUSES:
             return record
-        if record.worker_pid is not None and pid_exists(record.worker_pid):
+        if record.worker_pid is None:
+            return record
+        if pid_exists(record.worker_pid):
             return record
 
         updated = replace(

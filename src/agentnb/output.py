@@ -274,7 +274,7 @@ def _render_run_snapshot(run: RunSnapshot, *, snapshot_only: bool) -> str:
     lines = [f"Run {execution_id} [{status}] {command_type} on session {session_id}."]
     if isinstance(duration_ms, int):
         lines.append(f"duration: {duration_ms}ms")
-    if snapshot_only and status == "running":
+    if snapshot_only and status in {"starting", "running"}:
         lines.append("snapshot: persisted state only; use `agentnb runs follow` for live events")
 
     stdout = run.get("stdout")

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import Mock
 
 import pytest
@@ -30,13 +31,18 @@ def _runtime(*, supports_interrupt: bool = True) -> KernelRuntime:
     return KernelRuntime(backend=backend)
 
 
-def _running_record(*, code: str | None = "1 + 1", worker_pid: int = 123) -> ExecutionRecord:
+def _active_record(
+    *,
+    status: Literal["starting", "running"] = "running",
+    code: str | None = "1 + 1",
+    worker_pid: int | None = 123,
+) -> ExecutionRecord:
     return ExecutionRecord(
         execution_id="run-1",
         ts="2026-03-10T00:00:00+00:00",
         session_id="default",
         command_type="exec",
-        status="running",
+        status=status,
         duration_ms=0,
         code=code,
         worker_pid=worker_pid,
@@ -101,7 +107,7 @@ def test_local_run_manager_cancel_run_requires_interrupt_capability(project_dir:
         manager.cancel_run(project_root=project_dir, execution_id="run-1")
 
 
-def test_local_run_manager_submit_background_persists_running_record(
+def test_local_run_manager_submit_background_persists_starting_record(
     project_dir: Path, mocker
 ) -> None:
     runtime = _runtime()
@@ -121,8 +127,19 @@ def test_local_run_manager_submit_background_persists_running_record(
 
     stored = ExecutionStore(project_dir).get(managed.record.execution_id)
     assert stored is not None
-    assert stored.status == "running"
-    assert stored.worker_pid == 456
+    assert stored.status == "starting"
+    assert stored.worker_pid is None
+    assert managed.record.status == "running"
+    assert managed.record.worker_pid == 456
+
+
+def test_local_run_manager_get_run_preserves_starting_background_record(project_dir: Path) -> None:
+    ExecutionStore(project_dir).append(_active_record(status="starting", worker_pid=None))
+
+    run = LocalRunManager(_runtime()).get_run(project_root=project_dir, execution_id="run-1")
+
+    assert run["status"] == "starting"
+    assert run["worker_pid"] is None
 
 
 def test_local_run_manager_submit_background_persists_spawn_failure(
@@ -288,7 +305,7 @@ def test_local_run_manager_wait_for_run_returns_completed_record(project_dir: Pa
 
 def test_local_run_manager_wait_for_run_times_out(project_dir: Path, mocker) -> None:
     mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
-    ExecutionStore(project_dir).append(_running_record())
+    ExecutionStore(project_dir).append(_active_record())
 
     with pytest.raises(RunWaitTimedOutError):
         LocalRunManager(_runtime()).wait_for_run(
@@ -367,7 +384,7 @@ def test_local_run_manager_cancel_run_interrupts_session(project_dir: Path, mock
     kill = mocker.patch("agentnb.runs.local_manager.os.kill")
     runtime = _runtime()
     interrupt = mocker.patch.object(runtime, "interrupt")
-    ExecutionStore(project_dir).append(_running_record())
+    ExecutionStore(project_dir).append(_active_record())
 
     payload = LocalRunManager(runtime).cancel_run(
         project_root=project_dir,
@@ -397,7 +414,7 @@ def test_local_run_manager_cancel_run_returns_finished_state_when_run_completes_
     kill = mocker.patch("agentnb.runs.local_manager.os.kill")
     runtime = _runtime()
     store = ExecutionStore(project_dir)
-    store.append(_running_record())
+    store.append(_active_record())
 
     def interrupt_stub(**kwargs: object) -> None:
         del kwargs
@@ -440,12 +457,11 @@ def test_local_run_manager_cancel_run_returns_finished_state_when_run_completes_
 
 
 def test_local_run_manager_cancel_run_stops_starting_session(project_dir: Path, mocker) -> None:
-    mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
     kill = mocker.patch("agentnb.runs.local_manager.os.kill")
     runtime = _runtime()
     mocker.patch.object(runtime, "interrupt", side_effect=KernelNotReadyError())
     stop_starting = mocker.patch.object(runtime, "stop_starting")
-    ExecutionStore(project_dir).append(_running_record())
+    ExecutionStore(project_dir).append(_active_record(status="starting", worker_pid=None))
 
     payload = LocalRunManager(runtime).cancel_run(
         project_root=project_dir,
@@ -457,7 +473,7 @@ def test_local_run_manager_cancel_run_stops_starting_session(project_dir: Path, 
     assert payload["status"] == "error"
     assert payload["session_outcome"] == "stopped"
     stop_starting.assert_called_once_with(project_root=project_dir, session_id="default")
-    kill.assert_called_once()
+    kill.assert_not_called()
     assert stored is not None
     assert stored.status == "error"
     assert stored.ename == "CancelledError"
@@ -497,7 +513,7 @@ def test_local_run_manager_marks_exited_background_worker_as_error(
     project_dir: Path, mocker
 ) -> None:
     mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=False)
-    ExecutionStore(project_dir).append(_running_record())
+    ExecutionStore(project_dir).append(_active_record())
 
     run = LocalRunManager(_runtime()).get_run(project_root=project_dir, execution_id="run-1")
 
@@ -552,10 +568,10 @@ def test_local_run_manager_complete_background_run_persists_streamed_progress(
             ts="2026-03-10T00:00:00+00:00",
             session_id="default",
             command_type="exec",
-            status="running",
+            status="starting",
             duration_ms=0,
             code="print('hello')",
-            worker_pid=123,
+            worker_pid=None,
         )
     )
 
@@ -581,6 +597,7 @@ def test_local_run_manager_complete_background_run_persists_streamed_progress(
         in_progress = ExecutionStore(project_dir).get("run-1")
         assert in_progress is not None
         assert in_progress.status == "error"
+        assert in_progress.worker_pid == os.getpid()
         assert in_progress.stdout == "hello\n"
         assert in_progress.stderr == "warn\n"
         assert in_progress.result == "2\n42"

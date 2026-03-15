@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -77,7 +77,7 @@ class SessionStore:
         self.repository = StateRepository(project_root)
         self.project_root = self.repository.project_root
         self.session_id = validate_session_id(session_id)
-        self.state = self.repository.session_state(self.session_id)
+        self.state = self.repository.session_runtime(self.session_id)
         self.state_dir = self.state.state_dir
         self.session_file = self.state.session_record
         self.legacy_session_file = self.state.legacy_session_record
@@ -86,8 +86,7 @@ class SessionStore:
         self.command_lock_file = self.state.command_lock_file
 
     def ensure_state_dir(self) -> None:
-        self.repository.ensure_compatible()
-        self.repository.ensure_state_dir()
+        self.repository.ensure_initialized()
 
     def load_session(self) -> SessionInfo | None:
         for path in self._session_paths():
@@ -113,9 +112,7 @@ class SessionStore:
         self._safe_unlink(self.session_file)
 
     def clear_runtime_files(self) -> None:
-        self._safe_unlink(self.connection_file)
-        self._safe_unlink(self.log_file)
-        self._safe_unlink(self.command_lock_file)
+        self.state.clear_runtime_files()
 
     def delete_session(self) -> None:
         self.clear_runtime_files()
@@ -125,9 +122,7 @@ class SessionStore:
         return self.connection_file.exists()
 
     def has_active_command_lock(self) -> bool:
-        if not self.command_lock_file.exists():
-            return False
-        return not self._clear_stale_command_lock()
+        return self.state.has_active_command_lock()
 
     def cleanup_stale(self) -> bool:
         session = self.load_session()
@@ -147,17 +142,9 @@ class SessionStore:
     def ensure_gitignore_entry(self) -> bool:
         return self.repository.ensure_gitignore_entry()
 
-    @contextmanager
-    def acquire_command_lock(self) -> Any:
-        self.ensure_state_dir()
-        lock_acquired = self._try_create_command_lock()
-        if not lock_acquired and self._clear_stale_command_lock():
-            lock_acquired = self._try_create_command_lock()
-        try:
-            yield lock_acquired
-        finally:
-            if lock_acquired:
-                self._safe_unlink(self.command_lock_file)
+    def acquire_command_lock(self) -> AbstractContextManager[bool]:
+        self.repository.ensure_compatible()
+        return self.state.acquire_command_lock()
 
     @classmethod
     def list_sessions(cls, project_root: Path) -> list[SessionInfo]:
@@ -219,34 +206,3 @@ class SessionStore:
             pass
         except OSError:
             pass
-
-    def _try_create_command_lock(self) -> bool:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-        try:
-            fd = os.open(self.command_lock_file, flags)
-        except FileExistsError:
-            return False
-
-        try:
-            os.write(fd, str(os.getpid()).encode("utf-8"))
-        finally:
-            os.close(fd)
-        return True
-
-    def _clear_stale_command_lock(self) -> bool:
-        try:
-            raw_pid = self.command_lock_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            return False
-
-        try:
-            lock_pid = int(raw_pid)
-        except ValueError:
-            self._safe_unlink(self.command_lock_file)
-            return True
-
-        if pid_exists(lock_pid):
-            return False
-
-        self._safe_unlink(self.command_lock_file)
-        return True

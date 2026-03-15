@@ -741,6 +741,10 @@ def _run_response_session_id(current_session_id: str, data: Mapping[str, object]
     return current_session_id
 
 
+def _run_is_active(status: object) -> bool:
+    return isinstance(status, str) and status in {"starting", "running"}
+
+
 def suggestions_for_command(
     command_name: str,
     response_status: str,
@@ -864,7 +868,7 @@ def suggestions_for_command(
         run = data.get("run")
         run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
         run_status = run_payload.get("status") if run_payload is not None else None
-        if run_status == "running":
+        if _run_is_active(run_status):
             return [
                 (
                     "Run `agentnb runs follow EXECUTION_ID --json` "

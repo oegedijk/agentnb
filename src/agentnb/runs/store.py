@@ -20,8 +20,10 @@ from ..payloads import ExecutionEventPayload, RunSnapshot, StoredRunSnapshot
 from ..recording import CommandRecorder, CommandRecording
 from ..state import StateRepository
 
+RunStatus = Literal["starting", "running", "ok", "error"]
 TerminalReason = Literal["completed", "failed", "cancelled", "worker_exited"]
 
+_ACTIVE_RUN_STATUSES = frozenset({"starting", "running"})
 _CANCELLED_ERROR_TYPE = "CancelledError"
 _CANCELLED_ERROR_VALUE = "Run was cancelled by user."
 _CANCELLATION_RAW_ERROR_TYPES = frozenset(
@@ -39,7 +41,7 @@ class ExecutionRecord:
     ts: str
     session_id: str
     command_type: str
-    status: str
+    status: RunStatus
     duration_ms: int
     code: str | None = None
     worker_pid: int | None = None
@@ -202,7 +204,7 @@ class ExecutionRecord:
             ts=_require_str(payload, "ts"),
             session_id=_require_str(payload, "session_id"),
             command_type=_require_str(payload, "command_type"),
-            status=_require_str(payload, "status"),
+            status=_require_run_status(payload, "status"),
             duration_ms=_require_int(payload, "duration_ms"),
             code=_optional_str(payload, "code"),
             worker_pid=_optional_int(payload, "worker_pid"),
@@ -248,7 +250,7 @@ class ExecutionRecord:
         return replace(self, terminal_reason=terminal_reason)
 
     def _apply_terminal_projection(self) -> None:
-        if self.status == "running":
+        if self.status in _ACTIVE_RUN_STATUSES:
             return
 
         if self.terminal_reason is None:
@@ -551,6 +553,13 @@ def _require_int(payload: dict[str, Any], key: str) -> int:
     if not isinstance(value, int):
         raise ValueError(f"Invalid {key}")
     return value
+
+
+def _require_run_status(payload: dict[str, Any], key: str) -> RunStatus:
+    value = _require_str(payload, key)
+    if value not in {"starting", "running", "ok", "error"}:
+        raise ValueError(f"Invalid {key}")
+    return cast(RunStatus, value)
 
 
 def _optional_int(payload: dict[str, Any], key: str) -> int | None:

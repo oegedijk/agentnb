@@ -112,7 +112,7 @@ def test_local_run_manager_submit_background_persists_starting_record(
 ) -> None:
     runtime = _runtime()
     manager = LocalRunManager(runtime)
-    popen = mocker.patch("agentnb.runs.local_manager.subprocess.Popen")
+    popen = mocker.patch("agentnb.runs.executor.subprocess.Popen")
     popen.return_value.pid = 456
 
     managed = manager.submit(
@@ -147,7 +147,7 @@ def test_local_run_manager_submit_background_persists_spawn_failure(
 ) -> None:
     runtime = _runtime()
     manager = LocalRunManager(runtime)
-    mocker.patch("agentnb.runs.local_manager.subprocess.Popen", side_effect=OSError("spawn failed"))
+    mocker.patch("agentnb.runs.executor.subprocess.Popen", side_effect=OSError("spawn failed"))
 
     with pytest.raises(OSError, match="spawn failed"):
         manager.submit(
@@ -172,7 +172,7 @@ def test_local_run_manager_submit_background_uses_ensure_started_result(
 ) -> None:
     runtime = _runtime()
     ensure_started = mocker.patch.object(runtime, "ensure_started", return_value=(object(), True))
-    popen = mocker.patch("agentnb.runs.local_manager.subprocess.Popen")
+    popen = mocker.patch("agentnb.runs.executor.subprocess.Popen")
     popen.return_value.pid = 456
     manager = LocalRunManager(runtime)
 

@@ -2,26 +2,24 @@ from __future__ import annotations
 
 import os
 import signal
-import subprocess
-import sys
 import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from ..contracts import ExecutionEvent, ExecutionSink, utc_now_iso
+from ..contracts import utc_now_iso
 from ..errors import (
     AgentNBException,
     KernelNotReadyError,
     NoKernelRunningError,
     RunWaitTimedOutError,
 )
-from ..execution_events import ExecutionResultAccumulator
 from ..payloads import CancelRunResult, RunSnapshot
 from ..recording import CommandRecorder, CommandRecording
 from ..session import pid_exists
+from .executor import LocalRunExecutor, RunExecutor
 from .manager import RunManager
-from .models import RunObserver, RunSpec
+from .models import RunObserver, RunPlan, RunSpec
 from .store import ExecutionRecord, ExecutionRun, ExecutionStore, ManagedExecution, new_execution_id
 
 if TYPE_CHECKING:
@@ -36,18 +34,18 @@ class LocalRunManager(RunManager):
         self,
         runtime: KernelRuntime,
         recorder: CommandRecorder | None = None,
+        executor: RunExecutor | None = None,
     ) -> None:
         self.runtime = runtime
         self._recorder = recorder or CommandRecorder()
+        self._executor = executor or LocalRunExecutor(runtime)
 
     def submit(self, spec: RunSpec, *, observer: RunObserver | None = None) -> ManagedExecution:
-        if spec.command_type not in {"exec", "reset"}:
-            raise ValueError(f"Unsupported run command type: {spec.command_type}")
-        if spec.mode == "background":
-            if spec.command_type != "exec":
-                raise ValueError(f"Unsupported run mode for {spec.command_type}: {spec.mode}")
-            return self._submit_background(spec)
-        return self._submit_foreground(spec, observer=observer)
+        plan = spec.to_plan()
+        self._validate_plan(plan)
+        if plan.mode == "background":
+            return self._submit_background(plan)
+        return self._submit_foreground(plan, observer=observer)
 
     def list_runs(
         self,
@@ -204,24 +202,16 @@ class LocalRunManager(RunManager):
         if record is None or record.code is None or record.status not in _ACTIVE_RUN_STATUSES:
             return
 
+        plan = self._plan_for_record(project_root=project_root, record=record)
         run = ExecutionRun(
             store=self._store(project_root),
             record=record,
             recording=self._recording(command_type=record.command_type, code=record.code),
             started=True,
         )
-        if record.status != "running" or record.worker_pid != os.getpid():
-            run.replace(status="running", worker_pid=os.getpid())
-        progress_sink = _ExecutionProgressSink(run)
 
         try:
-            execution = self.runtime.execute(
-                project_root=project_root,
-                session_id=record.session_id,
-                code=record.code,
-                timeout_s=30.0,
-                event_sink=progress_sink,
-            )
+            execution = self._executor.complete_background_run(plan=plan, run=run)
             updated = run.result_record(execution)
         except Exception as exc:
             updated = run.error_record(exc)
@@ -246,31 +236,22 @@ class LocalRunManager(RunManager):
 
     def _submit_foreground(
         self,
-        spec: RunSpec,
+        plan: RunPlan,
         *,
         observer: RunObserver | None,
     ) -> ManagedExecution:
-        started_new_session = False
-        if spec.command_type == "exec" and spec.ensure_started:
-            _, started_new_session = self.runtime.ensure_started(
-                project_root=spec.project_root,
-                session_id=spec.session_id,
-            )
+        started_new_session = self._ensure_plan_ready(plan)
 
         run = self._new_run(
-            project_root=spec.project_root,
-            session_id=spec.session_id,
-            command_type=spec.command_type,
-            code=spec.code,
+            project_root=plan.project_root,
+            session_id=plan.session_id,
+            command_type=plan.command_type,
+            code=plan.code,
             worker_pid=os.getpid(),
         )
 
         try:
-            execution = self._execute_foreground_operation(
-                spec=spec,
-                run=run,
-                observer=observer,
-            )
+            execution = self._executor.run_foreground(plan=plan, run=run, observer=observer)
         except Exception as exc:
             if isinstance(exc, (NoKernelRunningError, KernelNotReadyError)):
                 raise
@@ -289,69 +270,27 @@ class LocalRunManager(RunManager):
         record = run.finalize_result(execution)
         return ManagedExecution(record=record, started_new_session=started_new_session)
 
-    def _execute_foreground_operation(
-        self,
-        *,
-        spec: RunSpec,
-        run: ExecutionRun,
-        observer: RunObserver | None,
-    ):
-        if spec.command_type == "exec":
-            return self.runtime.execute(
-                project_root=spec.project_root,
-                session_id=spec.session_id,
-                code=spec.code or "",
-                timeout_s=spec.timeout_s,
-                before_backend=lambda: run.start(observer),
-                event_sink=observer,
-            )
-        if spec.command_type == "reset":
-            return self.runtime.reset(
-                project_root=spec.project_root,
-                session_id=spec.session_id,
-                timeout_s=spec.timeout_s,
-            )
-        raise ValueError(f"Unsupported run command type: {spec.command_type}")
-
-    def _submit_background(self, spec: RunSpec) -> ManagedExecution:
-        started_new_session = False
-        if spec.ensure_started:
-            _, started_new_session = self.runtime.ensure_started(
-                project_root=spec.project_root,
-                session_id=spec.session_id,
-            )
+    def _submit_background(self, plan: RunPlan) -> ManagedExecution:
+        started_new_session = self._ensure_plan_ready(plan)
 
         run = self._new_run(
-            project_root=spec.project_root,
-            session_id=spec.session_id,
-            command_type=spec.command_type,
-            code=spec.code,
+            project_root=plan.project_root,
+            session_id=plan.session_id,
+            command_type=plan.command_type,
+            code=plan.code,
             status="starting",
         )
         run.start()
 
         try:
-            process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "agentnb.cli",
-                    "_background-run",
-                    "--project",
-                    str(spec.project_root),
-                    run.record.execution_id,
-                ],
-                cwd=str(spec.project_root),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
+            record = self._executor.start_background(
+                plan=plan,
+                run=run,
             )
         except Exception as exc:
             run.finalize_error(exc)
             raise
 
-        record = replace(run.record, status="running", worker_pid=process.pid)
         return ManagedExecution(record=record, started_new_session=started_new_session)
 
     def _store(self, project_root: Path) -> ExecutionStore:
@@ -384,6 +323,39 @@ class LocalRunManager(RunManager):
 
     def _recording(self, *, command_type: str, code: str | None) -> CommandRecording:
         return self._recorder.for_execution(command_type=command_type, code=code)
+
+    def _validate_plan(self, plan: RunPlan) -> None:
+        if plan.command_type not in {"exec", "reset"}:
+            raise ValueError(f"Unsupported run command type: {plan.command_type}")
+        if plan.mode == "background" and not plan.supports_background:
+            raise ValueError(f"Unsupported run mode for {plan.command_type}: {plan.mode}")
+
+    def _ensure_plan_ready(self, plan: RunPlan) -> bool:
+        started_new_session = False
+        if plan.command_type == "exec" and plan.ensure_started:
+            _, started_new_session = self.runtime.ensure_started(
+                project_root=plan.project_root,
+                session_id=plan.session_id,
+            )
+        return started_new_session
+
+    def _plan_for_record(self, *, project_root: Path, record: ExecutionRecord) -> RunPlan:
+        if record.command_type == "exec":
+            return RunPlan.for_exec(
+                project_root=project_root,
+                session_id=record.session_id,
+                code=record.code or "",
+                mode="background",
+                timeout_s=30.0,
+            )
+        if record.command_type == "reset":
+            return RunPlan.for_reset(
+                project_root=project_root,
+                session_id=record.session_id,
+                mode="foreground",
+                timeout_s=30.0,
+            )
+        raise ValueError(f"Unsupported run command type: {record.command_type}")
 
     def _finalize_cancelled_run(
         self,
@@ -535,32 +507,6 @@ class LocalRunManager(RunManager):
             return record
         self._store(project_root).append(updated)
         return updated
-
-
-class _ExecutionProgressSink(ExecutionSink):
-    def __init__(self, run: ExecutionRun) -> None:
-        self._run = run
-        self._accumulator = ExecutionResultAccumulator()
-
-    def started(self, *, execution_id: str, session_id: str) -> None:
-        del execution_id, session_id
-
-    def accept(self, event: ExecutionEvent) -> None:
-        self._accumulator.accept(event)
-        snapshot = self._accumulator.build(duration_ms=0)
-        status = "error" if snapshot.status == "error" else "running"
-
-        self._run.replace(
-            status=status,
-            stdout=snapshot.stdout,
-            stderr=snapshot.stderr,
-            result=snapshot.result,
-            ename=snapshot.ename,
-            evalue=snapshot.evalue,
-            traceback=snapshot.traceback,
-            outputs=list(snapshot.outputs),
-            events=list(snapshot.events),
-        )
 
 
 def _terminate_process(pid: int) -> None:

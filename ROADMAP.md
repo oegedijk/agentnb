@@ -39,6 +39,7 @@ Completed foundations:
 - Session/kernel state paths and canonical session identity now flow through `StateRepository` / `SessionStateFiles` instead of being recomputed across runtime and backend layers.
 - Run records now persist explicit cancel provenance and expose stable cancellation metadata across `runs show|list` and failed-only reads.
 - Background runs now use an explicit startup lifecycle before `running`, so run reconciliation no longer depends on subprocess timing races.
+- Run execution mechanics now live behind `LocalRunExecutor`, while replay planning remains semantic and separate from durable run modeling.
 - `StateRepository` now owns persisted snapshot/export resource ids, descriptor schemas, and write-time manifest/resource validation instead of leaving those invariants to callers.
 - The test suite now has cleaner fixtures, broader behavioral/type coverage, real CLI smoke coverage, and `ty` over both `src` and `tests`.
 
@@ -50,6 +51,11 @@ Remaining prep refactors:
 - Run-control follow-up:
   - keep replay and verify execution flows on the same run-control abstraction instead of giving them their own wait/cancel/progress orchestration paths
   - keep public run semantics defined by the controller contract rather than by the current local subprocess behavior
+  - add a dedicated replay execution owner that translates semantic replay plans into executable work without teaching the planner about run-internal step representations
+  - choose an honest replay persistence model before shipping replay:
+    - either parent/child per-step run records
+    - or a first-class composite replay record shape
+  - preserve per-step provenance, source execution ids, code, outputs, and failure attribution across replay and verify flows instead of collapsing mixed work into one synthetic run snapshot
 - Backend capability follow-up:
   - grow the minimal capability contract into the app/run-control/extension boundary before adding non-local backends
   - keep features branching on declared capabilities rather than on backend type checks or local-only assumptions
@@ -99,6 +105,12 @@ Remaining prep refactors:
   - `agentnb replay --to-session <name>`
   - `agentnb verify` to restart a clean session and replay selected history or snapshot state
   - export to `.ipynb` and markdown transcript
+  - prerequisite work for replay/verify:
+    - define the replay execution boundary and typed request/response surface
+    - persist replay provenance truthfully, including per-step source execution ids and terminal outcomes
+    - decide how replay progress is observed (`follow`/`wait` on parent replay vs child executions)
+    - extend history/journal metadata so replayed and verified steps remain distinguishable from original executions
+    - add behavior-focused tests at the owning boundary for mixed `exec`/`reset` replays and partial-failure reporting
 - Better debugging:
   - traceback enrichment
   - frame/locals inspection commands

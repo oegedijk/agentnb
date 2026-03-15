@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def integration_runtime() -> KernelRuntime:
 def started_runtime_module(
     integration_runtime: KernelRuntime,
     integration_project_dir: Path,
-) -> tuple[KernelRuntime, Path]:
+) -> Iterator[tuple[KernelRuntime, Path]]:
     integration_runtime.start(integration_project_dir)
     try:
         yield integration_runtime, integration_project_dir
@@ -39,7 +40,9 @@ def started_runtime_module(
 
 
 @pytest.fixture(autouse=True)
-def clean_started_runtime(started_runtime_module: tuple[KernelRuntime, Path]) -> None:
+def clean_started_runtime(
+    started_runtime_module: tuple[KernelRuntime, Path],
+) -> Iterator[None]:
     runtime, project_dir = started_runtime_module
     reset_integration_kernel(runtime, project_dir, clear_project_modules=True)
     yield
@@ -120,19 +123,19 @@ def greet() -> str:
     assert after_reload.result == "('v2', 'v2')"
 
     visible_history = runtime.history(project_root=project_dir)
-    assert [entry["command_type"] for entry in visible_history] == ["vars", "inspect", "reload"]
-    assert [entry["label"] for entry in visible_history] == [
+    assert [entry.command_type for entry in visible_history] == ["vars", "inspect", "reload"]
+    assert [entry.label for entry in visible_history] == [
         "vars",
         "inspect my_value",
         "reload localmod",
     ]
-    assert all(entry["kind"] == "user_command" for entry in visible_history)
+    assert all(entry.kind == "user_command" for entry in visible_history)
 
     internal_history = runtime.history(project_root=project_dir, include_internal=True)
     assert len(internal_history) == 6
-    helper_entries = [entry for entry in internal_history if entry["kind"] == "kernel_execution"]
-    assert {entry["command_type"] for entry in helper_entries} == {"vars", "inspect", "reload"}
-    assert any("get_ipython" in str(entry.get("code")) for entry in helper_entries)
+    helper_entries = [entry for entry in internal_history if entry.kind == "kernel_execution"]
+    assert {entry.command_type for entry in helper_entries} == {"vars", "inspect", "reload"}
+    assert any("get_ipython" in str(entry.code) for entry in helper_entries)
 
 
 def test_ops_inspect_dataframe_like_preview(
@@ -288,9 +291,9 @@ def test_ops_history_records_errors_as_semantic_commands(
 
     visible_history = runtime.history(project_root=project_dir, errors_only=True)
     assert len(visible_history) == 1
-    assert visible_history[0]["label"] == "inspect missing_value"
-    assert visible_history[0]["kind"] == "user_command"
-    assert visible_history[0]["status"] == "error"
+    assert visible_history[0].label == "inspect missing_value"
+    assert visible_history[0].kind == "user_command"
+    assert visible_history[0].status == "error"
 
     internal_history = runtime.history(
         project_root=project_dir,
@@ -298,7 +301,7 @@ def test_ops_history_records_errors_as_semantic_commands(
         include_internal=True,
     )
     assert len(internal_history) == 2
-    assert sum(1 for entry in internal_history if entry["kind"] == "kernel_execution") == 1
+    assert sum(1 for entry in internal_history if entry.kind == "kernel_execution") == 1
 
 
 def test_ops_list_vars_compacts_dataframe_repr(
@@ -351,8 +354,12 @@ rows = conn.execute("select * from items order by id").fetchall()
     assert row_entry["repr"] == "list len=2 item_keys=id, title"
 
     inspect_payload = ops.inspect_var(project_root=project_dir, name="rows")
-    assert inspect_payload["preview"]["sample_keys"] == ["id", "title"]
-    assert inspect_payload["preview"]["sample"][0]["title"] == "a"
+    preview = inspect_payload["preview"]
+    assert preview["kind"] == "sequence-like"
+    assert preview["sample_keys"] == ["id", "title"]
+    first = preview["sample"][0]
+    assert isinstance(first, dict)
+    assert first["title"] == "a"
 
 
 def test_ops_inspect_sequence_preview(started_runtime_module: tuple[KernelRuntime, Path]) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
 from unittest.mock import Mock
@@ -40,7 +41,7 @@ def integration_runtime() -> KernelRuntime:
 def started_runtime_module(
     integration_runtime: KernelRuntime,
     integration_project_dir: Path,
-) -> tuple[KernelRuntime, Path]:
+) -> Iterator[tuple[KernelRuntime, Path]]:
     integration_runtime.start(integration_project_dir)
     try:
         yield integration_runtime, integration_project_dir
@@ -52,7 +53,7 @@ def started_runtime_module(
 @pytest.fixture
 def started_runtime(
     started_runtime_module: tuple[KernelRuntime, Path],
-) -> tuple[KernelRuntime, Path]:
+) -> Iterator[tuple[KernelRuntime, Path]]:
     runtime, project_dir = started_runtime_module
     reset_integration_kernel(runtime, project_dir)
     yield started_runtime_module
@@ -337,7 +338,9 @@ def test_runtime_resolve_session_id_raises_when_multiple_live_sessions_exist(
         )
 
 
-def test_runtime_wait_for_ready_returns_when_status_becomes_alive(project_dir: Path) -> None:
+def test_runtime_wait_for_ready_returns_when_status_becomes_alive(
+    project_dir: Path, mocker
+) -> None:
     backend = Mock()
     runtime = KernelRuntime(backend=backend)
 
@@ -346,7 +349,7 @@ def test_runtime_wait_for_ready_returns_when_status_becomes_alive(project_dir: P
         KernelStatus(alive=False),
         KernelStatus(alive=True, pid=123),
     ]
-    runtime.status = Mock(side_effect=status_calls)  # type: ignore[method-assign]
+    mocker.patch.object(runtime, "status", side_effect=status_calls)
 
     ready = runtime.wait_for_ready(
         project_root=project_dir,
@@ -359,10 +362,10 @@ def test_runtime_wait_for_ready_returns_when_status_becomes_alive(project_dir: P
     assert ready.pid == 123
 
 
-def test_runtime_wait_for_ready_times_out(project_dir: Path) -> None:
+def test_runtime_wait_for_ready_times_out(project_dir: Path, mocker) -> None:
     backend = Mock()
     runtime = KernelRuntime(backend=backend)
-    runtime.status = Mock(return_value=KernelStatus(alive=False))  # type: ignore[method-assign]
+    mocker.patch.object(runtime, "status", return_value=KernelStatus(alive=False))
 
     with pytest.raises(KernelWaitTimedOutError):
         runtime.wait_for_ready(
@@ -399,13 +402,17 @@ def test_runtime_status_reports_busy_when_command_lock_exists(project_dir: Path)
     assert status.busy is True
 
 
-def test_runtime_wait_for_idle_returns_when_status_becomes_not_busy(project_dir: Path) -> None:
+def test_runtime_wait_for_idle_returns_when_status_becomes_not_busy(
+    project_dir: Path, mocker
+) -> None:
     runtime = KernelRuntime(backend=Mock())
-    runtime.status = Mock(  # type: ignore[method-assign]
+    mocker.patch.object(
+        runtime,
+        "status",
         side_effect=[
             KernelStatus(alive=True, busy=True),
             KernelStatus(alive=True, busy=False),
-        ]
+        ],
     )
 
     idle = runtime.wait_for_idle(
@@ -419,9 +426,9 @@ def test_runtime_wait_for_idle_returns_when_status_becomes_not_busy(project_dir:
     assert idle.busy is False
 
 
-def test_runtime_wait_for_idle_times_out(project_dir: Path) -> None:
+def test_runtime_wait_for_idle_times_out(project_dir: Path, mocker) -> None:
     runtime = KernelRuntime(backend=Mock())
-    runtime.status = Mock(return_value=KernelStatus(alive=True, busy=True))  # type: ignore[method-assign]
+    mocker.patch.object(runtime, "status", return_value=KernelStatus(alive=True, busy=True))
 
     with pytest.raises(KernelWaitTimedOutError):
         runtime.wait_for_idle(

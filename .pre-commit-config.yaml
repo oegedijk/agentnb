@@ -13,7 +13,7 @@ repos:
         types_or: [python, pyi]
       - id: ty-check
         name: ty check
-        entry: uv run ty check src
+        entry: uv run ty check src tests
         language: system
         pass_filenames: false
-        files: ^(src/.*\.py|pyproject\.toml)$
+        files: ^(src/.*\.py|tests/.*\.py|pyproject\.toml)$

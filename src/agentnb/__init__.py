@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from .contracts import CommandResponse, ExecutionResult, KernelStatus
-from .provisioner import DoctorReport, KernelProvisioner, ProvisionResult
+from .kernel.provisioner import DoctorReport, KernelProvisioner, ProvisionResult
+from .payloads import DoctorPayload
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID, resolve_project_root
 
@@ -72,7 +73,7 @@ def doctor_environment(
     python_executable: str | Path | None = None,
     auto_fix: bool = False,
     session_id: str = DEFAULT_SESSION_ID,
-) -> dict[str, object]:
+) -> DoctorPayload:
     runtime = KernelRuntime()
     project_root = resolve_project_root(override=Path(project))
     python_path = Path(python_executable) if python_executable is not None else None

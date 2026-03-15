@@ -3,26 +3,39 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import click
 
-from .compact import (
-    compact_execution_payload,
-    compact_history_entry,
-    compact_inspect_payload,
-    compact_run_entry,
-    compact_traceback,
+from .app import (
+    AgentNBApp,
+    DoctorRequest,
+    ExecRequest,
+    HistoryRequest,
+    InspectRequest,
+    InterruptRequest,
+    ReloadRequest,
+    ResetRequest,
+    RunLookupRequest,
+    RunsCancelRequest,
+    RunsFollowRequest,
+    RunsListRequest,
+    RunsWaitRequest,
+    SessionsDeleteRequest,
+    SessionsListRequest,
+    StartRequest,
+    StatusRequest,
+    StopRequest,
+    VarsRequest,
+    suggestions_for_command,
 )
 from .contracts import (
     CommandResponse,
     ExecutionEvent,
     ExecutionSink,
     error_response,
-    success_response,
 )
 from .errors import AgentNBException, InvalidInputError
 from .execution import ExecutionService
@@ -34,6 +47,7 @@ from .session import DEFAULT_SESSION_ID, resolve_project_root, validate_session_
 runtime = KernelRuntime()
 ops = NotebookOps(runtime)
 executions = ExecutionService(runtime)
+application = AgentNBApp(runtime=runtime, executions=executions, ops=ops)
 _ROOT_FLAG_NAMES = {"--json", "--agent", "--quiet", "--no-suggestions"}
 
 
@@ -126,7 +140,7 @@ def main(
         ctx.exit(0)
 
 
-def project_option(func: Callable[..., object]) -> Callable[..., object]:
+def project_option(func):
     return click.option(
         "--project",
         type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
@@ -135,11 +149,11 @@ def project_option(func: Callable[..., object]) -> Callable[..., object]:
     )(func)
 
 
-def json_option(func: Callable[..., object]) -> Callable[..., object]:
+def json_option(func):
     return click.option("--json", "as_json", is_flag=True, help="Output as JSON")(func)
 
 
-def session_option(func: Callable[..., object]) -> Callable[..., object]:
+def session_option(func):
     return click.option(
         "--session",
         "session_id",
@@ -149,7 +163,7 @@ def session_option(func: Callable[..., object]) -> Callable[..., object]:
     )(func)
 
 
-def python_option(func: Callable[..., object]) -> Callable[..., object]:
+def python_option(func):
     return click.option(
         "--python",
         "python_executable",
@@ -270,239 +284,6 @@ def _render_suggestions_block(suggestions: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _suggestions(
-    command_name: str,
-    response_status: str,
-    data: dict[str, object],
-    *,
-    error_code: str | None = None,
-) -> list[str]:
-    if error_code == "AMBIGUOUS_SESSION":
-        return [
-            "Run `agentnb sessions list --json` to see the live session names.",
-            f"Retry with `agentnb {command_name} --session NAME --json` to target one explicitly.",
-        ]
-    if command_name == "start":
-        return [
-            'Run `agentnb exec "..." --json` to execute code in the live kernel.',
-            "Run `agentnb vars --recent 5 --json` to inspect the newest namespace changes.",
-            "Run `agentnb status --json` to confirm the kernel is still alive.",
-        ]
-    if command_name == "status":
-        if data.get("alive"):
-            return [
-                'Run `agentnb exec "..." --json` to execute code.',
-                "Run `agentnb vars --recent 5 --json` to inspect current variables.",
-                "Run `agentnb stop --json` when the session is no longer needed.",
-            ]
-        return [
-            "Run `agentnb start --json` to start a project-scoped kernel.",
-            "Run `agentnb doctor --json` if startup has been failing.",
-        ]
-    if command_name == "exec":
-        if response_status == "ok":
-            if data.get("background"):
-                return [
-                    "Run `agentnb runs wait EXECUTION_ID --json` to wait for the final result.",
-                    (
-                        "Run `agentnb runs show EXECUTION_ID --json` "
-                        "to inspect the current run record."
-                    ),
-                    (
-                        "Run `agentnb runs cancel EXECUTION_ID --json` "
-                        "to stop a long-running background run."
-                    ),
-                ]
-            return [
-                "Run `agentnb vars --recent 5 --json` to inspect the updated namespace.",
-                "Run `agentnb inspect NAME --json` to inspect a specific variable.",
-                "Run `agentnb history --json` to review prior executions.",
-            ]
-        return [
-            "Run `agentnb history --errors --json` to review recent failures.",
-            "Run `agentnb interrupt --json` if execution may still be stuck.",
-            "Run `agentnb reset --json` if the namespace needs a clean slate.",
-        ]
-    if command_name == "vars":
-        return [
-            "Run `agentnb inspect NAME --json` for details on a variable.",
-            "Run `agentnb vars --match TEXT --json` to filter noisy namespaces by name.",
-            'Run `agentnb exec "..." --json` to add or modify live state.',
-        ]
-    if command_name == "inspect":
-        return [
-            "Run `agentnb vars --recent 5 --json` to inspect more of the namespace.",
-            'Run `agentnb exec "..." --json` to probe or transform that value.',
-        ]
-    if command_name == "reload":
-        return [
-            'Run `agentnb exec "..." --json` to verify the reloaded module behavior.',
-            "Run `agentnb reset --json` if stale state is still causing issues.",
-        ]
-    if command_name == "history":
-        return [
-            'Run `agentnb exec "..." --json` to continue iterating.',
-            "Run `agentnb history --errors --json` to focus on failures only.",
-        ]
-    if command_name == "interrupt":
-        return [
-            'Retry with `agentnb exec "..." --json` once the kernel is idle.',
-            "Run `agentnb reset --json` if interrupted code left partial state behind.",
-        ]
-    if command_name == "reset":
-        return [
-            'Run `agentnb exec "setup_code" --json` to rebuild required state.',
-            "Run `agentnb vars --json` to confirm the namespace is clean.",
-        ]
-    if command_name == "stop":
-        return [
-            "Run `agentnb start --json` to create a fresh kernel later.",
-        ]
-    if command_name == "doctor":
-        if data.get("ready"):
-            return [
-                "Run `agentnb start --json` to start the kernel.",
-            ]
-        return [
-            "Run `agentnb doctor --fix --json` to attempt automatic fixes.",
-            "Run `agentnb start --python /path/to/python --json` to try a specific interpreter.",
-        ]
-    if command_name == "sessions-list":
-        if not data.get("sessions"):
-            return [
-                "Run `agentnb start --json` to start the default session.",
-                (
-                    'Run `agentnb exec --ensure-started --json "..."` '
-                    "to start and execute in one step."
-                ),
-            ]
-        return [
-            "Run `agentnb start --session NAME --json` to start another named session.",
-            "Run `agentnb status --session NAME --json` to inspect one session.",
-        ]
-    if command_name == "sessions-delete":
-        return [
-            "Run `agentnb sessions list --json` to confirm the remaining sessions.",
-        ]
-    if command_name == "runs-list":
-        return [
-            "Run `agentnb runs show EXECUTION_ID --json` to inspect one run in detail.",
-            "Run `agentnb history --json` to review the semantic session history view.",
-        ]
-    if command_name == "runs-show":
-        run = data.get("run")
-        run_payload = cast(dict[str, object], run) if isinstance(run, dict) else None
-        run_status = run_payload.get("status") if run_payload is not None else None
-        if run_status == "running":
-            return [
-                (
-                    "Run `agentnb runs follow EXECUTION_ID --json` "
-                    "to stream new events until the run finishes."
-                ),
-                "Run `agentnb runs wait EXECUTION_ID --json` to block for the final snapshot.",
-                "Run `agentnb runs cancel EXECUTION_ID --json` to stop the background run.",
-            ]
-        return [
-            "Run `agentnb runs list --json` to inspect more recorded runs.",
-            "Run `agentnb history --json` to review the session-level history view.",
-        ]
-    if command_name == "runs-follow":
-        return [
-            "Run `agentnb runs show EXECUTION_ID --json` to inspect the latest persisted snapshot.",
-        ]
-    if command_name == "runs-wait":
-        return [
-            "Run `agentnb runs show EXECUTION_ID --json` to inspect the completed run.",
-        ]
-    if command_name == "runs-cancel":
-        if data.get("cancel_requested"):
-            if data.get("session_outcome") == "preserved":
-                session_id = data.get("session_id") or "default"
-                return [
-                    (
-                        f"Run `agentnb status --session {session_id} --wait-idle --json` "
-                        "to confirm the session is ready for more work."
-                    ),
-                    (
-                        "Run `agentnb runs show EXECUTION_ID --json` "
-                        "to inspect the cancelled run record."
-                    ),
-                ]
-            if data.get("session_outcome") == "stopped":
-                return [
-                    (
-                        "Run `agentnb start --session NAME --json` "
-                        "to start a fresh session explicitly."
-                    ),
-                    (
-                        'Run `agentnb exec --ensure-started "..." --json` '
-                        "to restart and execute in one step."
-                    ),
-                ]
-        return [
-            "Run `agentnb runs show EXECUTION_ID --json` to inspect the persisted run snapshot.",
-        ]
-    return []
-
-
-def _execute_command(
-    command_name: str,
-    project: Path | None,
-    as_json: bool,
-    session_id: str | None,
-    require_live_session: bool,
-    handler: Callable[[Path, str], dict[str, object]],
-) -> None:
-    project_root = resolve_project_root(cwd=Path.cwd(), override=project)
-    response_session_id = session_id or DEFAULT_SESSION_ID
-
-    try:
-        resolved_session_id = runtime.resolve_session_id(
-            project_root=project_root,
-            requested_session_id=session_id,
-            require_live_session=require_live_session,
-        )
-        response_session_id = resolved_session_id
-        data = handler(project_root, resolved_session_id)
-        response = success_response(
-            command=command_name,
-            project=str(project_root),
-            session_id=response_session_id,
-            data=data,
-            suggestions=_suggestions(command_name, "ok", data),
-        )
-    except AgentNBException as exc:
-        response = error_response(
-            command=command_name,
-            project=str(project_root),
-            session_id=response_session_id,
-            code=exc.code,
-            message=exc.message,
-            ename=exc.ename,
-            evalue=exc.evalue,
-            traceback=compact_traceback(exc.traceback),
-            data=exc.data,
-            suggestions=_suggestions(
-                command_name,
-                "error",
-                exc.data,
-                error_code=exc.code,
-            ),
-        )
-    except Exception as exc:
-        response = error_response(
-            command=command_name,
-            project=str(project_root),
-            session_id=response_session_id,
-            code="INTERNAL_ERROR",
-            message=str(exc),
-            ename=type(exc).__name__,
-            evalue=str(exc),
-            suggestions=_suggestions(command_name, "error", {}, error_code="INTERNAL_ERROR"),
-        )
-    _emit(response, as_json=as_json)
-
-
 @main.command()
 @project_option
 @session_option
@@ -527,19 +308,13 @@ def start(
     exact install command if ipykernel is missing.
     """
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        status, started_new = runtime.start(
-            project_root=project_root,
-            session_id=session_id,
-            python_executable=python_executable,
-            auto_install=auto_install,
-        )
-        payload = status.to_dict()
-        payload["started_new"] = started_new
-        payload["auto_install"] = auto_install
-        return payload
-
-    _execute_command("start", project, as_json, session_id, False, handler)
+    request = StartRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        python_executable=python_executable,
+        auto_install=auto_install,
+    )
+    _emit(application.start(request), as_json=as_json)
 
 
 @main.command("exec")
@@ -611,7 +386,7 @@ def exec_cmd(
             ename=exc.ename,
             evalue=exc.evalue,
             traceback=exc.traceback,
-            suggestions=_suggestions("exec", "error", {}),
+            suggestions=suggestions_for_command("exec", "error", {}),
         )
         if stream:
             _emit_stream_completion(response, as_json=as_json)
@@ -619,177 +394,32 @@ def exec_cmd(
             _emit(response, as_json=as_json)
         return
 
-    if background and output_selector is not None:
-        project_root = resolve_project_root(cwd=Path.cwd(), override=project)
-        response = error_response(
-            command="exec",
-            project=str(project_root),
-            session_id=session_id or DEFAULT_SESSION_ID,
-            code="INVALID_INPUT",
-            message="Output selectors are not supported with --background.",
-            suggestions=_suggestions("exec", "error", {}, error_code="INVALID_INPUT"),
-        )
-        _emit(response, as_json=as_json)
-        return
-
-    if stream and background:
-        project_root = resolve_project_root(cwd=Path.cwd(), override=project)
-        response = error_response(
-            command="exec",
-            project=str(project_root),
-            session_id=session_id or DEFAULT_SESSION_ID,
-            code="INVALID_INPUT",
-            message="--stream and --background cannot be used together.",
-            suggestions=_suggestions("exec", "error", {}, error_code="INVALID_INPUT"),
-        )
-        if stream:
-            _emit_stream_completion(response, as_json=as_json)
-        else:
-            _emit(response, as_json=as_json)
-        return
-
-    if stream and output_selector is not None:
-        project_root = resolve_project_root(cwd=Path.cwd(), override=project)
-        response = error_response(
-            command="exec",
-            project=str(project_root),
-            session_id=session_id or DEFAULT_SESSION_ID,
-            code="INVALID_INPUT",
-            message="Output selectors are not supported with --stream.",
-            suggestions=_suggestions("exec", "error", {}, error_code="INVALID_INPUT"),
-        )
-        _emit_stream_completion(response, as_json=as_json)
-        return
+    request = ExecRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        code=source,
+        session_id=session_id,
+        timeout_s=timeout,
+        ensure_started=ensure_started,
+        background=background,
+        stream=stream,
+        output_selector=output_selector,
+    )
 
     if stream:
-        _execute_streaming_exec(
-            source=source,
-            timeout=timeout,
-            ensure_started=ensure_started,
-            project=project,
-            session_id=session_id,
-            as_json=as_json,
-        )
+        _execute_streaming_exec(request=request, as_json=as_json)
         return
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        if background:
-            managed = executions.start_background_code(
-                project_root=project_root,
-                session_id=session_id,
-                code=source,
-                ensure_started=ensure_started,
-            )
-        else:
-            managed = executions.execute_code(
-                project_root=project_root,
-                session_id=session_id,
-                code=source,
-                timeout_s=timeout,
-                ensure_started=ensure_started,
-            )
-        payload = compact_execution_payload(managed.record.to_execution_payload())
-        if background:
-            payload["background"] = True
-        if ensure_started:
-            payload["ensured_started"] = True
-            payload["started_new_session"] = managed.started_new_session
-        if output_selector is not None:
-            payload["selected_output"] = output_selector
-            payload["selected_text"] = _select_exec_output(payload, output_selector)
-        if not background and managed.record.status == "error":
-            raise AgentNBException(
-                code="EXECUTION_ERROR",
-                message="Execution failed",
-                ename=managed.record.ename,
-                evalue=managed.record.evalue,
-                traceback=managed.record.traceback,
-                data=payload,
-            )
-        return payload
-
-    _execute_command("exec", project, as_json, session_id, True, handler)
+    _emit(application.exec(request), as_json=as_json)
 
 
 def _execute_streaming_exec(
     *,
-    source: str,
-    timeout: float,
-    ensure_started: bool,
-    project: Path | None,
-    session_id: str | None,
+    request: ExecRequest,
     as_json: bool,
 ) -> None:
-    project_root = resolve_project_root(cwd=Path.cwd(), override=project)
-    response_session_id = session_id or DEFAULT_SESSION_ID
     options = _current_render_options(local_as_json=as_json)
     stream: ExecutionSink = JsonExecutionStream() if options.as_json else HumanExecutionStream()
-
-    try:
-        resolved_session_id = runtime.resolve_session_id(
-            project_root=project_root,
-            requested_session_id=session_id,
-            require_live_session=True,
-        )
-        response_session_id = resolved_session_id
-        managed = executions.execute_code(
-            project_root=project_root,
-            session_id=resolved_session_id,
-            code=source,
-            timeout_s=timeout,
-            ensure_started=ensure_started,
-            event_sink=stream,
-        )
-        payload = compact_execution_payload(managed.record.to_execution_payload())
-        if ensure_started:
-            payload["ensured_started"] = True
-            payload["started_new_session"] = managed.started_new_session
-        if managed.record.status == "error":
-            response = error_response(
-                command="exec",
-                project=str(project_root),
-                session_id=response_session_id,
-                code="EXECUTION_ERROR",
-                message="Execution failed",
-                ename=managed.record.ename,
-                evalue=managed.record.evalue,
-                traceback=compact_traceback(managed.record.traceback),
-                data=payload,
-                suggestions=_suggestions("exec", "error", payload, error_code="EXECUTION_ERROR"),
-            )
-        else:
-            response = success_response(
-                command="exec",
-                project=str(project_root),
-                session_id=response_session_id,
-                data=payload,
-                suggestions=_suggestions("exec", "ok", payload),
-            )
-    except AgentNBException as exc:
-        response = error_response(
-            command="exec",
-            project=str(project_root),
-            session_id=response_session_id,
-            code=exc.code,
-            message=exc.message,
-            ename=exc.ename,
-            evalue=exc.evalue,
-            traceback=compact_traceback(exc.traceback),
-            data=exc.data,
-            suggestions=_suggestions("exec", "error", exc.data, error_code=exc.code),
-        )
-    except Exception as exc:
-        response = error_response(
-            command="exec",
-            project=str(project_root),
-            session_id=response_session_id,
-            code="INTERNAL_ERROR",
-            message=str(exc),
-            ename=type(exc).__name__,
-            evalue=str(exc),
-            suggestions=_suggestions("exec", "error", {}, error_code="INTERNAL_ERROR"),
-        )
-
+    response = application.exec(request, event_sink=stream)
     _emit_stream_completion(response, as_json=as_json, stream=stream)
 
 
@@ -821,18 +451,14 @@ def vars_cmd(
     the namespace gets noisy.
     """
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        values = ops.list_vars(project_root=project_root, session_id=session_id)
-        if match_text:
-            match_lower = match_text.lower()
-            values = [item for item in values if match_lower in str(item["name"]).lower()]
-        if recent is not None:
-            values = values[-recent:]
-        if not include_types:
-            values = [{"name": item["name"], "repr": item["repr"]} for item in values]
-        return {"vars": values}
-
-    _execute_command("vars", project, as_json, session_id, True, handler)
+    request = VarsRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        include_types=include_types,
+        match_text=match_text,
+        recent=recent,
+    )
+    _emit(application.vars(request), as_json=as_json)
 
 
 @main.command("inspect")
@@ -847,11 +473,12 @@ def inspect_cmd(name: str, project: Path | None, session_id: str | None, as_json
     and dicts get a compact structural preview instead of a generic repr.
     """
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        payload = ops.inspect_var(project_root=project_root, session_id=session_id, name=name)
-        return {"inspect": compact_inspect_payload(payload)}
-
-    _execute_command("inspect", project, as_json, session_id, True, handler)
+    request = InspectRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        name=name,
+    )
+    _emit(application.inspect(request), as_json=as_json)
 
 
 @main.command("reload")
@@ -869,13 +496,12 @@ def reload_cmd(
     report includes rebound names and possible stale objects.
     """
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        payload = ops.reload_module(
-            project_root=project_root, session_id=session_id, module_name=module
-        )
-        return payload
-
-    _execute_command("reload", project, as_json, session_id, True, handler)
+    request = ReloadRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        module_name=module,
+    )
+    _emit(application.reload(request), as_json=as_json)
 
 
 @main.command()
@@ -912,28 +538,14 @@ def status(
     if wait and wait_idle:
         raise click.UsageError("Use either --wait or --wait-idle, not both.")
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        if wait_idle:
-            payload = runtime.wait_for_idle(
-                project_root=project_root,
-                session_id=session_id,
-                timeout_s=timeout,
-            ).to_dict()
-            payload["waited"] = True
-            payload["waited_for"] = "idle"
-            return payload
-        if wait:
-            payload = runtime.wait_for_ready(
-                project_root=project_root,
-                session_id=session_id,
-                timeout_s=timeout,
-            ).to_dict()
-            payload["waited"] = True
-            payload["waited_for"] = "ready"
-            return payload
-        return runtime.status(project_root=project_root, session_id=session_id).to_dict()
-
-    _execute_command("status", project, as_json, session_id, True, handler)
+    wait_for = "idle" if wait_idle else "ready" if wait else None
+    request = StatusRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        wait_for=wait_for,
+        timeout_s=timeout,
+    )
+    _emit(application.status(request), as_json=as_json)
 
 
 @main.command()
@@ -960,24 +572,15 @@ def history(
     executions. History entries are compact summaries by default.
     """
 
-    if latest and last is not None:
-        raise click.UsageError("Use either --latest or --last, not both.")
-
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        entries = runtime.history(
-            project_root=project_root,
-            session_id=session_id,
-            errors_only=errors,
-            include_internal=include_internal,
-        )
-        entries = [compact_history_entry(entry) for entry in entries]
-        if latest:
-            entries = entries[-1:]
-        elif last is not None:
-            entries = entries[-last:]
-        return {"entries": entries}
-
-    _execute_command("history", project, as_json, session_id, True, handler)
+    request = HistoryRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        errors=errors,
+        latest=latest,
+        last=last,
+        include_internal=include_internal,
+    )
+    _emit(application.history(request), as_json=as_json)
 
 
 @main.command()
@@ -987,11 +590,11 @@ def history(
 def interrupt(project: Path | None, session_id: str | None, as_json: bool) -> None:
     """Interrupt the currently running execution without stopping the kernel."""
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        runtime.interrupt(project_root=project_root, session_id=session_id)
-        return {"interrupted": True}
-
-    _execute_command("interrupt", project, as_json, session_id, True, handler)
+    request = InterruptRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+    )
+    _emit(application.interrupt(request), as_json=as_json)
 
 
 @main.command()
@@ -1002,25 +605,12 @@ def interrupt(project: Path | None, session_id: str | None, as_json: bool) -> No
 def reset(timeout: float, project: Path | None, session_id: str | None, as_json: bool) -> None:
     """Clear user state from the kernel while keeping the process alive."""
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        managed = executions.reset_session(
-            project_root=project_root,
-            session_id=session_id,
-            timeout_s=timeout,
-        )
-        payload = compact_execution_payload(managed.record.to_execution_payload())
-        if managed.record.status == "error":
-            raise AgentNBException(
-                code="EXECUTION_ERROR",
-                message="Reset failed",
-                ename=managed.record.ename,
-                evalue=managed.record.evalue,
-                traceback=managed.record.traceback,
-                data=payload,
-            )
-        return payload
-
-    _execute_command("reset", project, as_json, session_id, True, handler)
+    request = ResetRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        timeout_s=timeout,
+    )
+    _emit(application.reset(request), as_json=as_json)
 
 
 @main.command()
@@ -1030,11 +620,11 @@ def reset(timeout: float, project: Path | None, session_id: str | None, as_json:
 def stop(project: Path | None, session_id: str | None, as_json: bool) -> None:
     """Shut down the project's kernel and clear the saved session metadata."""
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        runtime.stop(project_root=project_root, session_id=session_id)
-        return {"stopped": True}
-
-    _execute_command("stop", project, as_json, session_id, True, handler)
+    request = StopRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+    )
+    _emit(application.stop(request), as_json=as_json)
 
 
 @main.command()
@@ -1056,15 +646,13 @@ def doctor(
     is missing. Pass --fix to attempt automatic remediation when supported.
     """
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        return runtime.doctor(
-            project_root=project_root,
-            session_id=session_id,
-            python_executable=python_executable,
-            auto_fix=fix,
-        )
-
-    _execute_command("doctor", project, as_json, session_id, False, handler)
+    request = DoctorRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        python_executable=python_executable,
+        auto_fix=fix,
+    )
+    _emit(application.doctor(request), as_json=as_json)
 
 
 @main.group("sessions")
@@ -1078,11 +666,10 @@ def sessions_group() -> None:
 def sessions_list(project: Path | None, as_json: bool) -> None:
     """List live sessions recorded for the current project."""
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        del session_id
-        return {"sessions": runtime.list_sessions(project_root=project_root)}
-
-    _execute_command("sessions-list", project, as_json, DEFAULT_SESSION_ID, False, handler)
+    request = SessionsListRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project)
+    )
+    _emit(application.sessions_list(request), as_json=as_json)
 
 
 @sessions_group.command("delete")
@@ -1092,11 +679,11 @@ def sessions_list(project: Path | None, as_json: bool) -> None:
 def sessions_delete(session_name: str, project: Path | None, as_json: bool) -> None:
     """Delete one named session and stop its kernel if it is still running."""
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        del session_id
-        return runtime.delete_session(project_root=project_root, session_id=session_name)
-
-    _execute_command("sessions-delete", project, as_json, session_name, False, handler)
+    request = SessionsDeleteRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_name=session_name,
+    )
+    _emit(application.sessions_delete(request), as_json=as_json)
 
 
 @main.group("runs")
@@ -1119,19 +706,13 @@ def runs_list(
 ) -> None:
     """List persisted exec/reset runs for the current project."""
 
-    def handler(project_root: Path, resolved_session_id: str) -> dict[str, object]:
-        session_filter = session_id if session_id is not None else None
-        entries = executions.list_runs(
-            project_root=project_root,
-            session_id=session_filter,
-            errors_only=errors,
-        )
-        entries = [compact_run_entry(entry) for entry in entries]
-        if last is not None:
-            entries = entries[-last:]
-        return {"runs": entries}
-
-    _execute_command("runs-list", project, as_json, session_id, False, handler)
+    request = RunsListRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        errors=errors,
+        last=last,
+    )
+    _emit(application.runs_list(request), as_json=as_json)
 
 
 @runs_group.command("show")
@@ -1141,11 +722,11 @@ def runs_list(
 def runs_show(execution_id: str, project: Path | None, as_json: bool) -> None:
     """Show a persisted snapshot of one exec/reset run."""
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        del session_id
-        return {"run": executions.get_run(project_root=project_root, execution_id=execution_id)}
-
-    _execute_command("runs-show", project, as_json, DEFAULT_SESSION_ID, False, handler)
+    request = RunLookupRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        execution_id=execution_id,
+    )
+    _emit(application.runs_show(request), as_json=as_json)
 
 
 @runs_group.command("wait")
@@ -1156,17 +737,12 @@ def runs_show(execution_id: str, project: Path | None, as_json: bool) -> None:
 def runs_wait(execution_id: str, timeout: float, project: Path | None, as_json: bool) -> None:
     """Wait for one background run to finish and return its final snapshot."""
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        del session_id
-        return {
-            "run": executions.wait_for_run(
-                project_root=project_root,
-                execution_id=execution_id,
-                timeout_s=timeout,
-            )
-        }
-
-    _execute_command("runs-wait", project, as_json, DEFAULT_SESSION_ID, False, handler)
+    request = RunsWaitRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        execution_id=execution_id,
+        timeout_s=timeout,
+    )
+    _emit(application.runs_wait(request), as_json=as_json)
 
 
 @runs_group.command("follow")
@@ -1179,35 +755,12 @@ def runs_follow(execution_id: str, timeout: float, project: Path | None, as_json
     project_root = resolve_project_root(cwd=Path.cwd(), override=project)
     options = _current_render_options(local_as_json=as_json)
     stream: ExecutionSink = JsonExecutionStream() if options.as_json else HumanExecutionStream()
-
-    try:
-        run = executions.follow_run(
-            project_root=project_root,
-            execution_id=execution_id,
-            timeout_s=timeout,
-            event_sink=stream,
-        )
-        response = success_response(
-            command="runs-follow",
-            project=str(project_root),
-            session_id=run.get("session_id", DEFAULT_SESSION_ID),
-            data={"run": run},
-            suggestions=_suggestions("runs-follow", "ok", {"run": run}),
-        )
-    except AgentNBException as exc:
-        response = error_response(
-            command="runs-follow",
-            project=str(project_root),
-            session_id=DEFAULT_SESSION_ID,
-            code=exc.code,
-            message=exc.message,
-            ename=exc.ename,
-            evalue=exc.evalue,
-            traceback=compact_traceback(exc.traceback),
-            data=exc.data,
-            suggestions=_suggestions("runs-follow", "error", exc.data, error_code=exc.code),
-        )
-
+    request = RunsFollowRequest(
+        project_root=project_root,
+        execution_id=execution_id,
+        timeout_s=timeout,
+    )
+    response = application.runs_follow(request, event_sink=stream)
     _emit_stream_completion(response, as_json=as_json, stream=stream)
 
 
@@ -1218,11 +771,11 @@ def runs_follow(execution_id: str, timeout: float, project: Path | None, as_json
 def runs_cancel(execution_id: str, project: Path | None, as_json: bool) -> None:
     """Cancel one running background run and report what happened to the session."""
 
-    def handler(project_root: Path, session_id: str) -> dict[str, object]:
-        del session_id
-        return executions.cancel_run(project_root=project_root, execution_id=execution_id)
-
-    _execute_command("runs-cancel", project, as_json, DEFAULT_SESSION_ID, False, handler)
+    request = RunsCancelRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        execution_id=execution_id,
+    )
+    _emit(application.runs_cancel(request), as_json=as_json)
 
 
 @main.command("_background-run", hidden=True)
@@ -1320,14 +873,6 @@ def _normalize_root_flags(args: list[str]) -> list[str]:
     if not moved_flags:
         return args
     return [*leading, *moved_flags, command, *remaining_tail, *suffix]
-
-
-def _select_exec_output(payload: dict[str, object], selector: str) -> str:
-    if selector == "result":
-        result = payload.get("result")
-        return "" if result is None else str(result)
-    value = payload.get(selector)
-    return "" if value is None else str(value)
 
 
 if __name__ == "__main__":

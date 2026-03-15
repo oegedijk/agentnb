@@ -1,18 +1,37 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal, TypedDict, cast
 
 from .contracts import ExecutionResult, utc_now_iso
-from .session import DEFAULT_SESSION_ID, STATE_DIR_NAME
-
-HISTORY_FILE_NAME = "history.jsonl"
+from .execution_output import compatibility_output
+from .session import DEFAULT_SESSION_ID
+from .state import StateRepository
 
 HistoryKind = Literal["user_command", "kernel_execution"]
 
 _PREVIEW_LIMIT = 160
+
+
+class HistoryRecordPayload(TypedDict, total=False):
+    kind: HistoryKind
+    ts: str
+    session_id: str
+    execution_id: str
+    status: str
+    duration_ms: int
+    command_type: str
+    label: str
+    user_visible: bool
+    input: str
+    code: str
+    origin: str
+    error_type: str
+    result_preview: str
+    stdout_preview: str
 
 
 @dataclass(slots=True)
@@ -33,8 +52,8 @@ class HistoryRecord:
     result_preview: str | None = None
     stdout_preview: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+    def to_dict(self) -> HistoryRecordPayload:
+        payload: HistoryRecordPayload = {
             "kind": self.kind,
             "ts": self.ts,
             "session_id": self.session_id,
@@ -44,22 +63,24 @@ class HistoryRecord:
             "label": self.label,
             "user_visible": self.user_visible,
         }
-        optional_fields = {
-            "execution_id": self.execution_id,
-            "input": self.input,
-            "code": self.code,
-            "origin": self.origin,
-            "error_type": self.error_type,
-            "result_preview": self.result_preview,
-            "stdout_preview": self.stdout_preview,
-        }
-        for key, value in optional_fields.items():
-            if value is not None:
-                payload[key] = value
+        if self.execution_id is not None:
+            payload["execution_id"] = self.execution_id
+        if self.input is not None:
+            payload["input"] = self.input
+        if self.code is not None:
+            payload["code"] = self.code
+        if self.origin is not None:
+            payload["origin"] = self.origin
+        if self.error_type is not None:
+            payload["error_type"] = self.error_type
+        if self.result_preview is not None:
+            payload["result_preview"] = self.result_preview
+        if self.stdout_preview is not None:
+            payload["stdout_preview"] = self.stdout_preview
         return payload
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> HistoryRecord:
+    def from_dict(cls, payload: Mapping[str, object]) -> HistoryRecord:
         return cls(
             kind=cast(
                 HistoryKind,
@@ -83,14 +104,16 @@ class HistoryRecord:
 
 
 class HistoryStore:
-    def __init__(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
-        self.project_root = project_root.resolve()
+    def __init__(self, project_root: Path, session_id: str | None = DEFAULT_SESSION_ID) -> None:
+        self.repository = StateRepository(project_root)
+        self.project_root = self.repository.project_root
         self.session_id = session_id
-        self.state_dir = self.project_root / STATE_DIR_NAME
-        self.history_file = self.state_dir / HISTORY_FILE_NAME
+        self.state_dir = self.repository.state_dir
+        self.history_file = self.repository.history_file
 
     def append(self, record: HistoryRecord) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.repository.ensure_compatible()
+        self.repository.ensure_state_dir()
         with self.history_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=True))
             handle.write("\n")
@@ -101,6 +124,7 @@ class HistoryStore:
         include_internal: bool = False,
         errors_only: bool = False,
     ) -> list[HistoryRecord]:
+        self.repository.ensure_compatible()
         if not self.history_file.exists():
             return []
 
@@ -110,10 +134,12 @@ class HistoryStore:
                 continue
             try:
                 payload = json.loads(line)
+                if not isinstance(payload, Mapping):
+                    continue
                 record = HistoryRecord.from_dict(payload)
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
-            if record.session_id != self.session_id:
+            if self.session_id is not None and record.session_id != self.session_id:
                 continue
             if not include_internal and not record.user_visible:
                 continue
@@ -245,16 +271,17 @@ def _resolve_execution_metadata(
     resolved_result = result
 
     if execution is not None:
+        projected = compatibility_output(execution_output_from_execution_result(execution))
         if resolved_status is None:
             resolved_status = execution.status
         if duration_ms is None:
             resolved_duration = execution.duration_ms
         if resolved_error_type is None:
-            resolved_error_type = execution.ename
+            resolved_error_type = projected.ename
         if resolved_stdout is None:
-            resolved_stdout = execution.stdout
+            resolved_stdout = projected.stdout
         if resolved_result is None:
-            resolved_result = execution.result
+            resolved_result = projected.result
 
     if error is not None:
         if resolved_status is None:
@@ -274,21 +301,30 @@ def _resolve_execution_metadata(
     )
 
 
-def _require_literal(payload: dict[str, Any], key: str, allowed: set[str]) -> str:
+def execution_output_from_execution_result(execution: ExecutionResult):
+    from .execution_output import ExecutionOutput
+
+    return ExecutionOutput(
+        items=list(execution.outputs),
+        execution_count=execution.execution_count,
+    )
+
+
+def _require_literal(payload: Mapping[str, object], key: str, allowed: set[str]) -> str:
     value = _require_str(payload, key)
     if value not in allowed:
         raise ValueError(f"Invalid {key}: {value}")
     return value
 
 
-def _require_str(payload: dict[str, Any], key: str) -> str:
+def _require_str(payload: Mapping[str, object], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value:
         raise ValueError(f"Missing {key}")
     return value
 
 
-def _optional_str(payload: dict[str, Any], key: str) -> str | None:
+def _optional_str(payload: Mapping[str, object], key: str) -> str | None:
     value = payload.get(key)
     if value is None:
         return None
@@ -297,14 +333,14 @@ def _optional_str(payload: dict[str, Any], key: str) -> str | None:
     return value
 
 
-def _require_int(payload: dict[str, Any], key: str) -> int:
+def _require_int(payload: Mapping[str, object], key: str) -> int:
     value = payload.get(key)
     if not isinstance(value, int):
         raise ValueError(f"Invalid {key}")
     return value
 
 
-def _require_bool(payload: dict[str, Any], key: str) -> bool:
+def _require_bool(payload: Mapping[str, object], key: str) -> bool:
     value = payload.get(key)
     if not isinstance(value, bool):
         raise ValueError(f"Invalid {key}")

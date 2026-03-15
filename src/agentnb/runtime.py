@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
-from .backend import BackendExecutionTimeout, LocalIPythonBackend, RuntimeBackend
 from .contracts import ExecutionResult, ExecutionSink, KernelStatus
 from .errors import (
     AmbiguousSessionError,
@@ -15,10 +15,16 @@ from .errors import (
     SessionBusyError,
     SessionNotFoundError,
 )
-from .execution import ExecutionService
-from .history import HistoryStore
 from .hooks import Hooks
-from .provisioner import KernelProvisioner
+from .journal import CommandJournal, JournalEntry, JournalQuery, JournalSelection
+from .kernel.backend import (
+    BackendCapabilities,
+    BackendExecutionTimeout,
+    LocalIPythonBackend,
+    RuntimeBackend,
+)
+from .kernel.provisioner import KernelProvisioner
+from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
 
 
@@ -31,9 +37,14 @@ class KernelRuntime:
     ) -> None:
         self._backend = backend or LocalIPythonBackend()
         self._hooks = hooks or Hooks()
+        self._journal = CommandJournal()
         self._provisioner_factory = provisioner_factory or (
             lambda project_root: KernelProvisioner(project_root)
         )
+
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return self._backend.capabilities
 
     def start(
         self,
@@ -59,13 +70,12 @@ class KernelRuntime:
 
         session = self._backend.start(
             project_root=store.project_root,
-            state_dir=store.state_dir,
-            session_id=session_id,
+            session_state=store.state,
             python_executable=provisioned.executable,
         )
         store.save_session(session)
         store.ensure_gitignore_entry()
-        self._hooks.on_kernel_start(store.project_root, session_id, session)
+        self._hooks.on_kernel_start(store.project_root, store.session_id, session)
         status = self._backend.status(session)
         return status, True
 
@@ -94,7 +104,7 @@ class KernelRuntime:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
         self._backend.stop(session)
         store.clear_session()
-        self._hooks.on_kernel_stop(store.project_root, session_id, session)
+        self._hooks.on_kernel_stop(store.project_root, store.session_id, session)
 
     def stop_starting(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
         store = SessionStore(project_root=project_root, session_id=session_id)
@@ -103,7 +113,7 @@ class KernelRuntime:
             raise NoKernelRunningError()
         self._backend.stop(session)
         store.delete_session()
-        self._hooks.on_kernel_stop(store.project_root, session_id, session)
+        self._hooks.on_kernel_stop(store.project_root, store.session_id, session)
 
     def ensure_started(
         self,
@@ -112,8 +122,8 @@ class KernelRuntime:
     ) -> tuple[KernelStatus, bool]:
         return self.start(project_root=project_root, session_id=session_id)
 
-    def list_sessions(self, project_root: Path) -> list[dict[str, object]]:
-        entries: list[dict[str, object]] = []
+    def list_sessions(self, project_root: Path) -> list[SessionSummary]:
+        entries: list[SessionSummary] = []
         for session in SessionStore.list_sessions(project_root):
             store = SessionStore(project_root=project_root, session_id=session.session_id)
             store.cleanup_stale()
@@ -139,7 +149,7 @@ class KernelRuntime:
             )
         return entries
 
-    def delete_session(self, project_root: Path, session_id: str) -> dict[str, object]:
+    def delete_session(self, project_root: Path, session_id: str) -> DeleteSessionResult:
         store = SessionStore(project_root=project_root, session_id=session_id)
         store.cleanup_stale()
         session = store.load_session()
@@ -222,7 +232,7 @@ class KernelRuntime:
         event_sink: ExecutionSink | None = None,
     ) -> ExecutionResult:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
-        self._hooks.before_execute(store.project_root, session_id, code)
+        self._hooks.before_execute(store.project_root, store.session_id, code)
 
         error: Exception | None = None
         result: ExecutionResult | None = None
@@ -248,7 +258,7 @@ class KernelRuntime:
             error = exc
             raise
         finally:
-            self._hooks.after_execute(store.project_root, session_id, code, result, error)
+            self._hooks.after_execute(store.project_root, store.session_id, code, result, error)
 
     def interrupt(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
         _, session = self._require_session(project_root=project_root, session_id=session_id)
@@ -272,25 +282,32 @@ class KernelRuntime:
         session_id: str = DEFAULT_SESSION_ID,
         errors_only: bool = False,
         include_internal: bool = False,
-    ) -> list[dict[str, object]]:
-        history_store = HistoryStore(project_root=project_root, session_id=session_id)
-        ops_entries = [
-            entry.to_dict()
-            for entry in history_store.read(
-                errors_only=errors_only,
-                include_internal=include_internal,
-            )
-        ]
-        execution_entries = ExecutionService(self).history_entries(
+        latest: bool = False,
+        last: int | None = None,
+        replayable_only: bool = False,
+        execution_id: str | None = None,
+    ) -> list[JournalEntry]:
+        selection = self.select_history(
             project_root=project_root,
-            session_id=session_id,
-            include_internal=include_internal,
-            errors_only=errors_only,
+            query=JournalQuery(
+                session_id=session_id,
+                include_internal=include_internal,
+                errors_only=errors_only,
+                latest=latest,
+                last=last,
+                replayable_only=replayable_only,
+                execution_id=execution_id,
+            ),
         )
-        return sorted(
-            [*ops_entries, *execution_entries],
-            key=lambda entry: str(entry.get("ts", "")),
-        )
+        return selection.entries
+
+    def select_history(
+        self,
+        *,
+        project_root: Path,
+        query: JournalQuery,
+    ) -> JournalSelection:
+        return self._journal.select(project_root=project_root, query=query)
 
     def doctor(
         self,
@@ -298,7 +315,7 @@ class KernelRuntime:
         session_id: str = DEFAULT_SESSION_ID,
         python_executable: Path | None = None,
         auto_fix: bool = False,
-    ) -> dict[str, object]:
+    ) -> DoctorPayload:
         store = SessionStore(project_root=project_root, session_id=session_id)
         stale_cleaned = store.cleanup_stale()
         session_exists = store.load_session() is not None
@@ -306,7 +323,7 @@ class KernelRuntime:
             preferred_python=python_executable,
             auto_fix=auto_fix,
         )
-        payload = report.to_dict()
+        payload = cast(DoctorPayload, report.to_dict())
         payload["stale_session_cleaned"] = stale_cleaned
         payload["session_exists"] = session_exists
         return payload
@@ -332,21 +349,4 @@ class KernelRuntime:
         return store, session
 
     def _last_activity(self, project_root: Path, session_id: str) -> str | None:
-        history_entries = HistoryStore(project_root=project_root, session_id=session_id).read(
-            include_internal=True
-        )
-        timestamps = [entry.ts for entry in history_entries]
-        execution_entries = ExecutionService(self).history_entries(
-            project_root=project_root,
-            session_id=session_id,
-            include_internal=True,
-            errors_only=False,
-        )
-        timestamps.extend(
-            str(entry.get("ts"))
-            for entry in execution_entries
-            if isinstance(entry.get("ts"), str) and entry.get("ts")
-        )
-        if not timestamps:
-            return None
-        return max(timestamps)
+        return self._journal.last_activity(project_root=project_root, session_id=session_id)

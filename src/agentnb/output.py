@@ -2,10 +2,29 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import cast
 
 from .compact import summarize_history_text
 from .contracts import CommandResponse
+from .payloads import (
+    DataframePreview,
+    DoctorPayload,
+    ExecPayload,
+    HistoryEntryPayload,
+    HistoryPayload,
+    InspectResponsePayload,
+    MappingPreview,
+    ReloadReport,
+    RunLookupPayload,
+    RunsListPayload,
+    RunSnapshot,
+    SequencePreview,
+    SessionsListPayload,
+    StartPayload,
+    StatusPayload,
+    VarDisplayEntry,
+    VarsPayload,
+)
 
 
 @dataclass(slots=True)
@@ -32,26 +51,28 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         if options.quiet and command in quiet_commands:
             body = ""
         elif command == "start":
-            if data.get("alive"):
-                python = data.get("python")
-                if data.get("started_new"):
+            start_data = cast(StartPayload, data)
+            if start_data.get("alive"):
+                python = start_data.get("python")
+                if start_data.get("started_new"):
                     if python:
-                        body = f"Kernel started (pid {data.get('pid')}) using {python}."
+                        body = f"Kernel started (pid {start_data.get('pid')}) using {python}."
                     else:
-                        body = f"Kernel started (pid {data.get('pid')})."
+                        body = f"Kernel started (pid {start_data.get('pid')})."
                 elif python:
-                    body = f"Kernel already running (pid {data.get('pid')}) using {python}."
+                    body = f"Kernel already running (pid {start_data.get('pid')}) using {python}."
                 else:
-                    body = f"Kernel already running (pid {data.get('pid')})."
+                    body = f"Kernel already running (pid {start_data.get('pid')})."
             else:
                 body = "Kernel is not running."
 
         elif command == "status":
-            if data.get("alive"):
-                if data.get("busy"):
-                    body = f"Kernel is running (pid {data.get('pid')}, busy)."
+            status_data = cast(StatusPayload, data)
+            if status_data.get("alive"):
+                if status_data.get("busy"):
+                    body = f"Kernel is running (pid {status_data.get('pid')}, busy)."
                 else:
-                    body = f"Kernel is running (pid {data.get('pid')})."
+                    body = f"Kernel is running (pid {status_data.get('pid')})."
             else:
                 body = "Kernel is not running."
 
@@ -62,21 +83,19 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             body = "Interrupt signal sent."
 
         elif command in {"exec", "reset"}:
-            body = _render_exec_like(data)
+            body = _render_exec_like(cast(ExecPayload, data))
 
         elif command == "vars":
-            vars_data = data.get("vars", [])
+            vars_data = cast(VarsPayload, data).get("vars", [])
             if not vars_data:
                 body = "No user variables found."
             else:
-                lines = [
-                    f"{item.get('name')}: {item.get('repr')} ({item.get('type')})"
-                    for item in vars_data
-                ]
+                lines = [_render_var_entry(item) for item in vars_data]
                 body = "\n".join(lines)
 
         elif command == "inspect":
-            inspect_data = data.get("inspect", {})
+            inspect_response = cast(InspectResponsePayload, data)
+            inspect_data = inspect_response.get("inspect", {})
             members = inspect_data.get("members", [])
             members_text = ", ".join(members[:30]) if members else "(none)"
             preview = inspect_data.get("preview")
@@ -85,7 +104,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     f"name: {inspect_data.get('name')}",
                     f"type: {inspect_data.get('type')}",
                 ]
-                lines.extend(_render_dataframe_preview(preview))
+                lines.extend(_render_dataframe_preview(cast(DataframePreview, preview)))
             elif isinstance(preview, dict) and preview.get("kind") in {
                 "sequence-like",
                 "mapping-like",
@@ -94,7 +113,9 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     f"name: {inspect_data.get('name')}",
                     f"type: {inspect_data.get('type')}",
                 ]
-                lines.extend(_render_collection_preview(preview))
+                lines.extend(
+                    _render_collection_preview(cast(MappingPreview | SequencePreview, preview))
+                )
             else:
                 lines = [
                     f"name: {inspect_data.get('name')}",
@@ -105,10 +126,10 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             body = "\n".join(lines)
 
         elif command == "reload":
-            body = _render_reload(data)
+            body = _render_reload(cast(ReloadReport, data))
 
         elif command == "history":
-            entries = data.get("entries", [])
+            entries = cast(HistoryPayload, data).get("entries", [])
             if not entries:
                 body = "No history entries."
             else:
@@ -116,8 +137,11 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 body = "\n".join(lines)
 
         elif command == "doctor":
-            checks = data.get("checks", [])
-            headline = "Doctor checks passed." if data.get("ready") else "Doctor found issues."
+            doctor_data = cast(DoctorPayload, data)
+            checks = doctor_data.get("checks", [])
+            headline = (
+                "Doctor checks passed." if doctor_data.get("ready") else "Doctor found issues."
+            )
             lines = [headline]
             for check in checks:
                 status = str(check.get("status", "unknown")).upper()
@@ -128,7 +152,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     lines.append(f"  fix: {hint}")
             body = "\n".join(lines)
         elif command == "sessions-list":
-            sessions = data.get("sessions", [])
+            sessions = cast(SessionsListPayload, data).get("sessions", [])
             if not sessions:
                 body = "No sessions found."
             else:
@@ -144,7 +168,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             stopped = " and stopped its kernel" if data.get("stopped_running_kernel") else ""
             body = f"Deleted session {data.get('session_id')}{stopped}."
         elif command == "runs-list":
-            runs = data.get("runs", [])
+            runs = cast(RunsListPayload, data).get("runs", [])
             if not runs:
                 body = "No runs found."
             else:
@@ -156,10 +180,16 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     )
                 body = "\n".join(lines)
         elif command == "runs-show" or command == "runs-wait":
-            body = _render_run_snapshot(data.get("run", {}), snapshot_only=(command == "runs-show"))
+            run_data = cast(RunLookupPayload, data).get("run", {})
+            body = _render_run_snapshot(run_data, snapshot_only=(command == "runs-show"))
         elif command == "runs-cancel":
             if data.get("cancel_requested"):
-                if data.get("session_outcome") == "preserved":
+                if data.get("status") == "ok":
+                    body = (
+                        f"Cancel requested for run {data.get('execution_id')}, "
+                        "but it completed before cancellation took effect."
+                    )
+                elif data.get("session_outcome") == "preserved":
                     body = f"Cancelled run {data.get('execution_id')}. The session was preserved."
                 elif data.get("session_outcome") == "stopped":
                     body = (
@@ -177,7 +207,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
     return _append_suggestions(body, suggestions)
 
 
-def _render_exec_like(data: dict[str, Any]) -> str:
+def _render_exec_like(data: ExecPayload) -> str:
     selector = data.get("selected_output")
     if selector is not None:
         selected_text = data.get("selected_text", "")
@@ -198,6 +228,15 @@ def _render_exec_like(data: dict[str, Any]) -> str:
     if not lines:
         lines.append("Execution completed.")
     return "\n".join(lines)
+
+
+def _render_var_entry(item: VarDisplayEntry) -> str:
+    name = item.get("name")
+    repr_text = item.get("repr")
+    type_name = item.get("type")
+    if type_name:
+        return f"{name}: {repr_text} ({type_name})"
+    return f"{name}: {repr_text}"
 
 
 def _render_error(response: CommandResponse) -> str:
@@ -222,8 +261,8 @@ def _append_suggestions(body: str, suggestions: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _render_run_snapshot(run: dict[str, Any], *, snapshot_only: bool) -> str:
-    if not isinstance(run, dict) or not run:
+def _render_run_snapshot(run: RunSnapshot, *, snapshot_only: bool) -> str:
+    if not run:
         return "{}"
 
     execution_id = run.get("execution_id", "(unknown)")
@@ -235,7 +274,7 @@ def _render_run_snapshot(run: dict[str, Any], *, snapshot_only: bool) -> str:
     lines = [f"Run {execution_id} [{status}] {command_type} on session {session_id}."]
     if isinstance(duration_ms, int):
         lines.append(f"duration: {duration_ms}ms")
-    if snapshot_only and status == "running":
+    if snapshot_only and status in {"starting", "running"}:
         lines.append("snapshot: persisted state only; use `agentnb runs follow` for live events")
 
     stdout = run.get("stdout")
@@ -267,7 +306,7 @@ def _render_run_snapshot(run: dict[str, Any], *, snapshot_only: bool) -> str:
     return "\n".join(lines)
 
 
-def _render_dataframe_preview(preview: dict[str, Any]) -> list[str]:
+def _render_dataframe_preview(preview: DataframePreview) -> list[str]:
     lines: list[str] = []
     shape = preview.get("shape")
     if isinstance(shape, list) and len(shape) == 2:
@@ -296,13 +335,13 @@ def _render_dataframe_preview(preview: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _render_history_entry(entry: dict[str, Any]) -> str:
+def _render_history_entry(entry: HistoryEntryPayload) -> str:
     label = _history_label(entry)
     prefix = "[internal] " if entry.get("kind") == "kernel_execution" else ""
     return f"{entry.get('ts')} [{entry.get('status')}] {entry.get('duration_ms')}ms {prefix}{label}"
 
 
-def _history_label(entry: dict[str, Any]) -> str:
+def _history_label(entry: HistoryEntryPayload) -> str:
     label = entry.get("label")
     if isinstance(label, str) and label:
         return label
@@ -331,7 +370,7 @@ def _summarize_history_text(value: object, limit: int = 100) -> str | None:
     return compact[: limit - 3] + "..."
 
 
-def _render_reload(data: dict[str, Any]) -> str:
+def _render_reload(data: ReloadReport) -> str:
     reloaded_modules = data.get("reloaded_modules", [])
     rebound_names = data.get("rebound_names", [])
     stale_names = data.get("stale_names", [])
@@ -361,7 +400,7 @@ def _render_reload(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_collection_preview(preview: dict[str, Any]) -> list[str]:
+def _render_collection_preview(preview: MappingPreview | SequencePreview) -> list[str]:
     lines: list[str] = []
 
     length = preview.get("length")

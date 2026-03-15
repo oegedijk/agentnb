@@ -7,6 +7,8 @@ from agentnb.compact import (
     compact_run_entry,
     compact_traceback,
 )
+from agentnb.journal import JournalEntry
+from agentnb.payloads import CompactExecPayloadInput, SequencePreview
 
 
 def test_compact_traceback_strips_ansi_and_middle_lines() -> None:
@@ -32,7 +34,7 @@ def test_compact_traceback_strips_ansi_and_middle_lines() -> None:
 
 
 def test_compact_execution_payload_truncates_large_fields_and_preserves_selected_output() -> None:
-    payload = {
+    payload: CompactExecPayloadInput = {
         "status": "ok",
         "duration_ms": 12,
         "execution_id": "run-1",
@@ -54,7 +56,7 @@ def test_compact_execution_payload_truncates_large_fields_and_preserves_selected
 
 
 def test_compact_collection_preview_limits_nested_values() -> None:
-    preview = {
+    preview: SequencePreview = {
         "kind": "sequence-like",
         "length": 5,
         "item_type": "dict",
@@ -74,43 +76,96 @@ def test_compact_collection_preview_limits_nested_values() -> None:
 
     compacted = compact_collection_preview(preview)
 
+    assert compacted["kind"] == "sequence-like"
     assert compacted["length"] == 5
     assert compacted["item_type"] == "dict"
     assert compacted["sample_keys"] == ["id", "title", "body", "author", "meta"]
     assert len(compacted["sample"]) == 3
-    assert set(compacted["sample"][0]) == {"id", "title", "body", "author", "meta"}
+    first = compacted["sample"][0]
+    assert isinstance(first, dict)
+    assert set(first) == {"id", "title", "body", "author", "meta"}
 
 
 def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
     ok_entry = compact_history_entry(
-        {
-            "kind": "user_command",
-            "ts": "2026-03-11T00:00:00+00:00",
-            "status": "ok",
-            "duration_ms": 5,
-            "command_type": "exec",
-            "input": (
+        JournalEntry(
+            kind="user_command",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            execution_id=None,
+            status="ok",
+            duration_ms=5,
+            command_type="exec",
+            label="exec",
+            user_visible=True,
+            classification="replayable",
+            provenance_source="history_store",
+            provenance_detail="history_record",
+            input=(
                 "url = 'https://example.com/really/long/path/to/resource?"
                 "alpha=1&beta=2&gamma=3'\nurl"
             ),
-            "user_visible": True,
-        }
+        )
     )
     error_entry = compact_history_entry(
-        {
-            "kind": "user_command",
-            "ts": "2026-03-11T00:00:00+00:00",
-            "status": "error",
-            "duration_ms": 5,
-            "command_type": "exec",
-            "error_type": "ZeroDivisionError",
-            "user_visible": True,
-        }
+        JournalEntry(
+            kind="user_command",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            execution_id=None,
+            status="error",
+            duration_ms=5,
+            command_type="exec",
+            label="exec",
+            user_visible=True,
+            classification="replayable",
+            provenance_source="history_store",
+            provenance_detail="history_record",
+            error_type="ZeroDivisionError",
+        )
+    )
+    internal_ok_entry = compact_history_entry(
+        JournalEntry(
+            kind="kernel_execution",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            execution_id=None,
+            status="ok",
+            duration_ms=5,
+            command_type="exec",
+            label="exec kernel execution",
+            user_visible=False,
+            classification="internal",
+            provenance_source="history_store",
+            provenance_detail="history_record",
+            code="value = 42\nvalue",
+        )
+    )
+    internal_error_entry = compact_history_entry(
+        JournalEntry(
+            kind="kernel_execution",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            execution_id=None,
+            status="error",
+            duration_ms=5,
+            command_type="exec",
+            label="exec kernel execution",
+            user_visible=False,
+            classification="internal",
+            provenance_source="history_store",
+            provenance_detail="history_record",
+            error_type="ZeroDivisionError",
+        )
     )
 
-    assert ok_entry["label"].startswith("exec url = 'https://example.com")
-    assert "gamma=3" not in ok_entry["label"]
+    ok_label = ok_entry["label"]
+    assert isinstance(ok_label, str)
+    assert ok_label.startswith("exec url = 'https://example.com")
+    assert "gamma=3" not in ok_label
     assert error_entry["label"] == "exec error ZeroDivisionError"
+    assert internal_ok_entry["label"] == "exec kernel execution value = 42 value"
+    assert internal_error_entry["label"] == "exec kernel error ZeroDivisionError"
 
 
 def test_compact_run_entry_exposes_previews_and_error_type() -> None:

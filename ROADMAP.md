@@ -2,85 +2,99 @@
 
 This roadmap captures planned work **after the current v0.1 baseline**.
 
-## Current Baseline (Done)
+## Current Surface
 
-- Project-scoped persistent kernel
-- CLI: `start`, `stop`, `status`, `exec`, `interrupt`, `reset`, `vars`, `inspect`, `reload`, `history`, `doctor`
-- JSON response envelope with stable top-level fields
-- Provisioning flow with interpreter selection + `ipykernel` auto-install
-- Top-level output defaults: `--agent`, `--json`, `--quiet`, `--no-suggestions`
-- Script-friendly output selectors: `exec --stdout-only`, `--stderr-only`, `--result-only`
-- History query shortcuts: `history --latest`, `history --last N`
-- Pytest/ruff/ty CI quality gates
+- Project-scoped persistent kernel with explicit session targeting
+- Core CLI for lifecycle, execution, history, inspection, and repair flows
+- Stable JSON response envelope plus low-noise agent-oriented output defaults
+- Structured execution events and durable run records with `execution_id`
+- Background execution, live follow, and snapshot-style run inspection on one execution model
+- Unified command journal read path over semantic history and persisted runs
+- Application service layer with typed request/response seams under the CLI
+- Dedicated introspection boundary for `vars`, `inspect`, and `reload`
+- Typed public payloads through app/output plus typed Jupyter message translation at the backend edge
 
-## v0.2 - Session and Execution Ergonomics
+## v0.2 - Delivered
 
-Status as of March 11, 2026:
-- completed: named sessions, ambiguity handling, `exec --ensure-started`, `status --wait`
-- completed: persisted execution records with `execution_id`
-- completed: background execution with `runs list|show|wait|cancel`
-- completed: real-time streaming execution on top of the same execution model
-- completed: foreground interrupt reliability, active-execution `status`, consistent session `last_activity`, `status --wait-idle`, and live `runs follow`
-- completed: explicit cancel semantics plus a clear snapshot/live split between `runs show` and `runs follow`
-- v0.2 status: complete
+v0.2 is complete. It established the current execution-control surface:
+- named sessions with ambiguity handling
+- first-use execution ergonomics such as `exec --ensure-started` and `status --wait-idle`
+- durable run records plus `runs list|show|follow|wait|cancel`
+- stable streaming/snapshot semantics and more reliable interrupt/cancel behavior
 
-### Goals
-
-- Support multiple sessions per project without breaking default behavior.
-- Improve execution control for long-running workflows.
-- Make session targeting explicit and safe when multiple live contexts exist.
-- Introduce a structured execution model that can support streaming and background runs.
-
-### Planned Features
-
-- Named sessions:
-  - `--session <name>` across all kernel-dependent commands
-  - `agentnb sessions list`, `agentnb sessions delete`
-  - optional `agentnb sessions attach` only after the target/default-session UX is specified
-  - explicit ambiguity errors when multiple sessions exist and no target is provided
-  - session metadata in listings (status, age, interpreter, last activity)
-- First-use execution ergonomics:
-  - `agentnb exec --ensure-started` to auto-start a missing kernel for the default workflow
-  - `status --wait [--timeout]` to block until a kernel is ready for execution
-  - `status --wait-idle [--timeout]` or equivalent to block until a session is safe for the next command
-  - `--session` aliases that are short and consistent across commands
-- Execution event model:
-  - typed events for `stdout`, `stderr`, `result`, `display`, `error`, `status`
-  - stable `execution_id` across foreground, streaming, and background execution paths
-  - internal event persistence to support replay, export, and artifact capture later
-- Execution control stabilization:
-  - foreground `interrupt` must reliably reach a running execution
-  - `status` must accurately report live-versus-not-ready state while commands are in flight
-  - session listings should reflect recent execution activity consistently
-  - completed: cancellation reports whether the session was preserved or stopped
-- Run observation ergonomics:
-  - completed: live follow for background runs on top of the persisted event model
-  - completed: `runs show` is a snapshot view and `runs follow` is the live observation path
-
-### Delivery Order
-
-1. Completed: expose the existing session model in the CLI with `--session` while preserving `default`.
-2. Completed: add session discovery/deletion commands and ambiguity handling when multiple live sessions exist.
-3. Completed: add `exec --ensure-started` and `status --wait`.
-4. Completed: land the execution event schema and persisted execution records.
-5. Completed: land real-time streaming execution on top of the same execution model.
-6. Completed: clarify cancel semantics and session lifecycle after cancellation.
-7. Completed: tighten `runs show` versus `runs follow` so snapshot and live observation stay distinct.
-
-### API/Contract Notes
-
-- `session_id` is already present in top-level command envelopes; add `execution_id` consistently to execution payloads.
-- Extend the event schema to cover sync, streaming, and replay modes without changing event meaning by mode.
-- Support top-level output-mode defaults so agents do not need to repeat `--json` on every command.
-- Keep existing `default` session behavior unchanged.
-- Control-plane commands need stable semantics during active execution, especially `status`, `interrupt`, and `cancel`.
+The rest of this roadmap is forward-looking.
 
 ## v0.3 - Reproducibility and Debug Workflows
+
+### Pre-v0.3 Refactors
+
+Completed foundations:
+
+- Unified journal + recording boundaries now own semantic read/write flow for history and executions.
+- `AgentNBApp`, typed payloads, and typed Jupyter translation now define the app/output boundary cleanly.
+- `introspection.py` owns helper execution and typed parsing for `vars`, `inspect`, and `reload`.
+- Kernel/backend code now lives behind `agentnb.kernel`, and run orchestration including `reset` now flows through `RunManager`.
+- Structured execution output is now the internal source of truth, with flat `stdout` / `stderr` / `result` preserved as compatibility projections at the boundary.
+- Backend capability checks now branch on a typed capability contract instead of local-backend assumptions.
+- Session/kernel state paths and canonical session identity now flow through `StateRepository` / `SessionStateFiles` instead of being recomputed across runtime and backend layers.
+- Run records now persist explicit cancel provenance and expose stable cancellation metadata across `runs show|list` and failed-only reads.
+- Background runs now use an explicit startup lifecycle before `running`, so run reconciliation no longer depends on subprocess timing races.
+- Run execution mechanics now live behind `LocalRunExecutor`, while replay planning remains semantic and separate from durable run modeling.
+- `StateRepository` now owns persisted snapshot/export resource ids, descriptor schemas, and write-time manifest/resource validation instead of leaving those invariants to callers.
+- The test suite now has cleaner fixtures, broader behavioral/type coverage, real CLI smoke coverage, and `ty` over both `src` and `tests`.
+
+Remaining prep refactors:
+- Artifact domain boundary:
+  - purpose: separate persisted artifacts from transient execution outputs before artifact commands exist
+  - remaining gap:
+    - there is still no first-class persisted artifact model with stable ids, metadata, and lifecycle state
+- Run-control follow-up:
+  - keep replay and verify execution flows on the same run-control abstraction instead of giving them their own wait/cancel/progress orchestration paths
+  - keep public run semantics defined by the controller contract rather than by the current local subprocess behavior
+  - add a dedicated replay execution owner that translates semantic replay plans into executable work without teaching the planner about run-internal step representations
+  - choose an honest replay persistence model before shipping replay:
+    - either parent/child per-step run records
+    - or a first-class composite replay record shape
+  - preserve per-step provenance, source execution ids, code, outputs, and failure attribution across replay and verify flows instead of collapsing mixed work into one synthetic run snapshot
+- Backend capability follow-up:
+  - grow the minimal capability contract into the app/run-control/extension boundary before adding non-local backends
+  - keep features branching on declared capabilities rather than on backend type checks or local-only assumptions
+- Extension host boundary:
+  - purpose: give plugins, policy, and reliability hooks one deep home instead of growing ad hoc methods across runtime and CLI layers
+  - hidden complexity to absorb:
+    - plugin registration and lifecycle
+    - policy evaluation before/after execution
+    - execution context passed to extensions
+    - extension failure isolation and stable error reporting
+  - target shape:
+    - an `ExtensionHost` or equivalent boundary that owns loading, ordering, and invoking extensions/policies
+    - current no-op hooks become a narrow compatibility shim or are subsumed into the extension host
+  - why this must come before v0.5 policy/plugins:
+    - otherwise policy decisions will leak into `KernelRuntime`, CLI handlers, and backend code as one-off special cases
+    - reliability features such as diagnostics or restart hooks will also need one place to attach
+  - if skipped:
+    - every new policy or plugin-style feature will add another ad hoc callback or special-case branch
+    - extension failures will be harder to isolate and reason about because there will be no single host boundary
+  - first implementation target:
+    - define typed execution lifecycle events and extension context objects before adding actual plugin loading
+  - follow-up work still needed:
+    - keep extension APIs event/context-based rather than growing a method-per-hook surface that mirrors current runtime internals
+    - avoid exposing raw backend or runtime objects directly to extensions so the first plugin API does not freeze internal implementation details
+- State layout follow-up: keep cleanup/retention policy and future sharable-bundle rules inside `StateRepository` rather than reintroducing ad hoc filesystem ownership in higher layers.
+### Internal Planning Seams
+
+- Internal replay/snapshot planning seam:
+  - purpose: give future snapshot, replay, and verify features typed planning interfaces without shipping partial feature behavior
+  - target shape:
+    - internal planner types such as replay steps/plans and snapshot resource plans
+    - future replay/verify/snapshot implementations should consume these plans rather than rebuilding journal/state selection logic ad hoc
 
 ### Goals
 
 - Make iterative agent work easier to replay, diagnose, and promote to tests.
 - Make "clean verification" a first-class workflow instead of a manual sequence of commands.
+- Make iterative CLI use lower-noise and more obvious without requiring full JSON output.
+- Improve recovery and next-step guidance while keeping the command surface small and composable.
 
 ### Planned Features
 
@@ -91,6 +105,12 @@ Status as of March 11, 2026:
   - `agentnb replay --to-session <name>`
   - `agentnb verify` to restart a clean session and replay selected history or snapshot state
   - export to `.ipynb` and markdown transcript
+  - prerequisite work for replay/verify:
+    - define the replay execution boundary and typed request/response surface
+    - persist replay provenance truthfully, including per-step source execution ids and terminal outcomes
+    - decide how replay progress is observed (`follow`/`wait` on parent replay vs child executions)
+    - extend history/journal metadata so replayed and verified steps remain distinguishable from original executions
+    - add behavior-focused tests at the owning boundary for mixed `exec`/`reset` replays and partial-failure reporting
 - Better debugging:
   - traceback enrichment
   - frame/locals inspection commands
@@ -99,19 +119,25 @@ Status as of March 11, 2026:
   - bounded previews for large values
   - structured previews for common containers (`list`, `dict`, `tuple`, dataframe-like objects)
   - side-effect-aware inspection paths that avoid arbitrary `repr(...)` when possible
-  - richer history metadata (`tags`, labels, execution mode)
+  - richer history metadata beyond the current journal shape (`tags`, execution mode, replay/verify provenance)
 - History/query ergonomics:
   - clearer failed-only flows
   - optional flat JSON output for history-oriented shell pipelines
   - direct selectors for the most recent failed or successful execution
 - Output shaping:
   - additional low-noise modes beyond the current `--quiet` and `--no-suggestions`
+  - a compact working-output mode distinct from full `--json`
+  - clearer separation between interactive working output and exact machine-contract output
+  - more state-aware, recovery-oriented suggestions within the existing command set
+  - more actionable `SESSION_BUSY` and `AMBIGUOUS_SESSION` responses that surface the shortest resolving path directly
 
 ### API/Contract Notes
 
-- History entries gain optional `tags`, `command_type`, and `execution_id`.
+- History entries should grow optional `tags` and execution-mode/provenance metadata on top of the current `command_type` and `execution_id` fields.
 - Verification responses should identify the first failed step and the source execution that produced it.
 - JSON envelopes should keep machine-stable fields predictable across commands (`session_id`, `execution_id`, `duration_ms`, typed error codes).
+- Keep full `--json` as the exact machine-stable contract rather than assuming it is the best default working mode.
+- Prefer improving behavior, flags, suggestions, and output shaping of existing commands over adding new top-level commands.
 - Snapshot metadata tracked in `.agentnb/` with schema versioning.
 
 ## v0.4 - Rich Output and Artifacts
@@ -205,6 +231,9 @@ Status as of March 11, 2026:
   - benchmark startup latency, round-trip execution latency, and memory overhead
 - Output/noise control:
   - keep machine-oriented modes predictable during streaming and control-plane errors
+- Command-surface discipline:
+  - prefer a small set of composable commands over feature-specific command growth
+  - optimize common workflows by improving defaults, suggestions, and output shaping before introducing new verbs
 
 ## Near-Term Priority Queue
 

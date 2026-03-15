@@ -3,14 +3,17 @@ from __future__ import annotations
 import os
 import signal
 import time
+from collections.abc import Iterator
 from contextlib import suppress
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from click.testing import CliRunner
 
-from agentnb.backend import LocalIPythonBackend, _close_client, _hard_kill_signal
-from agentnb.execution import ExecutionService
+from agentnb.execution import ExecutionRecord, ExecutionService, ExecutionStore
+from agentnb.history import HistoryStore, user_command_record
+from agentnb.kernel.backend import LocalIPythonBackend, _close_client, _hard_kill_signal
 from agentnb.ops import NotebookOps
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, pid_exists
@@ -71,17 +74,27 @@ def runtime() -> KernelRuntime:
     return KernelRuntime(backend=TestLocalIPythonBackend())
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def patch_cli_runtime(runtime: KernelRuntime, monkeypatch: pytest.MonkeyPatch) -> None:
     import agentnb.cli as cli
 
+    executions = ExecutionService(runtime)
+    ops = NotebookOps(runtime)
     monkeypatch.setattr(cli, "runtime", runtime)
-    monkeypatch.setattr(cli, "ops", NotebookOps(runtime))
-    monkeypatch.setattr(cli, "executions", ExecutionService(runtime))
+    monkeypatch.setattr(cli, "ops", ops)
+    monkeypatch.setattr(cli, "executions", executions)
+    monkeypatch.setattr(
+        cli,
+        "application",
+        cli.AgentNBApp(runtime=runtime, executions=executions, ops=ops),
+    )
 
 
 @pytest.fixture
-def started_runtime(runtime: KernelRuntime, project_dir: Path) -> tuple[KernelRuntime, Path]:
+def started_runtime(
+    runtime: KernelRuntime,
+    project_dir: Path,
+) -> Iterator[tuple[KernelRuntime, Path]]:
     runtime.start(project_dir)
     try:
         yield runtime, project_dir
@@ -93,3 +106,61 @@ def started_runtime(runtime: KernelRuntime, project_dir: Path) -> tuple[KernelRu
 @pytest.fixture
 def cli_runner() -> CliRunner:
     return CliRunner()
+
+
+@pytest.fixture
+def journal_builder(project_dir: Path):
+    def add_history(
+        *,
+        ts: str,
+        session_id: str = "default",
+        command_type: str,
+        label: str,
+        status: str = "ok",
+        duration_ms: int = 1,
+        input_text: str | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        HistoryStore(project_dir).append(
+            user_command_record(
+                ts=ts,
+                session_id=session_id,
+                command_type=command_type,
+                label=label,
+                input_text=input_text,
+                status=status,
+                duration_ms=duration_ms,
+                error_type=error_type,
+            )
+        )
+
+    def add_execution(
+        *,
+        execution_id: str,
+        ts: str,
+        session_id: str = "default",
+        command_type: str = "exec",
+        status: Literal["starting", "running", "ok", "error"] = "ok",
+        duration_ms: int = 1,
+        code: str | None = None,
+        result: str | None = None,
+        ename: str | None = None,
+    ) -> None:
+        ExecutionStore(project_dir).append(
+            ExecutionRecord(
+                execution_id=execution_id,
+                ts=ts,
+                session_id=session_id,
+                command_type=command_type,
+                status=status,
+                duration_ms=duration_ms,
+                code=code,
+                result=result,
+                ename=ename,
+            )
+        )
+
+    return {
+        "history": add_history,
+        "execution": add_execution,
+    }

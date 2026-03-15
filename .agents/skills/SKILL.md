@@ -111,6 +111,7 @@ agentnb runs list --json
 For multi-line code, prefer `--file` or stdin/heredoc over shell-escaped
 backslashes. A literal multi-line shell argument is fine if your shell passes
 it through, but `--file` and stdin are the reliable defaults.
+The same rule applies to `exec --background`.
 
 When the namespace gets noisy, use:
 
@@ -162,7 +163,7 @@ Use `runs show EXECUTION_ID --json` when you need the exact stored record for on
 - Use `--session NAME` explicitly once multiple live sessions exist; do not rely on guessing.
 - Use `sessions list` to discover live session names before targeting one.
 - Use `runs` for durable execution lookup, background control, and exact `execution_id` queries.
-- `exec --background` returns immediately; use `runs show` for the latest snapshot, `runs follow` for live progress, `runs wait` for the final snapshot, and `runs cancel` to stop the run.
+- `exec --background` returns immediately; use `runs show` for the latest persisted snapshot, `runs follow` for live progress, `runs wait` for the final snapshot, and `runs cancel` to stop the run.
 - Use `status --wait-idle` when the important question is "can I safely send the next command yet?"
 - Prefer a final expression over `print(...)` when you want a compact return value.
 - Use `reload` after editing importable project modules instead of assuming live definitions updated automatically.

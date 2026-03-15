@@ -1,10 +1,23 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 from .history import summarize_history_text
+from .journal import JournalEntry
+from .payloads import (
+    CompactExecPayloadInput,
+    DataframePreview,
+    ExecPayload,
+    HistoryEntryPayload,
+    InspectPayload,
+    JSONValue,
+    MappingPreview,
+    RunListEntryPayload,
+    RunSnapshot,
+    SequencePreview,
+)
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 _URL_RE = re.compile(r"https?://[^\s'\"`]+")
@@ -33,11 +46,12 @@ def compact_traceback(lines: list[str] | None) -> list[str] | None:
     ]
 
 
-def compact_execution_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    compacted: dict[str, Any] = {
-        "status": payload.get("status"),
-        "duration_ms": payload.get("duration_ms", 0),
-    }
+def compact_execution_payload(payload: CompactExecPayloadInput) -> ExecPayload:
+    compacted: ExecPayload = {"duration_ms": payload.get("duration_ms", 0)}
+
+    status = payload.get("status")
+    if status is not None:
+        compacted["status"] = status
 
     execution_id = payload.get("execution_id")
     if execution_id is not None:
@@ -47,43 +61,64 @@ def compact_execution_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if execution_count is not None:
         compacted["execution_count"] = execution_count
 
-    for key in ("stdout", "stderr", "result"):
-        value = payload.get(key)
-        if not isinstance(value, str) or not value:
-            continue
-        limit = _STDOUT_LIMIT if key in {"stdout", "stderr"} else _RESULT_LIMIT
-        compacted[key] = summarize_history_text(value, limit=limit)
+    stdout = payload.get("stdout")
+    if isinstance(stdout, str) and stdout:
+        summary = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
+        if summary is not None:
+            compacted["stdout"] = summary
 
-    for key in ("ename", "evalue"):
-        value = payload.get(key)
-        if value is not None:
-            compacted[key] = value
+    stderr = payload.get("stderr")
+    if isinstance(stderr, str) and stderr:
+        summary = summarize_history_text(stderr, limit=_STDOUT_LIMIT)
+        if summary is not None:
+            compacted["stderr"] = summary
+
+    result = payload.get("result")
+    if isinstance(result, str) and result:
+        summary = summarize_history_text(result, limit=_RESULT_LIMIT)
+        if summary is not None:
+            compacted["result"] = summary
+
+    ename = payload.get("ename")
+    if isinstance(ename, str):
+        compacted["ename"] = ename
+
+    evalue = payload.get("evalue")
+    if isinstance(evalue, str):
+        compacted["evalue"] = evalue
 
     selected_output = payload.get("selected_output")
-    if selected_output is not None:
+    if isinstance(selected_output, str):
         compacted["selected_output"] = selected_output
-        compacted["selected_text"] = payload.get("selected_text", "")
+        compacted["selected_text"] = str(payload.get("selected_text", ""))
 
     return compacted
 
 
-def compact_inspect_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    compacted: dict[str, Any] = {
-        "name": payload.get("name"),
-        "type": payload.get("type"),
-    }
+def compact_inspect_payload(payload: InspectPayload) -> InspectPayload:
+    compacted: InspectPayload = {}
+    name = payload.get("name")
+    if isinstance(name, str):
+        compacted["name"] = name
+    type_name = payload.get("type")
+    if isinstance(type_name, str):
+        compacted["type"] = type_name
     preview = payload.get("preview")
     if isinstance(preview, dict):
         if preview.get("kind") == "dataframe-like":
-            compacted["preview"] = compact_dataframe_preview(preview)
+            compacted["preview"] = compact_dataframe_preview(cast(DataframePreview, preview))
             return compacted
         if preview.get("kind") in {"sequence-like", "mapping-like"}:
-            compacted["preview"] = compact_collection_preview(preview)
+            compacted["preview"] = compact_collection_preview(
+                cast(MappingPreview | SequencePreview, preview)
+            )
             return compacted
 
     repr_text = payload.get("repr")
     if isinstance(repr_text, str) and repr_text:
-        compacted["repr"] = summarize_history_text(repr_text, limit=_RESULT_LIMIT)
+        summary = summarize_history_text(repr_text, limit=_RESULT_LIMIT)
+        if summary is not None:
+            compacted["repr"] = summary
 
     members = payload.get("members")
     if isinstance(members, list) and members:
@@ -92,8 +127,8 @@ def compact_inspect_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return compacted
 
 
-def compact_dataframe_preview(preview: dict[str, Any]) -> dict[str, Any]:
-    compacted: dict[str, Any] = {"kind": "dataframe-like"}
+def compact_dataframe_preview(preview: DataframePreview) -> DataframePreview:
+    compacted: DataframePreview = {"kind": "dataframe-like"}
     for key in ("shape", "columns", "dtypes", "null_counts"):
         value = preview.get(key)
         if value:
@@ -106,60 +141,85 @@ def compact_dataframe_preview(preview: dict[str, Any]) -> dict[str, Any]:
     return compacted
 
 
-def compact_collection_preview(preview: dict[str, Any]) -> dict[str, Any]:
-    compacted: dict[str, Any] = {"kind": preview.get("kind")}
-
+def compact_collection_preview(
+    preview: MappingPreview | SequencePreview,
+) -> MappingPreview | SequencePreview:
     length = preview.get("length")
-    if isinstance(length, int):
-        compacted["length"] = length
+    sample = preview.get("sample")
 
+    if preview.get("kind") == "mapping-like":
+        compacted: MappingPreview = {
+            "kind": "mapping-like",
+            "length": 0 if not isinstance(length, int) else length,
+            "keys": [],
+            "sample": {},
+        }
+        keys = preview.get("keys")
+        if isinstance(keys, list) and keys:
+            compacted["keys"] = [str(item) for item in keys[:_PREVIEW_DICT_LIMIT]]
+        if isinstance(sample, dict):
+            compacted["sample"] = cast(dict[str, JSONValue], _compact_jsonish(sample))
+        return compacted
+
+    compacted: SequencePreview = {
+        "kind": "sequence-like",
+        "length": 0 if not isinstance(length, int) else length,
+    }
     item_type = preview.get("item_type")
     if isinstance(item_type, str) and item_type:
         compacted["item_type"] = item_type
-
-    for key in ("keys", "sample_keys"):
-        value = preview.get(key)
-        if isinstance(value, list) and value:
-            compacted[key] = [str(item) for item in value[:_PREVIEW_DICT_LIMIT]]
-
-    sample = preview.get("sample")
-    if sample is not None:
-        compacted["sample"] = _compact_jsonish(sample)
-
+    sample_keys = preview.get("sample_keys")
+    if isinstance(sample_keys, list) and sample_keys:
+        compacted["sample_keys"] = [str(item) for item in sample_keys[:_PREVIEW_DICT_LIMIT]]
+    if isinstance(sample, list):
+        compacted["sample"] = cast(list[JSONValue], _compact_jsonish(sample))
     return compacted
 
 
-def compact_history_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    label = entry.get("label")
-    command_type = entry.get("command_type")
+def compact_history_entry(entry: JournalEntry) -> HistoryEntryPayload:
+    label = entry.label
+    command_type = entry.command_type
     if command_type == "exec":
-        if entry.get("status") == "error":
-            error_type = entry.get("error_type")
-            label = "exec error" if error_type is None else f"exec error {error_type}"
+        is_internal = entry.kind == "kernel_execution" or not entry.user_visible
+        if entry.status == "error":
+            error_type = entry.error_type
+            if is_internal:
+                label = (
+                    "exec kernel error" if error_type is None else f"exec kernel error {error_type}"
+                )
+            else:
+                label = "exec error" if error_type is None else f"exec error {error_type}"
         else:
-            preview = summarize_exec_label(str(entry.get("code") or entry.get("input") or ""))
-            label = "exec" if preview is None else f"exec {preview}"
+            preview = summarize_exec_label(entry.code or entry.input or "")
+            if is_internal:
+                label = (
+                    "exec kernel execution"
+                    if preview is None
+                    else f"exec kernel execution {preview}"
+                )
+            else:
+                label = "exec" if preview is None else f"exec {preview}"
 
-    compacted: dict[str, Any] = {
-        "kind": entry.get("kind"),
-        "ts": entry.get("ts"),
-        "status": entry.get("status"),
-        "duration_ms": entry.get("duration_ms"),
+    compacted: HistoryEntryPayload = {
+        "kind": entry.kind,
+        "ts": entry.ts,
+        "status": entry.status,
+        "duration_ms": entry.duration_ms,
         "command_type": command_type,
         "label": label,
-        "user_visible": entry.get("user_visible"),
+        "user_visible": entry.user_visible,
     }
-    error_type = entry.get("error_type")
+    error_type = entry.error_type
     if error_type is not None:
         compacted["error_type"] = error_type
-    execution_id = entry.get("execution_id")
+    execution_id = entry.execution_id
     if execution_id is not None:
         compacted["execution_id"] = execution_id
     return compacted
 
 
-def compact_run_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    compacted = {
+def compact_run_entry(entry: RunSnapshot) -> RunListEntryPayload:
+    compacted: RunListEntryPayload = {
         "execution_id": entry.get("execution_id"),
         "ts": entry.get("ts"),
         "session_id": entry.get("session_id"),
@@ -168,13 +228,24 @@ def compact_run_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "duration_ms": entry.get("duration_ms"),
     }
 
+    terminal_reason = entry.get("terminal_reason")
+    if terminal_reason is not None:
+        compacted["terminal_reason"] = terminal_reason
+
+    if "cancel_requested" in entry:
+        compacted["cancel_requested"] = bool(entry.get("cancel_requested"))
+
     result = entry.get("result")
     if isinstance(result, str) and result:
-        compacted["result_preview"] = summarize_history_text(result, limit=_RESULT_LIMIT)
+        summary = summarize_history_text(result, limit=_RESULT_LIMIT)
+        if summary is not None:
+            compacted["result_preview"] = summary
 
     stdout = entry.get("stdout")
     if isinstance(stdout, str) and stdout:
-        compacted["stdout_preview"] = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
+        summary = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
+        if summary is not None:
+            compacted["stdout_preview"] = summary
 
     ename = entry.get("ename")
     if ename is not None:

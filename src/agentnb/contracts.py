@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    from .execution_output import OutputItem
 
 SCHEMA_VERSION = "1.0"
 
@@ -60,11 +64,69 @@ class ExecutionResult:
     ename: str | None = None
     evalue: str | None = None
     traceback: list[str] | None = None
+    outputs: list[OutputItem] = field(default_factory=list)
     events: list[ExecutionEvent] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        from .execution_output import (
+            ExecutionOutput,
+            compatibility_output,
+            execution_output_from_events,
+            execution_output_from_legacy_fields,
+        )
+
+        if self.outputs:
+            output = ExecutionOutput(
+                items=list(self.outputs),
+                execution_count=self.execution_count,
+            )
+        elif self.events:
+            output = execution_output_from_events(self.events, execution_count=self.execution_count)
+        else:
+            output = execution_output_from_legacy_fields(
+                stdout=self.stdout,
+                stderr=self.stderr,
+                result=self.result,
+                ename=self.ename,
+                evalue=self.evalue,
+                traceback=self.traceback,
+                status=self.status,
+                execution_count=self.execution_count,
+            )
+
+        if not self.outputs:
+            self.outputs = list(output.items)
+        if not self.events:
+            self.events = output.to_events()
+
+        projected = compatibility_output(output)
+        self.stdout = projected.stdout
+        self.stderr = projected.stderr
+        self.result = projected.result
+
+        explicit_error = (
+            self.status == "error"
+            or self.ename is not None
+            or self.evalue is not None
+            or self.traceback is not None
+        )
+        if projected.status == "error":
+            self.status = projected.status
+            self.ename = projected.ename
+            self.evalue = projected.evalue
+            self.traceback = projected.traceback
+        elif explicit_error:
+            self.status = "error"
+        else:
+            self.status = projected.status
+            self.ename = projected.ename
+            self.evalue = projected.evalue
+            self.traceback = projected.traceback
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["events"] = [event.to_dict() for event in self.events]
+        payload.pop("outputs", None)
         return payload
 
 
@@ -113,7 +175,7 @@ def success_response(
     command: str,
     project: str,
     session_id: str,
-    data: dict[str, Any] | None = None,
+    data: Mapping[str, object] | None = None,
     suggestions: list[str] | None = None,
 ) -> CommandResponse:
     return CommandResponse(
@@ -121,7 +183,7 @@ def success_response(
         command=command,
         project=project,
         session_id=session_id,
-        data=data or {},
+        data=dict(data) if data is not None else {},
         suggestions=suggestions or [],
     )
 
@@ -136,7 +198,7 @@ def error_response(
     ename: str | None = None,
     evalue: str | None = None,
     traceback: list[str] | None = None,
-    data: dict[str, Any] | None = None,
+    data: Mapping[str, object] | None = None,
     suggestions: list[str] | None = None,
 ) -> CommandResponse:
     return CommandResponse(
@@ -144,7 +206,7 @@ def error_response(
         command=command,
         project=project,
         session_id=session_id,
-        data=data or {},
+        data=dict(data) if data is not None else {},
         suggestions=suggestions or [],
         error=AgentNBError(
             code=code,

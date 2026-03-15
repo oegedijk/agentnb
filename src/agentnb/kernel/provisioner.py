@@ -9,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .errors import InvalidInputError, ProvisioningError
+from ..errors import InvalidInputError, ProvisioningError
+from ..payloads import DoctorCheckPayload, DoctorPayload
+from ..state import StateRepository
 
 IPYKERNEL_REQUIREMENT = "ipykernel>=6.0"
 
@@ -51,7 +53,7 @@ class DoctorCheck:
     message: str
     fix_hint: str | None = None
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> DoctorCheckPayload:
         return {
             "name": self.name,
             "status": self.status,
@@ -67,7 +69,7 @@ class DoctorReport:
     python_source: str | None
     checks: list[DoctorCheck]
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> DoctorPayload:
         return {
             "ready": self.ready,
             "selected_python": self.selected_python,
@@ -263,7 +265,7 @@ class KernelProvisioner:
         return unique
 
     def _check_state_directory(self) -> DoctorCheck:
-        state_dir = self.project_root / ".agentnb"
+        state_dir = StateRepository(self.project_root).state_dir
         try:
             state_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(

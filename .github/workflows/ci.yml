@@ -18,7 +18,7 @@ jobs:
       - run: uv sync --extra dev --frozen
       - run: uv run ruff check src/ tests/
       - run: uv run ruff format --check src/ tests/
-      - run: uv run ty check src/
+      - run: uv run ty check src/ tests/
       - run: uv run python -m pytest
       - run: uv build
       - run: uvx twine check dist/*.tar.gz dist/*.whl

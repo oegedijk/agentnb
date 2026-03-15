@@ -1,84 +1,50 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from .contracts import ExecutionEvent, ExecutionResult, ExecutionSink
+from .execution_output import ExecutionOutput, OutputItem, output_item_from_shell_reply_message
+from .kernel.jupyter_protocol import ShellReplyMessage
 
 
 @dataclass(slots=True)
 class ExecutionResultAccumulator:
-    stdout_parts: list[str] = field(default_factory=list)
-    stderr_parts: list[str] = field(default_factory=list)
-    events: list[ExecutionEvent] = field(default_factory=list)
-    result_text: str | None = None
+    output: ExecutionOutput = field(default_factory=ExecutionOutput)
     execution_count: int | None = None
-    status: str = "ok"
-    ename: str | None = None
-    evalue: str | None = None
-    traceback: list[str] | None = None
+    shell_reply_error: OutputItem | None = None
 
     def accept(self, event: ExecutionEvent) -> None:
-        self.events.append(event)
+        self.output.append(OutputItem.from_event(event))
 
-        if event.kind == "stdout":
-            self.stdout_parts.append(event.content or "")
-            return
-        if event.kind == "stderr":
-            self.stderr_parts.append(event.content or "")
-            return
-        if event.kind == "result":
-            self.result_text = event.content
-            return
-        if event.kind == "display":
-            if event.content:
-                self.result_text = (
-                    f"{self.result_text}\n{event.content}" if self.result_text else event.content
-                )
-            return
-        if event.kind == "error":
-            self.status = "error"
-            self.evalue = event.content
-            metadata = event.metadata
-            ename = metadata.get("ename")
-            if isinstance(ename, str):
-                self.ename = ename
-            traceback = metadata.get("traceback")
-            if isinstance(traceback, list) and all(isinstance(item, str) for item in traceback):
-                self.traceback = list(traceback)
+    def accept_output(self, item: OutputItem) -> None:
+        self.output.append(item)
 
     def set_execution_count(self, execution_count: object) -> None:
         if isinstance(execution_count, int):
             self.execution_count = execution_count
 
-    def apply_shell_reply(self, shell_content: dict[str, Any]) -> None:
+    def apply_shell_reply(self, shell_reply: ShellReplyMessage) -> None:
         if self.execution_count is None:
-            self.set_execution_count(shell_content.get("execution_count"))
-        if shell_content.get("status") != "error":
-            return
-        self.status = "error"
-        ename = shell_content.get("ename")
-        if isinstance(ename, str):
-            self.ename = ename
-        evalue = shell_content.get("evalue")
-        if isinstance(evalue, str):
-            self.evalue = evalue
-        traceback = shell_content.get("traceback")
-        if isinstance(traceback, list) and all(isinstance(item, str) for item in traceback):
-            self.traceback = list(traceback)
+            self.set_execution_count(shell_reply.execution_count)
+        self.shell_reply_error = output_item_from_shell_reply_message(shell_reply)
 
     def build(self, *, duration_ms: int) -> ExecutionResult:
+        output = self.output.refined_with_error(self.shell_reply_error)
+        ename, evalue, traceback = output.error_details()
+        status = output.status()
+        if self.shell_reply_error is not None:
+            status = "error"
+            ename = self.shell_reply_error.ename or ename
+            evalue = self.shell_reply_error.text or evalue
+            traceback = self.shell_reply_error.traceback or traceback
         return ExecutionResult(
-            status="error" if self.status == "error" else "ok",
-            stdout="".join(self.stdout_parts),
-            stderr="".join(self.stderr_parts),
-            result=self.result_text,
+            status=status,
             execution_count=self.execution_count,
             duration_ms=duration_ms,
-            ename=self.ename,
-            evalue=self.evalue,
-            traceback=self.traceback,
-            events=list(self.events),
+            ename=ename,
+            evalue=evalue,
+            traceback=traceback,
+            outputs=list(output.items),
         )
 
 
@@ -91,3 +57,14 @@ def dispatch_event(
     accumulator.accept(event)
     if sink is not None:
         sink.accept(event)
+
+
+def dispatch_output_item(
+    *,
+    accumulator: ExecutionResultAccumulator,
+    item: OutputItem,
+    sink: ExecutionSink | None,
+) -> None:
+    accumulator.accept_output(item)
+    if sink is not None:
+        sink.accept(item.to_event())

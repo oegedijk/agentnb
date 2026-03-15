@@ -4,10 +4,59 @@ from pathlib import Path
 
 from pytest_mock import MockerFixture
 
-from agentnb.contracts import KernelStatus
-from agentnb.provisioner import DoctorCheck, DoctorReport, ProvisionResult
+from agentnb.contracts import ExecutionResult, KernelStatus
+from agentnb.kernel.backend import BackendCapabilities, RuntimeBackend
+from agentnb.kernel.provisioner import DoctorCheck, DoctorReport, ProvisionResult
 from agentnb.runtime import KernelRuntime
-from agentnb.session import SessionInfo
+from agentnb.session import SessionInfo, SessionStore
+from agentnb.state import SessionStateFiles
+
+
+class EchoSessionBackend(RuntimeBackend):
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities()
+
+    def start(
+        self,
+        project_root: Path,
+        session_state: SessionStateFiles,
+        python_executable: str,
+    ) -> SessionInfo:
+        return SessionInfo(
+            session_id=session_state.session_id,
+            pid=12345,
+            connection_file=str(session_state.connection_file),
+            python_executable=python_executable,
+            project_root=str(project_root),
+            started_at="2026-03-08T00:00:00+00:00",
+        )
+
+    def status(self, session: SessionInfo, timeout_s: float = 2.0) -> KernelStatus:
+        del timeout_s
+        return KernelStatus(alive=True, pid=session.pid, python=session.python_executable)
+
+    def execute(
+        self,
+        session: SessionInfo,
+        code: str,
+        timeout_s: float,
+        event_sink=None,
+    ) -> ExecutionResult:
+        del session, code, timeout_s, event_sink
+        raise AssertionError("execute should not be called in this test")
+
+    def interrupt(self, session: SessionInfo) -> None:
+        del session
+        raise AssertionError("interrupt should not be called in this test")
+
+    def stop(self, session: SessionInfo, timeout_s: float = 5.0) -> None:
+        del session, timeout_s
+        raise AssertionError("stop should not be called in this test")
+
+    def reset(self, session: SessionInfo, timeout_s: float) -> ExecutionResult:
+        del session, timeout_s
+        raise AssertionError("reset should not be called in this test")
 
 
 def test_runtime_start_uses_provisioner_and_passes_python(
@@ -48,6 +97,35 @@ def test_runtime_start_uses_provisioner_and_passes_python(
     )
     backend.start.assert_called_once()
     assert backend.start.call_args.kwargs["python_executable"] == "/custom/python"
+
+
+def test_runtime_start_persists_canonicalized_session_id(
+    project_dir: Path,
+    mocker: MockerFixture,
+) -> None:
+    provisioner = mocker.Mock()
+    provisioner.provision.return_value = ProvisionResult(
+        executable="/custom/python",
+        source="explicit",
+        installed_ipykernel=True,
+    )
+
+    runtime = KernelRuntime(
+        backend=EchoSessionBackend(),
+        provisioner_factory=lambda _: provisioner,
+    )
+
+    status, started_new = runtime.start(
+        project_root=project_dir,
+        session_id=" default ",
+    )
+
+    persisted = SessionStore(project_dir, session_id="default").load_session()
+
+    assert started_new is True
+    assert status.alive is True
+    assert persisted is not None
+    assert persisted.session_id == "default"
 
 
 def test_runtime_start_defaults_auto_install_to_false(

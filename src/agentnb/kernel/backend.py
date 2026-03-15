@@ -4,24 +4,35 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
-from typing import Any, Protocol, cast
+from typing import Protocol, cast
 
 import zmq
 from jupyter_client import BlockingKernelClient
 
-from .contracts import (
-    ExecutionEvent,
+from ..contracts import (
     ExecutionResult,
     ExecutionSink,
     KernelStatus,
     utc_now_iso,
 )
-from .errors import BackendOperationError
-from .execution_events import ExecutionResultAccumulator, dispatch_event
-from .session import SessionInfo, pid_exists
+from ..errors import BackendOperationError
+from ..execution_events import ExecutionResultAccumulator, dispatch_output_item
+from ..execution_output import output_item_from_iopub_message
+from ..session import SessionInfo, pid_exists
+from ..state import SessionStateFiles
+from .jupyter_protocol import (
+    ExecuteInputMessage,
+    ShellReplyMessage,
+    message_parent_id,
+    message_type,
+    parse_iopub_message,
+    parse_shell_reply_message,
+)
 
 STARTUP_CODE = """import os
 import sys
@@ -38,12 +49,22 @@ class BackendExecutionTimeout(TimeoutError):
     pass
 
 
+@dataclass(slots=True, frozen=True)
+class BackendCapabilities:
+    supports_stream: bool = False
+    supports_interrupt: bool = False
+    supports_background: bool = False
+    supports_artifacts: bool = False
+
+
 class RuntimeBackend(Protocol):
+    @property
+    def capabilities(self) -> BackendCapabilities: ...
+
     def start(
         self,
         project_root: Path,
-        state_dir: Path,
-        session_id: str,
+        session_state: SessionStateFiles,
         python_executable: str,
     ) -> SessionInfo: ...
 
@@ -69,17 +90,26 @@ class LocalIPythonBackend:
         self._startup_code = startup_code
         self._startup_timeout_s = startup_timeout_s
         self._zmq_context = zmq.Context.instance()
+        self._capabilities = BackendCapabilities(
+            supports_stream=True,
+            supports_interrupt=True,
+            supports_background=False,
+            supports_artifacts=False,
+        )
+
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return self._capabilities
 
     def start(
         self,
         project_root: Path,
-        state_dir: Path,
-        session_id: str,
+        session_state: SessionStateFiles,
         python_executable: str,
     ) -> SessionInfo:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        connection_file = state_dir / f"kernel-{session_id}.json"
-        log_file = state_dir / f"kernel-{session_id}.log"
+        session_state.state_dir.mkdir(parents=True, exist_ok=True)
+        connection_file = session_state.connection_file
+        log_file = session_state.log_file
         if connection_file.exists():
             connection_file.unlink()
         if log_file.exists():
@@ -100,7 +130,7 @@ class LocalIPythonBackend:
             )
 
         session = SessionInfo(
-            session_id=session_id,
+            session_id=session_state.session_id,
             pid=process.pid,
             connection_file=str(connection_file),
             python_executable=python_executable,
@@ -158,9 +188,9 @@ class LocalIPythonBackend:
                 if remaining <= 0:
                     break
                 msg = client.get_shell_msg(timeout=remaining)
-                if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                if message_parent_id(_message_mapping(msg)) != msg_id:
                     continue
-                alive = msg.get("msg_type") == "kernel_info_reply"
+                alive = message_type(_message_mapping(msg)) == "kernel_info_reply"
                 break
         except Exception:
             alive = bool(client.is_alive())
@@ -211,70 +241,28 @@ class LocalIPythonBackend:
                 except Empty as exc:
                     raise BackendExecutionTimeout from exc
 
-                if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                parsed_message = parse_iopub_message(_message_mapping(msg))
+                if parsed_message is None or parsed_message.parent_id != msg_id:
+                    continue
+                if isinstance(parsed_message, ExecuteInputMessage):
+                    accumulator.set_execution_count(parsed_message.execution_count)
                     continue
 
-                msg_type = msg.get("msg_type")
-                content = msg.get("content", {})
+                item = output_item_from_iopub_message(parsed_message)
+                if item is None:
+                    continue
 
-                if msg_type == "stream":
-                    name = content.get("name", "stdout")
-                    text = str(content.get("text", ""))
-                    dispatch_event(
-                        accumulator=accumulator,
-                        event=ExecutionEvent(
-                            kind=name if name == "stderr" else "stdout",
-                            content=text,
-                        ),
-                        sink=event_sink,
-                    )
-                elif msg_type == "execute_result":
-                    value = _extract_text_plain(content)
-                    dispatch_event(
-                        accumulator=accumulator,
-                        event=ExecutionEvent(kind="result", content=value),
-                        sink=event_sink,
-                    )
-                elif msg_type == "display_data":
-                    value = _extract_text_plain(content)
-                    if value:
-                        dispatch_event(
-                            accumulator=accumulator,
-                            event=ExecutionEvent(kind="display", content=value),
-                            sink=event_sink,
-                        )
-                elif msg_type == "execute_input":
-                    accumulator.set_execution_count(content.get("execution_count"))
-                elif msg_type == "error":
-                    dispatch_event(
-                        accumulator=accumulator,
-                        event=ExecutionEvent(
-                            kind="error",
-                            content=str(content.get("evalue", "")) or None,
-                            metadata={
-                                "ename": content.get("ename"),
-                                "traceback": content.get("traceback") or [],
-                            },
-                        ),
-                        sink=event_sink,
-                    )
-                elif msg_type == "status":
-                    state = content.get("execution_state")
-                    if isinstance(state, str):
-                        dispatch_event(
-                            accumulator=accumulator,
-                            event=ExecutionEvent(kind="status", content=state),
-                            sink=event_sink,
-                        )
-                        if state == "idle":
-                            idle_received = True
+                dispatch_output_item(
+                    accumulator=accumulator,
+                    item=item,
+                    sink=event_sink,
+                )
+                if item.kind == "status" and item.state == "idle":
+                    idle_received = True
 
             shell_reply = self._shell_reply(client=client, msg_id=msg_id)
-            shell_content: dict[str, object] = {}
             if shell_reply is not None:
-                shell_content = _as_dict(shell_reply.get("content"))
-            if shell_content:
-                accumulator.apply_shell_reply(cast(dict[str, Any], shell_content))
+                accumulator.apply_shell_reply(shell_reply)
 
         finally:
             _close_client(client)
@@ -378,7 +366,7 @@ _ip.run_line_magic("reset", "-f")
         finally:
             _close_client(client)
 
-    def _shell_reply(self, client: BlockingKernelClient, msg_id: str) -> dict[str, object] | None:
+    def _shell_reply(self, client: BlockingKernelClient, msg_id: str) -> ShellReplyMessage | None:
         deadline = time.monotonic() + 1.0
         while True:
             remaining = deadline - time.monotonic()
@@ -388,19 +376,9 @@ _ip.run_line_magic("reset", "-f")
                 shell_msg = client.get_shell_msg(timeout=remaining)
             except Empty:
                 return None
-            if shell_msg.get("parent_header", {}).get("msg_id") == msg_id:
-                return shell_msg
-
-
-def _extract_text_plain(content: dict[str, object]) -> str | None:
-    data = content.get("data")
-    if not isinstance(data, dict):
-        return None
-    data_dict = cast(dict[str, object], data)
-    text_plain = data_dict.get("text/plain")
-    if text_plain is None:
-        return None
-    return str(text_plain)
+            parsed_message = parse_shell_reply_message(_message_mapping(shell_msg))
+            if parsed_message is not None and parsed_message.parent_id == msg_id:
+                return parsed_message
 
 
 def _uptime_seconds(started_at: str) -> float | None:
@@ -429,9 +407,9 @@ def _close_client(client: BlockingKernelClient) -> None:
             close()
 
 
-def _as_dict(value: object) -> dict[str, object]:
-    if isinstance(value, dict):
-        return cast(dict[str, object], value)
+def _message_mapping(value: object) -> Mapping[str, object]:
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, object], value)
     return {}
 
 

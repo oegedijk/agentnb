@@ -416,6 +416,10 @@ def test_render_human_runs_list_and_wait_error_shape() -> None:
             "Cancel requested for run run-1.",
         ),
         (
+            {"execution_id": "run-1", "cancel_requested": True, "status": "ok"},
+            "Cancel requested for run run-1, but it completed before cancellation took effect.",
+        ),
+        (
             {"execution_id": "run-1", "cancel_requested": False, "status": "ok"},
             "Run run-1 is already ok.",
         ),

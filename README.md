@@ -51,6 +51,9 @@ df.head()
 PY
 ```
 
+That applies to background work too. Avoid passing literal `\n` escapes inside a
+single shell argument for multiline snippets; use `--file` or stdin/heredoc.
+
 For lower-noise agent integrations, you can set defaults once per shell:
 
 ```bash
@@ -87,7 +90,7 @@ Important:
 - Drive one session serially: wait for each command to finish before sending the next.
 - Prefer a final expression over `print(...)` when you want a compact `result` payload.
 - Use `vars --recent N` or `vars --match TEXT` once the namespace gets noisy.
-- Pass `--session NAME` on kernel-bound commands when you are working with more than one live session.
+- Once more than one live session exists, pass `--session NAME` on kernel-bound commands.
 
 Use `agentnb doctor --json` if startup fails, `agentnb interrupt --json` if execution hangs, and `agentnb reset --json` if the namespace needs a clean slate.
 
@@ -137,7 +140,7 @@ Notes:
 - `history` shows semantic user-visible steps by default such as `exec`, `vars`, `inspect`, `reload`, and `reset`.
 - Use `history --all` to include internal helper executions sent to the kernel.
 - `runs` exposes durable execution records keyed by `execution_id`; use it for background work and exact run lookup.
-- `exec --background` returns immediately with an `execution_id`; use `runs show` for the latest snapshot, `runs follow` for live progress, `runs wait` for the final snapshot, and `runs cancel` to stop the run.
+- `exec --background` returns immediately with an `execution_id`; use `runs show` for the latest persisted snapshot, `runs follow` for live progress, `runs wait` for the final snapshot, and `runs cancel` to stop the run.
 - When multiple live sessions exist, kernel-bound commands require `--session NAME` unless there is only one live session to infer.
 - Module reloading is explicit. `reload MODULE` reloads one imported project-local module.
 - Bare `reload` reloads all currently imported project-local modules and reports rebound names and possible stale objects.
@@ -212,6 +215,7 @@ If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORM
 - `SessionStore`: project/session metadata and stale cleanup
 - `ExecutionStore`: append-only JSONL run records keyed by `execution_id`
 - `ExecutionService`: foreground/background execution lifecycle and run queries
+- `CommandJournal`: unified read path over semantic history and persisted execution records
 - `HistoryStore`: typed JSONL history records for semantic and internal execution history
 - `KernelRuntime`: lifecycle + execution API
 - `RuntimeBackend`: backend interface, with local IPython backend for v0.1
@@ -225,7 +229,7 @@ If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORM
 uv sync --extra dev
 uv run ruff check src tests
 uv run ruff format --check src tests
-uv run ty check src
+uv run ty check src tests
 uv run pytest
 ```
 

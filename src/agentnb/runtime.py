@@ -26,6 +26,7 @@ from .kernel.backend import (
 from .kernel.provisioner import KernelProvisioner
 from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
+from .state import StateRepository
 
 
 class KernelRuntime:
@@ -123,6 +124,7 @@ class KernelRuntime:
         return self.start(project_root=project_root, session_id=session_id)
 
     def list_sessions(self, project_root: Path) -> list[SessionSummary]:
+        current_session_id = self.current_session_id(project_root=project_root)
         entries: list[SessionSummary] = []
         for session in SessionStore.list_sessions(project_root):
             store = SessionStore(project_root=project_root, session_id=session.session_id)
@@ -145,6 +147,7 @@ class KernelRuntime:
                     "python": status.python,
                     "last_activity": self._last_activity(project_root, current.session_id),
                     "is_default": current.session_id == DEFAULT_SESSION_ID,
+                    "is_current": current.session_id == current_session_id,
                 }
             )
         return entries
@@ -162,6 +165,7 @@ class KernelRuntime:
             self._backend.stop(session)
 
         store.delete_session()
+        self.clear_current_session_id(project_root=project_root, expected_session_id=session_id)
         return {
             "deleted": True,
             "session_id": session_id,
@@ -177,15 +181,42 @@ class KernelRuntime:
     ) -> str:
         if requested_session_id is not None:
             return requested_session_id
+
+        preferred_session_id = self.current_session_id(project_root=project_root)
         if not require_live_session:
-            return DEFAULT_SESSION_ID
+            return preferred_session_id or DEFAULT_SESSION_ID
 
         sessions = self.list_sessions(project_root=project_root)
+        if preferred_session_id is not None:
+            live_session_ids = {str(session["session_id"]) for session in sessions}
+            if not live_session_ids:
+                return preferred_session_id
+            if preferred_session_id in live_session_ids:
+                return preferred_session_id
         if not sessions:
             return DEFAULT_SESSION_ID
         if len(sessions) == 1:
             return str(sessions[0]["session_id"])
         raise AmbiguousSessionError([str(session["session_id"]) for session in sessions])
+
+    def current_session_id(self, *, project_root: Path) -> str | None:
+        return StateRepository(project_root).session_preferences().current_session_id
+
+    def remember_current_session(self, *, project_root: Path, session_id: str) -> None:
+        canonical_session_id = SessionStore(
+            project_root=project_root, session_id=session_id
+        ).session_id
+        StateRepository(project_root).set_current_session_id(canonical_session_id)
+
+    def clear_current_session_id(
+        self,
+        *,
+        project_root: Path,
+        expected_session_id: str | None = None,
+    ) -> None:
+        StateRepository(project_root).clear_current_session_id(
+            expected_session_id=expected_session_id
+        )
 
     def wait_for_ready(
         self,

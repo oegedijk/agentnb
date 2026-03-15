@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Any
 
 import click
 
+from .advice import AdviceContext
 from .app import (
     AgentNBApp,
     DoctorRequest,
@@ -29,7 +29,6 @@ from .app import (
     StatusRequest,
     StopRequest,
     VarsRequest,
-    suggestions_for_command,
 )
 from .contracts import (
     CommandResponse,
@@ -37,24 +36,38 @@ from .contracts import (
     ExecutionSink,
     error_response,
 )
-from .errors import AgentNBException, InvalidInputError
+from .errors import AgentNBException
 from .execution import ExecutionService
+from .execution_invocation import ExecInvocationPolicy, OutputSelector
+from .invocation import ROOT_OPTION_SPECS, InvocationResolver
 from .ops import NotebookOps
 from .output import RenderOptions, render_response
 from .runtime import KernelRuntime
+from .selectors import RunReference, parse_run_reference
 from .session import DEFAULT_SESSION_ID, resolve_project_root, validate_session_id
 
 runtime = KernelRuntime()
 ops = NotebookOps(runtime)
 executions = ExecutionService(runtime)
 application = AgentNBApp(runtime=runtime, executions=executions, ops=ops)
-_ROOT_FLAG_NAMES = {"--json", "--agent", "--quiet", "--no-suggestions"}
+invocations = InvocationResolver()
 
 
 class AgentGroup(click.Group):
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        normalized = _normalize_root_flags(args)
-        return super().parse_args(ctx, normalized)
+        intent = invocations.resolve_invocation_intent(
+            args,
+            known_commands=self.list_commands(ctx),
+            cwd=Path.cwd(),
+            stdin=sys.stdin,
+        )
+        return super().parse_args(ctx, list(intent.argv))
+
+
+def root_options(func):
+    for spec in reversed(ROOT_OPTION_SPECS):
+        func = click.option(*spec.param_decls, is_flag=True, help=spec.help_text)(func)
+    return func
 
 
 @click.group(
@@ -62,14 +75,7 @@ class AgentGroup(click.Group):
     invoke_without_command=True,
     context_settings={"help_option_names": ["--help", "-h"]},
 )
-@click.option("--json", "root_as_json", is_flag=True, help="Output all commands as JSON")
-@click.option(
-    "--agent",
-    is_flag=True,
-    help="Agent preset: JSON output with deterministic, low-noise defaults.",
-)
-@click.option("--quiet", is_flag=True, help="Reduce non-essential human output")
-@click.option("--no-suggestions", is_flag=True, help="Suppress next-step suggestions")
+@root_options
 @click.pass_context
 def main(
     ctx: click.Context,
@@ -125,7 +131,7 @@ def main(
     Use `doctor --fix` for automatic repair. Top-level flags such as --agent
     and --json can be placed before or after the subcommand.
     """
-    ctx.obj = _resolve_render_options(
+    ctx.obj = RenderOptions.resolve(
         root_as_json=root_as_json,
         agent=agent,
         quiet=quiet,
@@ -183,6 +189,15 @@ def _session_option_callback(
         return validate_session_id(value)
     except AgentNBException as exc:
         raise click.BadParameter(exc.message) from exc
+
+
+def _run_reference_callback(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: str,
+) -> RunReference:
+    del ctx, param
+    return parse_run_reference(value)
 
 
 def _emit(response: CommandResponse, *, as_json: bool) -> None:
@@ -268,7 +283,7 @@ def _emit_stream_completion(
         if response.status == "ok" and human_stream is not None and not human_stream.emitted_output:
             click.echo("Execution completed.")
         if response.status == "error":
-            rendered = render_response(response, options=replace(options, as_json=False))
+            rendered = render_response(response, options=options)
             if rendered:
                 click.echo(rendered, err=True)
         elif response.suggestions:
@@ -349,7 +364,7 @@ def exec_cmd(
     ensure_started: bool,
     background: bool,
     stream: bool,
-    output_selector: str | None,
+    output_selector: OutputSelector | None,
     project: Path | None,
     session_id: str | None,
     as_json: bool,
@@ -374,7 +389,7 @@ def exec_cmd(
       PY
     """
     try:
-        source = _resolve_code_input(code=code, filepath=filepath)
+        source = invocations.resolve_exec_source(code=code, filepath=filepath, stdin=sys.stdin)
     except AgentNBException as exc:
         project_root = resolve_project_root(cwd=Path.cwd(), override=project)
         response = error_response(
@@ -386,7 +401,14 @@ def exec_cmd(
             ename=exc.ename,
             evalue=exc.evalue,
             traceback=exc.traceback,
-            suggestions=suggestions_for_command("exec", "error", {}),
+            suggestions=application.advisor.suggestions(
+                AdviceContext(
+                    command_name="exec",
+                    response_status="error",
+                    data={},
+                    error_code=exc.code,
+                )
+            ),
         )
         if stream:
             _emit_stream_completion(response, as_json=as_json)
@@ -396,13 +418,15 @@ def exec_cmd(
 
     request = ExecRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
-        code=source,
+        code=source.code,
         session_id=session_id,
         timeout_s=timeout,
-        ensure_started=ensure_started,
-        background=background,
-        stream=stream,
-        output_selector=output_selector,
+        invocation=ExecInvocationPolicy.from_cli(
+            ensure_started=ensure_started,
+            background=background,
+            stream=stream,
+            output_selector=output_selector,
+        ),
     )
 
     if stream:
@@ -716,48 +740,58 @@ def runs_list(
 
 
 @runs_group.command("show")
-@click.argument("execution_id")
+@click.argument("run_reference", callback=_run_reference_callback)
 @project_option
 @json_option
-def runs_show(execution_id: str, project: Path | None, as_json: bool) -> None:
+def runs_show(run_reference: RunReference, project: Path | None, as_json: bool) -> None:
     """Show a persisted snapshot of one exec/reset run."""
 
     request = RunLookupRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
-        execution_id=execution_id,
+        run_reference=run_reference,
     )
     _emit(application.runs_show(request), as_json=as_json)
 
 
 @runs_group.command("wait")
-@click.argument("execution_id")
+@click.argument("run_reference", callback=_run_reference_callback)
 @click.option("--timeout", default=30.0, show_default=True, type=float)
 @project_option
 @json_option
-def runs_wait(execution_id: str, timeout: float, project: Path | None, as_json: bool) -> None:
+def runs_wait(
+    run_reference: RunReference,
+    timeout: float,
+    project: Path | None,
+    as_json: bool,
+) -> None:
     """Wait for one background run to finish and return its final snapshot."""
 
     request = RunsWaitRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
-        execution_id=execution_id,
+        run_reference=run_reference,
         timeout_s=timeout,
     )
     _emit(application.runs_wait(request), as_json=as_json)
 
 
 @runs_group.command("follow")
-@click.argument("execution_id")
+@click.argument("run_reference", callback=_run_reference_callback)
 @click.option("--timeout", default=30.0, show_default=True, type=float)
 @project_option
 @json_option
-def runs_follow(execution_id: str, timeout: float, project: Path | None, as_json: bool) -> None:
+def runs_follow(
+    run_reference: RunReference,
+    timeout: float,
+    project: Path | None,
+    as_json: bool,
+) -> None:
     """Follow one persisted run and stream newly recorded events until it finishes."""
     project_root = resolve_project_root(cwd=Path.cwd(), override=project)
     options = _current_render_options(local_as_json=as_json)
     stream: ExecutionSink = JsonExecutionStream() if options.as_json else HumanExecutionStream()
     request = RunsFollowRequest(
         project_root=project_root,
-        execution_id=execution_id,
+        run_reference=run_reference,
         timeout_s=timeout,
     )
     response = application.runs_follow(request, event_sink=stream)
@@ -765,15 +799,15 @@ def runs_follow(execution_id: str, timeout: float, project: Path | None, as_json
 
 
 @runs_group.command("cancel")
-@click.argument("execution_id")
+@click.argument("run_reference", callback=_run_reference_callback)
 @project_option
 @json_option
-def runs_cancel(execution_id: str, project: Path | None, as_json: bool) -> None:
+def runs_cancel(run_reference: RunReference, project: Path | None, as_json: bool) -> None:
     """Cancel one running background run and report what happened to the session."""
 
     request = RunsCancelRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
-        execution_id=execution_id,
+        run_reference=run_reference,
     )
     _emit(application.runs_cancel(request), as_json=as_json)
 
@@ -788,91 +822,13 @@ def background_run(execution_id: str, project: Path | None) -> None:
     executions.complete_background_run(project_root=project_root, execution_id=execution_id)
 
 
-def _resolve_code_input(code: str | None, filepath: Path | None) -> str:
-    if filepath is not None:
-        if not filepath.exists():
-            raise InvalidInputError(f"File not found: {filepath}")
-        return filepath.read_text(encoding="utf-8")
-
-    if code is not None:
-        return code
-
-    if not sys.stdin.isatty():
-        stdin_data = sys.stdin.read()
-        if stdin_data.strip():
-            return stdin_data
-        raise InvalidInputError("No code provided through stdin")
-
-    raise InvalidInputError("No code provided. Use code argument, --file, or pipe via stdin")
-
-
-def _resolve_render_options(
-    *,
-    root_as_json: bool,
-    agent: bool,
-    quiet: bool,
-    no_suggestions: bool,
-) -> RenderOptions:
-    env_mode = os.getenv("AGENTNB_FORMAT", "").strip().lower()
-    env_as_json = env_mode in {"json", "agent"}
-    env_quiet = _env_flag("AGENTNB_QUIET")
-    env_no_suggestions = _env_flag("AGENTNB_NO_SUGGESTIONS")
-
-    options = RenderOptions(
-        as_json=root_as_json or env_as_json,
-        show_suggestions=not (no_suggestions or env_no_suggestions),
-        quiet=quiet or env_quiet,
-    )
-    if agent or env_mode == "agent":
-        options.as_json = True
-        options.show_suggestions = False
-        options.quiet = True
-    return options
-
-
 def _current_render_options(*, local_as_json: bool) -> RenderOptions:
     ctx = click.get_current_context(silent=True)
     root_options = ctx.find_root().obj if ctx is not None else None
     options = root_options if isinstance(root_options, RenderOptions) else RenderOptions()
     if local_as_json:
-        options = replace(options, as_json=True)
+        options = options.with_local_json()
     return options
-
-
-def _env_flag(name: str) -> bool:
-    value = os.getenv(name, "").strip().lower()
-    return value in {"1", "true", "yes", "on"}
-
-
-def _normalize_root_flags(args: list[str]) -> list[str]:
-    if not args:
-        return args
-
-    boundary = args.index("--") if "--" in args else len(args)
-    command_index: int | None = None
-    for index, token in enumerate(args[:boundary]):
-        if not token.startswith("-"):
-            command_index = index
-            break
-
-    if command_index is None:
-        return args
-
-    leading = args[:command_index]
-    command = args[command_index]
-    tail = args[command_index + 1 : boundary]
-    suffix = args[boundary:]
-    moved_flags: list[str] = []
-    remaining_tail: list[str] = []
-    for token in tail:
-        if token in _ROOT_FLAG_NAMES:
-            moved_flags.append(token)
-        else:
-            remaining_tail.append(token)
-
-    if not moved_flags:
-        return args
-    return [*leading, *moved_flags, command, *remaining_tail, *suffix]
 
 
 if __name__ == "__main__":

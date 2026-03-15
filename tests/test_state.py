@@ -7,7 +7,13 @@ from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.history import HistoryStore, user_command_record
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, SessionStore
-from agentnb.state import STATE_SCHEMA_VERSION, StateManifest, StateRepository, session_file_name
+from agentnb.state import (
+    STATE_SCHEMA_VERSION,
+    SessionPreferences,
+    StateManifest,
+    StateRepository,
+    session_file_name,
+)
 
 
 def test_state_repository_exposes_registered_resource_paths(project_dir) -> None:
@@ -19,6 +25,7 @@ def test_state_repository_exposes_registered_resource_paths(project_dir) -> None
     assert set(resources) >= {
         "history",
         "executions",
+        "session_preferences",
         "legacy_session",
         "snapshots",
         "artifacts",
@@ -33,6 +40,22 @@ def test_state_repository_exposes_registered_resource_paths(project_dir) -> None
     assert repository.snapshots_dir == project_dir / ".agentnb" / "snapshots"
     assert repository.artifacts_dir == project_dir / ".agentnb" / "artifacts"
     assert repository.exports_dir == project_dir / ".agentnb" / "exports"
+
+
+def test_state_repository_roundtrips_session_preferences(project_dir) -> None:
+    repository = StateRepository(project_dir)
+    preferences = SessionPreferences(current_session_id="analysis")
+
+    repository.save_session_preferences(preferences)
+
+    assert repository.session_preferences() == preferences
+
+
+def test_state_repository_session_files_excludes_session_preferences(project_dir) -> None:
+    repository = StateRepository(project_dir)
+    repository.save_session_preferences(SessionPreferences(current_session_id="analysis"))
+
+    assert repository.session_files() == []
 
 
 def test_state_repository_exposes_snapshot_resource_selection(project_dir) -> None:

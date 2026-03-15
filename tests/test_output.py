@@ -5,7 +5,7 @@ import json
 import pytest
 
 from agentnb.contracts import error_response, success_response
-from agentnb.output import RenderOptions, render_human, render_response
+from agentnb.output import OutputProfile, RenderOptions, render_human, render_response
 
 
 def test_render_response_json_matches_command_payload() -> None:
@@ -17,7 +17,10 @@ def test_render_response_json_matches_command_payload() -> None:
         suggestions=["Run `agentnb exec --json`."],
     )
 
-    rendered = render_response(response, options=RenderOptions(as_json=True))
+    rendered = render_response(
+        response,
+        options=RenderOptions(profile=OutputProfile.FULL_JSON),
+    )
 
     assert json.loads(rendered) == response.to_dict()
 
@@ -121,7 +124,7 @@ def test_render_human_quiet_suppresses_status_body() -> None:
 
     rendered = render_human(
         response,
-        options=RenderOptions(quiet=True, show_suggestions=False),
+        options=RenderOptions(quiet_human=True, suppress_suggestions=True),
     )
 
     assert rendered == ""
@@ -322,8 +325,20 @@ def test_render_human_sessions_views() -> None:
         session_id="default",
         data={
             "sessions": [
-                {"session_id": "default", "pid": 11, "python": "python", "is_default": True},
-                {"session_id": "analysis", "pid": 22, "python": None, "is_default": False},
+                {
+                    "session_id": "default",
+                    "pid": 11,
+                    "python": "python",
+                    "is_default": True,
+                    "is_current": False,
+                },
+                {
+                    "session_id": "analysis",
+                    "pid": 22,
+                    "python": None,
+                    "is_default": False,
+                    "is_current": True,
+                },
             ]
         },
     )
@@ -341,7 +356,7 @@ def test_render_human_sessions_views() -> None:
     )
 
     assert render_human(list_response, options=RenderOptions()) == (
-        "default (default): pid 11 using python\nanalysis: pid 22"
+        "default (default): pid 11 using python\nanalysis (current): pid 22"
     )
     assert render_human(empty_response, options=RenderOptions()) == "No sessions found."
     assert (
@@ -462,7 +477,7 @@ def test_render_human_reload_variants_and_unknown_command() -> None:
 
     assert render_human(
         reload_response,
-        options=RenderOptions(show_suggestions=False),
+        options=RenderOptions(suppress_suggestions=True),
     ) == (
         "Reloaded module: localmod\n"
         "Rebound names: greet\n"
@@ -472,3 +487,18 @@ def test_render_human_reload_variants_and_unknown_command() -> None:
         "Reload note"
     )
     assert render_human(unknown_response, options=RenderOptions()) == '{\n  "alpha": 1\n}'
+
+
+def test_render_options_resolve_agent_profile() -> None:
+    options = RenderOptions.resolve(
+        root_as_json=False,
+        agent=True,
+        quiet=False,
+        no_suggestions=False,
+        env={},
+    )
+
+    assert options.profile == OutputProfile.AGENT
+    assert options.as_json is True
+    assert options.quiet is True
+    assert options.show_suggestions is False

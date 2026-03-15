@@ -200,6 +200,84 @@ def test_cli_exec_returns_top_level_error_when_execution_fails(
     assert len(traceback) <= 6
 
 
+def test_cli_implicit_exec_argument_uses_hot_path(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    ensure_calls: list[dict[str, object]] = []
+
+    def ensure_stub(**kwargs: object) -> tuple[object, bool]:
+        ensure_calls.append(dict(kwargs))
+        return object(), True
+
+    cli.runtime.ensure_started = ensure_stub  # type: ignore[method-assign]
+    cli.runtime.execute = lambda **_: _ok_execution(result="2")  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["--project", str(project_dir), "--json", "1 + 1"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "exec"
+    assert payload["data"]["result"] == "2"
+    assert payload["data"]["ensured_started"] is True
+    assert ensure_calls[0]["session_id"] == "default"
+
+
+def test_cli_implicit_exec_file_uses_hot_path(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    script = project_dir / "analysis.py"
+    script.write_text("value = 1\nvalue + 1\n", encoding="utf-8")
+    executed_code: list[str] = []
+
+    cli.runtime.ensure_started = lambda **_: (object(), True)  # type: ignore[method-assign]
+
+    def execute_stub(**kwargs: object) -> ExecutionResult:
+        executed_code.append(str(kwargs["code"]))
+        return _ok_execution(result="2")
+
+    cli.runtime.execute = execute_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["--project", str(project_dir), "--json", str(script)])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "exec"
+    assert payload["data"]["result"] == "2"
+    assert payload["data"]["ensured_started"] is True
+    assert executed_code == ["value = 1\nvalue + 1\n"]
+
+
+def test_cli_implicit_exec_stdin_uses_hot_path(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    ensure_calls: list[dict[str, object]] = []
+
+    def ensure_stub(**kwargs: object) -> tuple[object, bool]:
+        ensure_calls.append(dict(kwargs))
+        return object(), True
+
+    cli.runtime.ensure_started = ensure_stub  # type: ignore[method-assign]
+    cli.runtime.execute = lambda **_: _ok_execution(result="2")  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["--project", str(project_dir), "--json"], input="1 + 1")
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "exec"
+    assert payload["data"]["result"] == "2"
+    assert payload["data"]["ensured_started"] is True
+    assert ensure_calls[0]["session_id"] == "default"
+
+
 def test_cli_exec_stream_json_emits_start_events_and_final(
     cli_runner: CliRunner,
     project_dir: Path,
@@ -673,6 +751,14 @@ def test_cli_no_suggestions_strips_suggestions_from_json(
 
     payload = _payload(result.output)
     assert payload["suggestions"] == []
+
+
+def test_cli_quiet_root_flag_works_after_subcommand(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    result = cli_runner.invoke(main, ["status", "--quiet", "--project", str(project_dir)])
+    assert result.exit_code == 0
+    assert result.output == ""
 
 
 def test_cli_env_format_json_applies_without_per_command_flag(
@@ -1217,6 +1303,34 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
     assert payload["data"]["run"]["terminal_reason"] == "cancelled"
     assert payload["data"]["run"]["cancel_requested"] is True
     assert payload["data"]["run"]["recorded_ename"] == "KeyboardInterrupt"
+
+
+def test_cli_runs_show_accepts_latest_selector(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.list_runs = lambda **_: [  # type: ignore[method-assign]
+        {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
+        {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
+    ]
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-2",
+        "ts": "2026-03-11T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "ok",
+        "duration_ms": 10,
+        "result": "2",
+        "events": [],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "@latest", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["run"]["execution_id"] == "run-2"
 
 
 def test_cli_runs_show_human_clarifies_snapshot_for_running_run(

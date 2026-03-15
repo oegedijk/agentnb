@@ -20,8 +20,10 @@ from agentnb.app import (
 from agentnb.contracts import KernelStatus
 from agentnb.errors import AmbiguousSessionError
 from agentnb.execution import ExecutionRecord, ExecutionService, ManagedExecution
+from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.journal import JournalEntry
 from agentnb.runtime import KernelRuntime
+from agentnb.selectors import parse_run_reference
 
 
 class DummySink:
@@ -65,7 +67,7 @@ def test_app_exec_rejects_invalid_flag_combinations_before_runtime_lookup(
     project_dir,
     background: bool,
     stream: bool,
-    output_selector: str | None,
+    output_selector: OutputSelector | None,
     expected_message: str,
 ) -> None:
     runtime = Mock(spec=KernelRuntime)
@@ -76,9 +78,11 @@ def test_app_exec_rejects_invalid_flag_combinations_before_runtime_lookup(
         ExecRequest(
             project_root=project_dir,
             code="1 + 1",
-            background=background,
-            stream=stream,
-            output_selector=output_selector,
+            invocation=ExecInvocationPolicy(
+                background=background,
+                stream=stream,
+                output_selector=output_selector,
+            ),
         )
     )
 
@@ -115,7 +119,7 @@ def test_app_exec_success_routes_through_resolved_session(project_dir) -> None:
             project_root=project_dir,
             code="1 + 1",
             timeout_s=7,
-            ensure_started=True,
+            invocation=ExecInvocationPolicy(ensure_started=True),
         )
     )
 
@@ -161,7 +165,7 @@ def test_app_exec_streaming_failure_returns_top_level_execution_error(project_di
         ExecRequest(
             project_root=project_dir,
             code="1 / 0",
-            stream=True,
+            invocation=ExecInvocationPolicy(stream=True),
         ),
         event_sink=sink,
     )
@@ -206,8 +210,7 @@ def test_app_exec_background_success_uses_background_service(project_dir) -> Non
             project_root=project_dir,
             code="long_running()",
             session_id="analysis",
-            ensure_started=True,
-            background=True,
+            invocation=ExecInvocationPolicy(ensure_started=True, background=True),
         )
     )
 
@@ -252,7 +255,7 @@ def test_app_exec_output_selector_adds_selected_text(project_dir) -> None:
         ExecRequest(
             project_root=project_dir,
             code="print('hello')\n1 + 1",
-            output_selector="result",
+            invocation=ExecInvocationPolicy(output_selector="result"),
         )
     )
 
@@ -506,7 +509,7 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     response = app.runs_follow(
         RunsFollowRequest(
             project_root=project_dir,
-            execution_id="run-1",
+            run_reference=parse_run_reference("run-1"),
             timeout_s=4.0,
         ),
         event_sink=sink,
@@ -525,6 +528,37 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     )
 
 
+def test_app_runs_show_resolves_latest_selector_before_lookup(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    executions = Mock(spec=ExecutionService)
+    executions.list_runs.return_value = [
+        {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
+        {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
+    ]
+    executions.get_run.return_value = {
+        "execution_id": "run-2",
+        "session_id": "default",
+        "status": "ok",
+        "result": "2",
+    }
+    app = AgentNBApp(runtime=runtime, executions=executions)
+
+    response = app.runs_show(
+        RunLookupRequest(
+            project_root=project_dir,
+            run_reference=parse_run_reference("@latest"),
+        )
+    )
+
+    assert response.status == "ok"
+    assert response.data["run"]["execution_id"] == "run-2"
+    executions.list_runs.assert_called_once_with(project_root=project_dir.resolve())
+    executions.get_run.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        execution_id="run-2",
+    )
+
+
 @pytest.mark.parametrize(
     ("command_name", "request_factory"),
     [
@@ -532,14 +566,14 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
             "show",
             lambda project_dir: RunLookupRequest(
                 project_root=project_dir,
-                execution_id="run-1",
+                run_reference=parse_run_reference("run-1"),
             ),
         ),
         (
             "wait",
             lambda project_dir: RunsWaitRequest(
                 project_root=project_dir,
-                execution_id="run-1",
+                run_reference=parse_run_reference("run-1"),
                 timeout_s=4.0,
             ),
         ),
@@ -547,7 +581,7 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
             "follow",
             lambda project_dir: RunsFollowRequest(
                 project_root=project_dir,
-                execution_id="run-1",
+                run_reference=parse_run_reference("run-1"),
                 timeout_s=4.0,
             ),
         ),
@@ -653,6 +687,26 @@ def test_app_sessions_delete_routes_named_session_through_handle_command(project
         require_live_session=False,
     )
     runtime.delete_session.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        session_id="analysis",
+    )
+
+
+def test_app_status_remembers_explicit_session_selection(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.status.return_value = KernelStatus(alive=True, pid=123, busy=False)
+    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
+
+    response = app.status(
+        StatusRequest(
+            project_root=project_dir,
+            session_id="analysis",
+        )
+    )
+
+    assert response.status == "ok"
+    runtime.remember_current_session.assert_called_once_with(
         project_root=project_dir.resolve(),
         session_id="analysis",
     )

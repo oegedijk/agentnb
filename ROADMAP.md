@@ -47,7 +47,7 @@ Apply an Ousterhout lens here:
 - avoid spreading special cases across `cli.py`, app handlers, runtime methods, and render helpers
 - define each refactor by the complexity it should absorb, not by the number of files it touches
 
-- Invocation-resolution boundary:
+- Invocation-resolution boundary: done
   - purpose:
     - absorb hot-path syntax inference into one deep module so implicit execution does not turn Click handling into a pile of special cases
   - owns:
@@ -69,7 +69,7 @@ Apply an Ousterhout lens here:
   - tests:
     - direct resolver tests for argv, stdin, and file inference behavior
     - a few CLI contract tests for the surfaced syntax
-- Output-profile boundary:
+- Output-profile boundary: done
   - purpose:
     - separate exact machine contracts from cheap working output without letting mode checks spread through the CLI and renderer
   - owns:
@@ -93,7 +93,7 @@ Apply an Ousterhout lens here:
     - renderer tests at the profile boundary
     - contract tests for full `--json`
     - compact-mode tests for minimal success-path payloads
-- Selector-resolution boundary:
+- Selector-resolution boundary: done
   - purpose:
     - make convenient selectors possible without teaching every command how to guess ids and target objects
   - owns:
@@ -112,7 +112,7 @@ Apply an Ousterhout lens here:
   - tests:
     - direct resolver tests for active/latest/error cases
     - owning-boundary tests around ambiguous or missing targets
-- Session-preferences state boundary:
+- Session-preferences state boundary: done
   - purpose:
     - keep sticky current-session behavior as explicit project state rather than hidden CLI memory or runtime heuristics
   - owns:
@@ -131,7 +131,7 @@ Apply an Ousterhout lens here:
   - tests:
     - direct repository tests for reading and writing session preferences
     - runtime/app tests for precedence between explicit, sticky, sole-live, and default sessions
-- Advice-policy boundary:
+- Advice-policy boundary: done
   - purpose:
     - make next-step guidance cheap, mode-aware, and concrete instead of keeping a large hard-coded suggestion switch
   - owns:
@@ -152,7 +152,7 @@ Apply an Ousterhout lens here:
     - non-JSON modes are not constantly pushed back toward `--json`
   - tests:
     - advisor tests for success, error, ambiguous-session, and busy-session cases
-- Execution-invocation policy cleanup:
+- Execution-invocation policy cleanup: done
   - purpose:
     - keep execution semantics stable while allowing hot-path ergonomics to evolve cleanly
   - owns:

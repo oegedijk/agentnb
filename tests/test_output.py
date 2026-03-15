@@ -502,3 +502,25 @@ def test_render_options_resolve_agent_profile() -> None:
     assert options.as_json is True
     assert options.quiet is True
     assert options.show_suggestions is False
+
+
+def test_render_response_agent_uses_compact_projection() -> None:
+    response = success_response(
+        command="status",
+        project="/tmp/project",
+        session_id="default",
+        data={"alive": True, "pid": 123, "busy": False},
+        suggestions=["This should not appear in the agent payload."],
+    )
+
+    rendered = render_response(
+        response,
+        options=RenderOptions(profile=OutputProfile.AGENT),
+    )
+
+    assert json.loads(rendered) == {
+        "ok": True,
+        "command": "status",
+        "session_id": "default",
+        "data": {"alive": True, "pid": 123, "busy": False},
+    }

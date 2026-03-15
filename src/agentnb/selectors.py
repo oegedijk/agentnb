@@ -7,8 +7,10 @@ from typing import Literal, cast
 
 from .errors import AgentNBException
 from .execution import ExecutionService
+from .journal import JournalQuery
 
 RunReferenceKind = Literal["execution_id", "latest"]
+HistoryReferenceKind = Literal["execution_id", "latest", "last_error"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -18,11 +20,31 @@ class RunReference:
     raw: str
 
 
+@dataclass(slots=True, frozen=True)
+class HistoryReference:
+    kind: HistoryReferenceKind
+    value: str | None
+    raw: str
+
+
 def parse_run_reference(value: str) -> RunReference:
     normalized = value.strip()
     if normalized == "@latest":
         return RunReference(kind="latest", value=None, raw=normalized)
     return RunReference(kind="execution_id", value=normalized, raw=normalized)
+
+
+def parse_history_reference(value: str | None) -> HistoryReference | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if normalized == "@latest":
+        return HistoryReference(kind="latest", value=None, raw=normalized)
+    if normalized == "@last-error":
+        return HistoryReference(kind="last_error", value=None, raw=normalized)
+    return HistoryReference(kind="execution_id", value=normalized, raw=normalized)
 
 
 class RunSelectorResolver:
@@ -51,6 +73,52 @@ class RunSelectorResolver:
                 message=f"No runs found for selector: {reference.raw}",
             )
         return execution_id
+
+
+class HistorySelectorResolver:
+    def resolve_query(
+        self,
+        *,
+        session_id: str | None,
+        include_internal: bool,
+        errors_only: bool,
+        latest: bool,
+        last: int | None,
+        reference: HistoryReference | None,
+    ) -> JournalQuery:
+        if reference is None:
+            return JournalQuery(
+                session_id=session_id,
+                include_internal=include_internal,
+                errors_only=errors_only,
+                latest=latest,
+                last=last,
+            )
+
+        if errors_only or latest or last is not None:
+            raise ValueError(
+                "Use either a history selector or --errors/--latest/--last filters, not both."
+            )
+
+        if reference.kind == "execution_id":
+            assert reference.value is not None
+            return JournalQuery(
+                session_id=session_id,
+                include_internal=include_internal,
+                execution_id=reference.value,
+            )
+        if reference.kind == "latest":
+            return JournalQuery(
+                session_id=session_id,
+                include_internal=include_internal,
+                latest=True,
+            )
+        return JournalQuery(
+            session_id=session_id,
+            include_internal=include_internal,
+            errors_only=True,
+            latest=True,
+        )
 
 
 def _latest_run(runs: list[Mapping[str, object]]) -> Mapping[str, object] | None:

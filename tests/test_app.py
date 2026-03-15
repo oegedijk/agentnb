@@ -23,7 +23,7 @@ from agentnb.execution import ExecutionRecord, ExecutionService, ManagedExecutio
 from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.journal import JournalEntry
 from agentnb.runtime import KernelRuntime
-from agentnb.selectors import parse_run_reference
+from agentnb.selectors import parse_history_reference, parse_run_reference
 
 
 class DummySink:
@@ -328,13 +328,13 @@ def test_app_history_rejects_latest_and_last_combination_before_runtime_lookup(p
     assert response.error.code == "INVALID_INPUT"
     assert response.error.message == "Use either --latest or --last, not both."
     runtime.resolve_session_id.assert_not_called()
-    runtime.history.assert_not_called()
+    runtime.select_history.assert_not_called()
 
 
 def test_app_history_compacts_entries_and_applies_last_selection(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "default"
-    runtime.history.return_value = [
+    runtime.select_history.return_value.entries = [
         JournalEntry(
             kind="user_command",
             ts="2026-03-12T00:00:00+00:00",
@@ -377,16 +377,32 @@ def test_app_history_compacts_entries_and_applies_last_selection(project_dir) ->
     assert response.status == "ok"
     assert [entry["command_type"] for entry in response.data["entries"]] == ["exec", "vars"]
     assert response.data["entries"][0]["label"] == "exec beta = 2 beta + 1"
-    runtime.history.assert_called_once()
-    _assert_called_with_subset(
-        runtime.history,
-        project_root=project_dir.resolve(),
-        session_id="default",
-        errors_only=False,
-        include_internal=False,
-        latest=False,
-        last=2,
+    runtime.select_history.assert_called_once()
+    query = runtime.select_history.call_args.kwargs["query"]
+    assert query.session_id == "default"
+    assert query.errors_only is False
+    assert query.include_internal is False
+    assert query.latest is False
+    assert query.last == 2
+
+
+def test_app_history_reference_uses_selector_query(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "default"
+    runtime.select_history.return_value.entries = []
+    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
+
+    response = app.history(
+        HistoryRequest(
+            project_root=project_dir,
+            reference=parse_history_reference("@latest"),
+        )
     )
+
+    assert response.status == "ok"
+    query = runtime.select_history.call_args.kwargs["query"]
+    assert query.latest is True
+    assert query.errors_only is False
 
 
 def test_app_reset_failure_returns_top_level_execution_error(project_dir) -> None:

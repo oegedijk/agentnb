@@ -28,6 +28,9 @@ from .payloads import (
     VarDisplayEntry,
     VarsPayload,
 )
+from .projection import ResponseProjector
+
+projector = ResponseProjector()
 
 
 class OutputProfile(StrEnum):
@@ -94,7 +97,10 @@ class RenderOptions:
 
 def render_response(response: CommandResponse, *, options: RenderOptions) -> str:
     if options.as_json:
-        return json.dumps(response.to_dict(), ensure_ascii=True)
+        return json.dumps(
+            projector.project(response, profile=options.profile.value),
+            ensure_ascii=True,
+        )
     return render_human(response, options=options)
 
 

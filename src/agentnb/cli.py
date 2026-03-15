@@ -41,9 +41,14 @@ from .execution import ExecutionService
 from .execution_invocation import ExecInvocationPolicy, OutputSelector
 from .invocation import ROOT_OPTION_SPECS, InvocationResolver
 from .ops import NotebookOps
-from .output import RenderOptions, render_response
+from .output import RenderOptions, projector, render_response
 from .runtime import KernelRuntime
-from .selectors import RunReference, parse_run_reference
+from .selectors import (
+    HistoryReference,
+    RunReference,
+    parse_history_reference,
+    parse_run_reference,
+)
 from .session import DEFAULT_SESSION_ID, resolve_project_root, validate_session_id
 
 runtime = KernelRuntime()
@@ -200,6 +205,15 @@ def _run_reference_callback(
     return parse_run_reference(value)
 
 
+def _history_reference_callback(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: str | None,
+) -> HistoryReference | None:
+    del ctx, param
+    return parse_history_reference(value)
+
+
 def _emit(response: CommandResponse, *, as_json: bool) -> None:
     options = _current_render_options(local_as_json=as_json)
     if response.command == "exec" and response.data.get("selected_output") is not None:
@@ -277,7 +291,12 @@ def _emit_stream_completion(
         response = replace(response, suggestions=[])
 
     if options.as_json:
-        _emit_json_stream_frame({"type": "final", "response": response.to_dict()})
+        _emit_json_stream_frame(
+            {
+                "type": "final",
+                "response": projector.project(response, profile=options.profile.value),
+            }
+        )
     else:
         human_stream = stream if isinstance(stream, HumanExecutionStream) else None
         if response.status == "ok" and human_stream is not None and not human_stream.emitted_output:
@@ -573,6 +592,7 @@ def status(
 
 
 @main.command()
+@click.argument("reference", required=False, callback=_history_reference_callback)
 @click.option("--errors", is_flag=True, help="Only show failed executions")
 @click.option("--latest", is_flag=True, help="Show only the most recent history entry")
 @click.option("--last", type=click.IntRange(min=1), default=None, help="Show the last N entries")
@@ -581,6 +601,7 @@ def status(
 @session_option
 @json_option
 def history(
+    reference: HistoryReference | None,
     errors: bool,
     latest: bool,
     last: int | None,
@@ -599,6 +620,7 @@ def history(
     request = HistoryRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
         session_id=session_id,
+        reference=reference,
         errors=errors,
         latest=latest,
         last=last,

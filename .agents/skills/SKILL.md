@@ -5,181 +5,191 @@ description: Use this when working in a repo that has agentnb installed or under
 
 # agentnb
 
-Use this skill when iterative Python work would benefit from preserved in-memory state across turns or commands.
+Use this skill when Python work benefits from preserved in-memory state across commands.
 
 Treat `agentnb` as a persistent REPL for agents, or an append-only notebook without a notebook UI. It keeps live state and execution history, but it is not a notebook editor.
 
-Module reloading is explicit. Do not assume edited project files are reloaded
-automatically on each execution.
-
-`exec` follows normal IPython/Notebook behavior: if the final line of a code
-snippet is an expression, its value is returned as the result.
-`print(...)` goes to `stdout`; a bare final expression goes to `result`.
-
-Drive one project session serially. Do not issue multiple `agentnb` commands
-against the same live kernel at once; wait for one to finish before sending the next.
-
-When you need low-noise machine-readable output, prefer `agentnb --agent ...`.
-It returns compact JSON by default to reduce token usage.
-
-Top-level flags such as `--agent` and `--json` can be placed before or after
-the subcommand.
-
-Typical cases:
+Use it for:
 - exploring a codebase or API incrementally
 - keeping expensive imports, setup, or data loaded
 - inspecting live variables instead of rebuilding state from scratch
-- reloading a module after edits without restarting the whole Python process
+- reloading local modules after edits without restarting Python
 
-Do not use `agentnb` for simple one-shot shell or Python tasks where state does not matter.
+Do not use it for one-shot shell or Python tasks where state does not matter.
 
-## Startup
+## Mental Model
+
+- `agentnb "..."` is the cheap hot path.
+- A final expression becomes the execution result; `print(...)` goes to `stdout`.
+- Reloading is explicit. Edited project files do not auto-reload.
+- Drive one session serially. Wait for one command to finish before sending the next.
+
+## Running Code
 
 Run from the target project root when possible.
 
-Prefer the first-use path that starts only when needed:
+Use the implicit top-level form first:
 
 ```bash
-agentnb exec --ensure-started "from myapp.models import User" --json
+agentnb "from myapp.models import User"
+agentnb "User.query.limit(5)"
 ```
 
-Start or verify a kernel explicitly when you need lifecycle control:
+For multiline work, prefer stdin/heredoc or a file:
 
 ```bash
-agentnb status --json
-agentnb start --json
-agentnb status --wait --json
-```
-
-If `agentnb start` reports that `ipykernel` is missing, either rerun with
-`--auto-install` or use `agentnb doctor --fix --json`. Startup no longer
-installs dependencies unless asked.
-
-If a specific interpreter is required:
-
-```bash
-agentnb start --python /path/to/python --json
-```
-
-If startup fails, inspect the environment before retrying:
-
-```bash
-agentnb doctor --json
-agentnb doctor --fix --json
-```
-
-Notes:
-- By default, `agentnb` resolves the project from the current directory upward until it finds `pyproject.toml`.
-- `start` will reuse an already-alive kernel instead of spawning a duplicate.
-- Prefer `--json` when you need machine-readable output.
-- Use one command at a time per session.
-- Use `--session NAME` on kernel-bound commands when more than one live session exists.
-- `agentnb sessions list --json` shows live sessions and their metadata.
-
-## Core Loop
-
-Use this order for normal work:
-
-1. `agentnb exec --ensure-started ... --json` for short inline snippets
-2. `agentnb status --wait-idle --json` when you need to know the session is safe for the next command
-3. `agentnb exec --file ... --json` or pipe code through stdin for multiline work
-4. `agentnb vars --json` or `agentnb inspect NAME --json`
-5. `agentnb reload --json` after editing project-local source files
-6. `agentnb reload myapp.models --json` when you want to target one imported module
-7. `agentnb history --json` when you need the semantic transcript
-8. `agentnb runs list --json` when you need durable exec/reset records
-9. `agentnb runs follow EXECUTION_ID --json` when you need live background progress
-
-Examples:
-
-```bash
-agentnb exec --ensure-started "from myapp.models import User" --json
-agentnb exec "u = User(name='test'); print(u)" --json
-agentnb exec --file scripts/debug_snippet.py --json
-agentnb exec --json <<'PY'
+agentnb <<'PY'
 import pandas as pd
 df = pd.read_csv("tips.csv")
 df.head()
 PY
-agentnb vars --json
-agentnb inspect u --json
-agentnb reload --json
-agentnb reload myapp.models --json
-agentnb runs list --json
+
+agentnb analysis.py
 ```
 
-For multi-line code, prefer `--file` or stdin/heredoc over shell-escaped
-backslashes. A literal multi-line shell argument is fine if your shell passes
-it through, but `--file` and stdin are the reliable defaults.
-The same rule applies to `exec --background`.
-
-When the namespace gets noisy, use:
+The session auto-starts for normal execution. Use strict startup failure only when needed:
 
 ```bash
-agentnb vars --recent 5 --json
-agentnb vars --match rows --json
+agentnb exec --no-ensure-started "1 + 1"
 ```
 
-For background work:
+If you are running from this repo checkout instead of the target project, pass `--project`:
 
 ```bash
-agentnb exec --background --json "long_running_call()"
-agentnb runs show EXECUTION_ID --json
-agentnb runs follow EXECUTION_ID --json
-agentnb runs wait EXECUTION_ID --json
-agentnb runs cancel EXECUTION_ID --json
+uv run agentnb --project /path/to/project "1 + 1"
+```
+
+## Reading State
+
+Use `vars` for the namespace and `inspect` for one value:
+
+```bash
+agentnb vars
+agentnb vars --recent 5
+agentnb vars --match rows
+agentnb inspect df
+```
+
+Use `wait` when the question is "can I safely send the next command yet?":
+
+```bash
+agentnb wait
+```
+
+## Reloading
+
+After editing project-local code on disk, reload explicitly:
+
+```bash
+agentnb reload
+agentnb reload myapp.models
+```
+
+Bare `reload` reloads imported project-local modules. `reload MODULE` targets one imported module.
+
+## Background Runs And History
+
+Use `--background` when you want to start work and come back later:
+
+```bash
+agentnb --background "long_task()"
+```
+
+That returns an `execution_id` and writes a durable run record.
+
+Use `runs` when you care about one specific execution:
+
+```bash
+agentnb runs show
+agentnb runs follow
+agentnb runs wait
+agentnb runs cancel @active
+```
+
+- `runs show` reads the latest stored snapshot
+- `runs follow` streams live progress
+- `runs wait` blocks until the run finishes
+- `runs cancel` requests cancellation for an active run
+
+Use explicit ids or selectors when you want exact lookup:
+
+```bash
+agentnb runs show run_123
+agentnb runs show @last-error
+agentnb runs show @last-success
+```
+
+Use `history` when you want the higher-level semantic transcript of what you asked `agentnb` to do:
+
+```bash
+agentnb history
+agentnb history @last-error
+agentnb history @last-success
+```
+
+Simple rule:
+- if you care about one `execution_id`, use `runs`
+- if you care about the recent flow of work, use `history`
+
+## Output
+
+Default output is plain terminal text.
+
+Use `--json` when you want the full stable payload for scripting. Use `--agent` when you want a smaller JSON payload for agent/model consumption.
+
+Examples:
+
+```bash
+agentnb --json "1 + 1"
+agentnb --agent "1 + 1"
+```
+
+If you want only one `exec` stream:
+
+```bash
+agentnb --result-only "1 + 1"
+agentnb "print('hello')" --stdout-only
+agentnb --stderr-only "raise RuntimeError('boom')"
 ```
 
 ## Recovery
 
-If code hangs:
+Use:
 
 ```bash
-agentnb interrupt --json
+agentnb interrupt
+agentnb reset
+agentnb stop
+agentnb start
+agentnb doctor
+agentnb doctor --fix
 ```
 
-If the namespace is polluted but the kernel should stay alive:
+- `interrupt` for hanging code
+- `reset` for polluted namespace with a healthy kernel
+- `stop` and `start` for a dead or wedged kernel
+- `doctor` when startup or interpreter detection fails
+
+## Sessions
+
+Use `--session NAME` when you want more than one live kernel for the same project:
 
 ```bash
-agentnb reset --json
+agentnb start --session analysis
+agentnb exec --session analysis "1 + 1"
+agentnb sessions list
+agentnb sessions delete analysis
 ```
 
-If the kernel is dead or badly wedged:
+When only one live session exists, commands can infer it. Once multiple live sessions exist, pass `--session` explicitly.
 
-```bash
-agentnb stop --json
-agentnb start --json
-```
+## Rules
 
-Use `history --errors --json` to inspect recent failures.
-Use `runs show EXECUTION_ID --json` when you need the exact stored record for one execution.
-
-## Operating Rules
-
-- Prefer `exec --ensure-started` for the first command in a workflow.
-- Check `status` or `start` before assuming a live kernel exists.
-- Prefer `exec` for real work and `vars` or `inspect` for observation.
-- Prefer short inline `exec` for one-liners and stdin or `--file` for multiline code.
-- Use `--session NAME` explicitly once multiple live sessions exist; do not rely on guessing.
-- Use `sessions list` to discover live session names before targeting one.
-- Use `runs` for durable execution lookup, background control, and exact `execution_id` queries.
-- `exec --background` returns immediately; use `runs show` for the latest persisted snapshot, `runs follow` for live progress, `runs wait` for the final snapshot, and `runs cancel` to stop the run.
-- Use `status --wait-idle` when the important question is "can I safely send the next command yet?"
+- Prefer implicit top-level exec for the first command in a workflow.
+- Prefer short inline snippets for one-liners and stdin or files for multiline work.
 - Prefer a final expression over `print(...)` when you want a compact return value.
 - Use `reload` after editing importable project modules instead of assuming live definitions updated automatically.
-- Bare `reload` reloads all imported project-local modules. `reload MODULE` targets one imported project-local module.
-- If reload reports stale objects, recreate them or run `reset` when the whole namespace has become unreliable.
-- `vars` includes type information by default; pass `--no-types` only when you need less noise.
-- `vars --recent N` and `vars --match TEXT` are the fastest way to clean up a noisy namespace view.
-- `vars` hides imported helper routines and classes and summarizes common containers compactly.
-- `history` shows semantic user-visible steps by default; use `history --all --json` only when debugging internals.
-- `inspect` gives compact previews for pandas-like values and for common `list`/`dict` payloads.
-- Keep snippets focused and incremental; avoid pasting large scripts unless the task truly needs that.
-- Treat the kernel as project-scoped state. Stop it when the task is complete or when stale state could confuse later work.
-
-## Limits
-
-- `agentnb` is a persistent REPL interface, not a notebook editor.
-- It behaves more like an append-only notebook transcript than a mutable notebook document.
-- State is process-local and can drift from on-disk source until modules are reloaded or the kernel is restarted.
-- Commands target one session at a time; one live session can be inferred, but multiple live sessions require explicit `--session`.
+- Use `runs` for exact execution lookup and background control.
+- Use `wait` for session readiness.
+- Use `--agent` or `--json` only when machine-readable output is useful.
+- Treat the kernel as project-scoped state. Stop it when the task is complete or stale state could confuse later work.

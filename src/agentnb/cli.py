@@ -29,6 +29,7 @@ from .app import (
     StatusRequest,
     StopRequest,
     VarsRequest,
+    WaitRequest,
 )
 from .contracts import (
     CommandResponse,
@@ -38,7 +39,7 @@ from .contracts import (
 )
 from .errors import AgentNBException
 from .execution import ExecutionService
-from .execution_invocation import ExecInvocationPolicy, OutputSelector
+from .execution_invocation import ExecInvocationPolicy, OutputSelector, StartupPolicy
 from .invocation import ROOT_OPTION_SPECS, InvocationResolver
 from .ops import NotebookOps
 from .output import RenderOptions, projector, render_response
@@ -57,6 +58,14 @@ executions = ExecutionService(runtime)
 application = AgentNBApp(runtime=runtime, executions=executions, ops=ops)
 invocations = InvocationResolver()
 
+HELP_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Run Code", ("exec",)),
+    ("Read And Inspect", ("vars", "inspect", "reload", "history")),
+    ("Control Session", ("wait", "status", "interrupt", "reset", "start", "stop", "doctor")),
+    ("Background Runs", ("runs",)),
+    ("Sessions", ("sessions",)),
+)
+
 
 class AgentGroup(click.Group):
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
@@ -67,6 +76,35 @@ class AgentGroup(click.Group):
             stdin=sys.stdin,
         )
         return super().parse_args(ctx, list(intent.argv))
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        command_map = {name: self.get_command(ctx, name) for name in self.list_commands(ctx)}
+        rendered: set[str] = set()
+
+        for section_title, command_names in HELP_COMMAND_GROUPS:
+            rows: list[tuple[str, str]] = []
+            for name in command_names:
+                command = command_map.get(name)
+                if command is None or command.hidden:
+                    continue
+                rendered.add(name)
+                rows.append((name, command.get_short_help_str()))
+            if not rows:
+                continue
+            with formatter.section(section_title):
+                formatter.write_dl(rows)
+
+        remaining_rows: list[tuple[str, str]] = []
+        for name in self.list_commands(ctx):
+            if name in rendered:
+                continue
+            command = command_map.get(name)
+            if command is None or command.hidden:
+                continue
+            remaining_rows.append((name, command.get_short_help_str()))
+        if remaining_rows:
+            with formatter.section("Other Commands"):
+                formatter.write_dl(remaining_rows)
 
 
 def root_options(func):
@@ -91,50 +129,45 @@ def main(
 ) -> None:
     """Persistent project-scoped Python REPL for agent workflows.
 
-    Start a long-running kernel for the current project, execute code against it,
-    inspect live variables, and recover without losing all state on every step.
+    The hot path is direct execution against a project-scoped kernel:
+
+      agentnb "import json"
+      agentnb "payload.keys()"
+      agentnb analysis.py
+      agentnb --background "long_task()"
+      agentnb wait
+      agentnb runs follow
+      agentnb history @last-error
+
+    agentnb starts the target session automatically for normal execution. Use
+    `exec --no-ensure-started` only when scripts must fail instead of starting
+    a kernel.
 
     Think of agentnb as an agent REPL, or an append-only notebook without a
     notebook editor. It preserves execution state and history, but does not
     edit notebook cells or manage .ipynb files.
 
     One project session should be driven serially. Wait for each command to
-    finish before sending the next one to the same kernel.
-
-    Recommended loop:
-
-      1. agentnb exec --ensure-started "from myapp import thing" --json
-      2. agentnb status --wait-idle --json
-      3. agentnb exec --file analysis.py --json
-      4. agentnb vars --recent 5 --json
-      5. agentnb inspect thing --json
-      6. agentnb reload myapp.module --json
-      7. agentnb history --json
-      8. agentnb runs list --json when you need durable execution records
-      9. agentnb runs follow EXECUTION_ID --json for live background progress
+    finish before sending the next one to the same kernel. Use `agentnb wait`
+    to block until the session is usable for the next step.
 
     Use `--session NAME` on kernel-bound commands when working with more than
     one live session. `sessions list` shows live session names and metadata.
-    `exec --background` returns an `execution_id`; use `runs show` for the
-    latest persisted snapshot, `runs follow` for live progress, `runs wait`
-    for the final snapshot, and `runs cancel` when you need to stop the run.
+    `--background` returns an `execution_id`; `runs show|follow|wait|cancel`
+    accept that id explicitly, plus selectors such as `@latest`, `@active`,
+    `@last-error`, and `@last-success`. When safe, they also default to the
+    latest or active relevant run automatically.
 
     For multiline code, prefer --file or stdin/heredoc over shell-escaped
     backslashes. `vars` includes type information by default. `history`
     shows semantic user-visible steps by default; pass --all to include
-    internal helper executions. `runs` shows persisted exec/reset records by
-    `execution_id`. Module reloading is explicit: use `reload` after editing
-    project-local modules. agentnb does not auto-reload modules on every
-    execution. Like a regular IPython notebook, the final expression in an
-    exec block is returned as the result output while `print(...)` goes to
-    stdout. In `--agent` mode, JSON payloads are compacted by default to
-    reduce token usage.
+    internal helper executions. Module reloading is explicit: use `reload`
+    after editing project-local modules.
 
-    Prefer --json for agent integrations and machine-readable parsing. Use
-    `status --wait-idle` when you need to know the session is safe for the
-    next command, not just alive. If ipykernel is missing, use `start --auto-install`.
-    Use `doctor --fix` for automatic repair. Top-level flags such as --agent
-    and --json can be placed before or after the subcommand.
+    Use `--agent` for the compact working contract. Use full `--json` when you
+    need the stable machine envelope. Top-level flags such as `--agent` and
+    `--json` can be placed before or after the subcommand. Use `doctor --fix`
+    when startup needs automatic remediation.
     """
     ctx.obj = RenderOptions.resolve(
         root_as_json=root_as_json,
@@ -199,8 +232,8 @@ def _session_option_callback(
 def _run_reference_callback(
     ctx: click.Context,
     param: click.Parameter,
-    value: str,
-) -> RunReference:
+    value: str | None,
+) -> RunReference | None:
     del ctx, param
     return parse_run_reference(value)
 
@@ -357,8 +390,16 @@ def start(
 @click.option("--timeout", default=30.0, show_default=True, type=float)
 @click.option(
     "--ensure-started",
-    is_flag=True,
+    "startup_policy",
+    flag_value="always",
+    default=None,
     help="Start the target session first if it is not already running.",
+)
+@click.option(
+    "--no-ensure-started",
+    "startup_policy",
+    flag_value="never",
+    help="Do not start the session automatically before execution.",
 )
 @click.option(
     "--background",
@@ -380,7 +421,7 @@ def exec_cmd(
     code: str | None,
     filepath: Path | None,
     timeout: float,
-    ensure_started: bool,
+    startup_policy: StartupPolicy | None,
     background: bool,
     stream: bool,
     output_selector: OutputSelector | None,
@@ -390,17 +431,17 @@ def exec_cmd(
 ) -> None:
     """Execute code in the live kernel.
 
-    Provide code as an argument, with --file, or through stdin. For multiline
-    code, prefer --file or a stdin heredoc. The kernel must already be running
-    for the target project. Like a notebook cell, the final expression is
-    returned as the execution result, while `print(...)` writes to stdout.
-    Drive one project session serially: wait for each command to finish before
-    sending the next one to the same kernel.
+    Provide code as an argument, with --file, or through stdin. The target
+    session starts automatically unless you pass --no-ensure-started. Like a
+    notebook cell, the final expression is returned as the execution result,
+    while `print(...)` writes to stdout.
 
     Examples:
 
-      agentnb exec "1 + 1" --json
-      agentnb exec --file analysis.py --json
+      agentnb "1 + 1" --json
+      agentnb analysis.py --json
+      agentnb --background "long_task()" --json
+      agentnb exec --no-ensure-started "1 + 1" --json
       agentnb exec --json <<'PY'
       import pandas as pd
       df = pd.read_csv("tips.csv")
@@ -441,7 +482,7 @@ def exec_cmd(
         session_id=session_id,
         timeout_s=timeout,
         invocation=ExecInvocationPolicy.from_cli(
-            ensure_started=ensure_started,
+            startup_policy=startup_policy,
             background=background,
             stream=stream,
             output_selector=output_selector,
@@ -589,6 +630,38 @@ def status(
         timeout_s=timeout,
     )
     _emit(application.status(request), as_json=as_json)
+
+
+@main.command()
+@click.option(
+    "--timeout",
+    default=30.0,
+    show_default=True,
+    type=float,
+    help="Maximum seconds to wait for the session to become usable.",
+)
+@project_option
+@session_option
+@json_option
+def wait(
+    timeout: float,
+    project: Path | None,
+    session_id: str | None,
+    as_json: bool,
+) -> None:
+    """Wait until the target session is usable for the next command.
+
+    If the session is starting, wait until it is ready. If it is busy, wait
+    until it is idle. If it is already usable, return immediately with the
+    current status payload.
+    """
+
+    request = WaitRequest(
+        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        session_id=session_id,
+        timeout_s=timeout,
+    )
+    _emit(application.wait(request), as_json=as_json)
 
 
 @main.command()
@@ -762,11 +835,15 @@ def runs_list(
 
 
 @runs_group.command("show")
-@click.argument("run_reference", callback=_run_reference_callback)
+@click.argument("run_reference", required=False, callback=_run_reference_callback)
 @project_option
 @json_option
-def runs_show(run_reference: RunReference, project: Path | None, as_json: bool) -> None:
-    """Show a persisted snapshot of one exec/reset run."""
+def runs_show(run_reference: RunReference | None, project: Path | None, as_json: bool) -> None:
+    """Show a persisted snapshot of one exec/reset run.
+
+    Omit RUN_REFERENCE to inspect the latest relevant run. Selectors such as
+    @latest, @last-error, @last-success, and @active are also supported.
+    """
 
     request = RunLookupRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
@@ -776,17 +853,21 @@ def runs_show(run_reference: RunReference, project: Path | None, as_json: bool) 
 
 
 @runs_group.command("wait")
-@click.argument("run_reference", callback=_run_reference_callback)
+@click.argument("run_reference", required=False, callback=_run_reference_callback)
 @click.option("--timeout", default=30.0, show_default=True, type=float)
 @project_option
 @json_option
 def runs_wait(
-    run_reference: RunReference,
+    run_reference: RunReference | None,
     timeout: float,
     project: Path | None,
     as_json: bool,
 ) -> None:
-    """Wait for one background run to finish and return its final snapshot."""
+    """Wait for one background run to finish and return its final snapshot.
+
+    Omit RUN_REFERENCE to wait for the active relevant run when there is a safe
+    default.
+    """
 
     request = RunsWaitRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
@@ -797,17 +878,21 @@ def runs_wait(
 
 
 @runs_group.command("follow")
-@click.argument("run_reference", callback=_run_reference_callback)
+@click.argument("run_reference", required=False, callback=_run_reference_callback)
 @click.option("--timeout", default=30.0, show_default=True, type=float)
 @project_option
 @json_option
 def runs_follow(
-    run_reference: RunReference,
+    run_reference: RunReference | None,
     timeout: float,
     project: Path | None,
     as_json: bool,
 ) -> None:
-    """Follow one persisted run and stream newly recorded events until it finishes."""
+    """Follow one persisted run and stream newly recorded events until it finishes.
+
+    Omit RUN_REFERENCE to follow the active relevant run when there is a safe
+    default.
+    """
     project_root = resolve_project_root(cwd=Path.cwd(), override=project)
     options = _current_render_options(local_as_json=as_json)
     stream: ExecutionSink = JsonExecutionStream() if options.as_json else HumanExecutionStream()
@@ -821,11 +906,15 @@ def runs_follow(
 
 
 @runs_group.command("cancel")
-@click.argument("run_reference", callback=_run_reference_callback)
+@click.argument("run_reference", required=False, callback=_run_reference_callback)
 @project_option
 @json_option
-def runs_cancel(run_reference: RunReference, project: Path | None, as_json: bool) -> None:
-    """Cancel one running background run and report what happened to the session."""
+def runs_cancel(run_reference: RunReference | None, project: Path | None, as_json: bool) -> None:
+    """Cancel one running background run and report what happened to the session.
+
+    Omit RUN_REFERENCE to cancel the active relevant run when there is a safe
+    default.
+    """
 
     request = RunsCancelRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),

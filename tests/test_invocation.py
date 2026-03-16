@@ -24,7 +24,7 @@ class FakeStdin(StringIO):
         return self._is_tty
 
 
-KNOWN_COMMANDS = ("start", "exec", "status", "history", "runs", "sessions")
+KNOWN_COMMANDS = ("start", "exec", "status", "wait", "history", "runs", "sessions")
 
 
 @pytest.mark.parametrize("root_flag", [spec.flag for spec in ROOT_OPTION_SPECS])
@@ -82,7 +82,6 @@ def test_resolve_invocation_intent_infers_argument_exec_from_unknown_positional(
         "exec",
         "--project",
         "/tmp/project",
-        "--ensure-started",
         "1 + 1",
     )
 
@@ -103,7 +102,7 @@ def test_resolve_invocation_intent_infers_file_exec_from_existing_path(project_d
     exec_intent = cast(ImplicitExecIntent, intent)
     assert exec_intent.source_kind == "file"
     assert exec_intent.path == script
-    assert exec_intent.argv == ("exec", "--ensure-started", "--file", str(script))
+    assert exec_intent.argv == ("exec", "--file", str(script))
 
 
 def test_resolve_invocation_intent_infers_stdin_exec_without_command() -> None:
@@ -124,8 +123,22 @@ def test_resolve_invocation_intent_infers_stdin_exec_without_command() -> None:
         "exec",
         "--project",
         "/tmp/project",
-        "--ensure-started",
     )
+
+
+def test_resolve_invocation_intent_preserves_explicit_no_startup_for_hot_path() -> None:
+    resolver = InvocationResolver()
+
+    intent = resolver.resolve_invocation_intent(
+        ["--no-ensure-started", "1 + 1"],
+        known_commands=KNOWN_COMMANDS,
+        cwd=Path("/tmp/project"),
+        stdin=FakeStdin("", is_tty=True),
+    )
+
+    assert intent.kind == "implicit_exec"
+    exec_intent = cast(ImplicitExecIntent, intent)
+    assert exec_intent.argv == ("exec", "--no-ensure-started", "1 + 1")
 
 
 def test_resolve_invocation_intent_does_not_infer_stdin_exec_for_empty_non_tty() -> None:

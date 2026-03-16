@@ -55,6 +55,7 @@ INVOCATION_OPTION_SPECS = (
     InvocationOptionSpec(names=("--timeout",), kind="exec", takes_value=True),
     InvocationOptionSpec(names=("--file", "-f"), kind="exec", takes_value=True),
     InvocationOptionSpec(names=("--ensure-started",), kind="exec"),
+    InvocationOptionSpec(names=("--no-ensure-started",), kind="exec"),
     InvocationOptionSpec(names=("--background",), kind="exec"),
     InvocationOptionSpec(names=("--stream",), kind="exec"),
     InvocationOptionSpec(names=("--stdout-only",), kind="exec"),
@@ -341,8 +342,6 @@ class InvocationResolver:
         root_flags: tuple[str, ...],
     ) -> ImplicitExecIntent:
         exec_tokens = [*scanned.prefix_exec_tokens, *scanned.tail_tokens_without_root]
-        if "--ensure-started" not in exec_tokens:
-            exec_tokens.append("--ensure-started")
 
         source_kind: Literal["argument", "file", "stdin"] = "stdin"
         path: Path | None = None

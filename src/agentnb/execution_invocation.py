@@ -6,11 +6,12 @@ from typing import Literal
 from .contracts import ExecutionSink
 
 OutputSelector = Literal["stdout", "stderr", "result"]
+StartupPolicy = Literal["default", "always", "never"]
 
 
 @dataclass(slots=True, frozen=True)
 class ExecInvocationPolicy:
-    ensure_started: bool = False
+    startup_policy: StartupPolicy = "default"
     background: bool = False
     stream: bool = False
     output_selector: OutputSelector | None = None
@@ -19,17 +20,29 @@ class ExecInvocationPolicy:
     def from_cli(
         cls,
         *,
-        ensure_started: bool,
+        startup_policy: StartupPolicy | None,
         background: bool,
         stream: bool,
         output_selector: OutputSelector | None,
     ) -> ExecInvocationPolicy:
         return cls(
-            ensure_started=ensure_started,
+            startup_policy="default" if startup_policy is None else startup_policy,
             background=background,
             stream=stream,
             output_selector=output_selector,
         )
+
+    @property
+    def ensure_started(self) -> bool:
+        return self.startup_policy != "never"
+
+    @property
+    def explicitly_ensures_started(self) -> bool:
+        return self.startup_policy == "always"
+
+    @property
+    def explicitly_disables_startup(self) -> bool:
+        return self.startup_policy == "never"
 
     @property
     def is_background(self) -> bool:

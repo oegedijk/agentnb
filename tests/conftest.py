@@ -11,6 +11,7 @@ from typing import Literal
 import pytest
 from click.testing import CliRunner
 
+from agentnb.contracts import KernelStatus
 from agentnb.execution import ExecutionRecord, ExecutionService, ExecutionStore
 from agentnb.history import HistoryStore, user_command_record
 from agentnb.kernel.backend import LocalIPythonBackend, _close_client, _hard_kill_signal
@@ -80,6 +81,11 @@ def patch_cli_runtime(runtime: KernelRuntime, monkeypatch: pytest.MonkeyPatch) -
 
     executions = ExecutionService(runtime)
     ops = NotebookOps(runtime)
+    monkeypatch.setattr(
+        runtime,
+        "ensure_started",
+        lambda **_: (KernelStatus(alive=True, pid=123), False),
+    )
     monkeypatch.setattr(cli, "runtime", runtime)
     monkeypatch.setattr(cli, "ops", ops)
     monkeypatch.setattr(cli, "executions", executions)

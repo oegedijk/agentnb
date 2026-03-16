@@ -529,3 +529,82 @@ def test_runtime_wait_for_idle_times_out(project_dir: Path, mocker) -> None:
             timeout_s=0.0,
             poll_interval_s=0.0,
         )
+
+
+def test_runtime_wait_for_usable_returns_immediately_when_idle(project_dir: Path, mocker) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    mocker.patch.object(
+        runtime,
+        "status",
+        return_value=KernelStatus(alive=True, pid=123, busy=False),
+    )
+
+    result = runtime.wait_for_usable(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )
+
+    assert result.status.alive is True
+    assert result.status.busy is False
+    assert result.waited is False
+    assert result.waited_for is None
+
+
+def test_runtime_wait_for_usable_waits_for_ready_when_not_alive(project_dir: Path, mocker) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    mocker.patch.object(runtime, "status", return_value=KernelStatus(alive=False))
+    wait_for_ready = mocker.patch.object(
+        runtime,
+        "wait_for_ready",
+        return_value=KernelStatus(alive=True, pid=123, busy=False),
+    )
+
+    result = runtime.wait_for_usable(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )
+
+    assert result.status.alive is True
+    assert result.waited is True
+    assert result.waited_for == "ready"
+    wait_for_ready.assert_called_once_with(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )
+
+
+def test_runtime_wait_for_usable_waits_for_idle_when_busy(project_dir: Path, mocker) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    mocker.patch.object(
+        runtime,
+        "status",
+        return_value=KernelStatus(alive=True, pid=123, busy=True),
+    )
+    wait_for_idle = mocker.patch.object(
+        runtime,
+        "wait_for_idle",
+        return_value=KernelStatus(alive=True, pid=123, busy=False),
+    )
+
+    result = runtime.wait_for_usable(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )
+
+    assert result.status.alive is True
+    assert result.waited is True
+    assert result.waited_for == "idle"
+    wait_for_idle.assert_called_once_with(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )

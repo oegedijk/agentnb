@@ -47,6 +47,7 @@ from .runtime import KernelRuntime
 from .selectors import (
     HistoryReference,
     HistorySelectorResolver,
+    RunDefaultBehavior,
     RunReference,
     RunSelectorResolver,
 )
@@ -84,6 +85,11 @@ class StartRequest(SessionRequest):
 @dataclass(slots=True, frozen=True, kw_only=True)
 class StatusRequest(SessionRequest):
     wait_for: StatusWaitFor | None = None
+    timeout_s: float = 30.0
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class WaitRequest(SessionRequest):
     timeout_s: float = 30.0
 
 
@@ -152,7 +158,7 @@ class RunsListRequest(SessionRequest):
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class RunLookupRequest(ProjectRequest):
-    run_reference: RunReference
+    run_reference: RunReference | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -227,6 +233,15 @@ class AgentNBApp:
             requested_session_id=request.session_id,
             require_live_session=True,
             handler=lambda session_id: self._status_payload(request=request, session_id=session_id),
+        )
+
+    def wait(self, request: WaitRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="wait",
+            project_root=request.project_root,
+            requested_session_id=request.session_id,
+            require_live_session=True,
+            handler=lambda session_id: self._wait_payload(request=request, session_id=session_id),
         )
 
     def vars(self, request: VarsRequest) -> CommandResponse:
@@ -356,6 +371,7 @@ class AgentNBApp:
                 run_reference=request.run_reference,
                 timeout_s=None,
                 event_sink=None,
+                default_behavior="latest",
             ),
         )
 
@@ -370,6 +386,7 @@ class AgentNBApp:
                 run_reference=request.run_reference,
                 timeout_s=request.timeout_s,
                 event_sink=None,
+                default_behavior="active",
             ),
         )
 
@@ -389,6 +406,7 @@ class AgentNBApp:
                 run_reference=request.run_reference,
                 timeout_s=request.timeout_s,
                 event_sink=event_sink,
+                default_behavior="active",
             ),
             response_session_id_resolver=_run_response_session_id,
         )
@@ -404,6 +422,11 @@ class AgentNBApp:
                 execution_id=self.run_selectors.resolve_execution_id(
                     project_root=request.project_root,
                     reference=request.run_reference,
+                    current_session_id=_current_session_preference(
+                        self.runtime,
+                        project_root=request.project_root,
+                    ),
+                    default_behavior="active",
                 ),
             ),
         )
@@ -497,6 +520,18 @@ class AgentNBApp:
                 session_id=session_id,
             )
         )
+
+    def _wait_payload(self, *, request: WaitRequest, session_id: str) -> StatusPayload:
+        wait_result = self.runtime.wait_for_usable(
+            project_root=request.project_root,
+            session_id=session_id,
+            timeout_s=request.timeout_s,
+        )
+        payload = _kernel_status_payload(wait_result.status)
+        payload["waited"] = wait_result.waited
+        if wait_result.waited_for is not None:
+            payload["waited_for"] = wait_result.waited_for
+        return payload
 
     def _vars_payload(self, *, request: VarsRequest, session_id: str) -> VarsPayload:
         values = self.ops.list_vars(project_root=request.project_root, session_id=session_id)
@@ -596,13 +631,16 @@ class AgentNBApp:
         self,
         *,
         project_root: Path,
-        run_reference: RunReference,
+        run_reference: RunReference | None,
         timeout_s: float | None,
         event_sink: ExecutionSink | None,
+        default_behavior: RunDefaultBehavior,
     ) -> RunLookupPayload:
         execution_id = self.run_selectors.resolve_execution_id(
             project_root=project_root,
             reference=run_reference,
+            current_session_id=_current_session_preference(self.runtime, project_root=project_root),
+            default_behavior=default_behavior,
         )
         if event_sink is not None:
             run = self.executions.follow_run(
@@ -766,6 +804,13 @@ def _run_response_session_id(current_session_id: str, data: Mapping[str, object]
         if isinstance(session_id, str) and session_id:
             return session_id
     return current_session_id
+
+
+def _current_session_preference(runtime: KernelRuntime, *, project_root: Path) -> str | None:
+    session_id = runtime.current_session_id(project_root=project_root)
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    return None
 
 
 def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:

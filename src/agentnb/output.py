@@ -111,7 +111,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         command = response.command
         data = response.data
 
-        quiet_commands = {"start", "status", "stop", "interrupt", "reload", "doctor"}
+        quiet_commands = {"start", "status", "wait", "stop", "interrupt", "reload", "doctor"}
         if options.quiet and command in quiet_commands:
             body = ""
         elif command == "start":
@@ -137,6 +137,16 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     body = f"Kernel is running (pid {status_data.get('pid')}, busy)."
                 else:
                     body = f"Kernel is running (pid {status_data.get('pid')})."
+            else:
+                body = "Kernel is not running."
+        elif command == "wait":
+            status_data = cast(StatusPayload, data)
+            if status_data.get("alive"):
+                waited_for = status_data.get("waited_for")
+                if waited_for == "ready":
+                    body = f"Kernel is ready (pid {status_data.get('pid')})."
+                else:
+                    body = f"Kernel is idle (pid {status_data.get('pid')})."
             else:
                 body = "Kernel is not running."
 

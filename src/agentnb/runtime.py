@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from .contracts import ExecutionResult, ExecutionSink, KernelStatus
 from .errors import (
@@ -27,6 +28,15 @@ from .kernel.provisioner import KernelProvisioner
 from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
 from .state import StateRepository
+
+WaitedFor = Literal["ready", "idle"]
+
+
+@dataclass(slots=True, frozen=True)
+class KernelWaitResult:
+    status: KernelStatus
+    waited: bool
+    waited_for: WaitedFor | None = None
 
 
 class KernelRuntime:
@@ -232,7 +242,7 @@ class KernelRuntime:
             if status.alive:
                 return status
             if time.monotonic() >= deadline:
-                raise KernelWaitTimedOutError(timeout_s)
+                raise KernelWaitTimedOutError(timeout_s, waiting_for="ready")
             time.sleep(poll_interval_s)
 
     def wait_for_idle(
@@ -249,8 +259,41 @@ class KernelRuntime:
             if status.alive and not status.busy:
                 return status
             if time.monotonic() >= deadline:
-                raise KernelWaitTimedOutError(timeout_s)
+                raise KernelWaitTimedOutError(timeout_s, waiting_for="idle")
             time.sleep(poll_interval_s)
+
+    def wait_for_usable(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+    ) -> KernelWaitResult:
+        status = self.status(project_root=project_root, session_id=session_id)
+        if status.alive:
+            if not status.busy:
+                return KernelWaitResult(status=status, waited=False)
+            return KernelWaitResult(
+                status=self.wait_for_idle(
+                    project_root=project_root,
+                    session_id=session_id,
+                    timeout_s=timeout_s,
+                    poll_interval_s=poll_interval_s,
+                ),
+                waited=True,
+                waited_for="idle",
+            )
+        return KernelWaitResult(
+            status=self.wait_for_ready(
+                project_root=project_root,
+                session_id=session_id,
+                timeout_s=timeout_s,
+                poll_interval_s=poll_interval_s,
+            ),
+            waited=True,
+            waited_for="ready",
+        )
 
     def execute(
         self,

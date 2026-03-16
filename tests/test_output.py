@@ -187,6 +187,24 @@ def test_render_human_status_busy_and_interrupt_stop() -> None:
     assert render_human(interrupt_response, options=RenderOptions()) == "Interrupt signal sent."
 
 
+def test_render_human_wait_variants() -> None:
+    idle_response = success_response(
+        command="wait",
+        project="/tmp/project",
+        session_id="default",
+        data={"alive": True, "pid": 321, "busy": False, "waited": False},
+    )
+    ready_response = success_response(
+        command="wait",
+        project="/tmp/project",
+        session_id="default",
+        data={"alive": True, "pid": 654, "busy": False, "waited": True, "waited_for": "ready"},
+    )
+
+    assert render_human(idle_response, options=RenderOptions()) == "Kernel is idle (pid 321)."
+    assert render_human(ready_response, options=RenderOptions()) == "Kernel is ready (pid 654)."
+
+
 def test_render_human_exec_renders_stdout_stderr_and_result() -> None:
     response = success_response(
         command="exec",

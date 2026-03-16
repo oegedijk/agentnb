@@ -38,7 +38,7 @@ The roadmap assumes the existing persistent-kernel baseline remains intact:
 
 ## Pre-v0.3 Preparatory Refactors
 
-These refactors should happen before or alongside the first 0.3 user-facing work.
+These refactors are complete and now define the main seams for 0.3 feature work.
 
 Apply an Ousterhout lens here:
 
@@ -47,128 +47,12 @@ Apply an Ousterhout lens here:
 - avoid spreading special cases across `cli.py`, app handlers, runtime methods, and render helpers
 - define each refactor by the complexity it should absorb, not by the number of files it touches
 
-- Invocation-resolution boundary: done
-  - purpose:
-    - absorb hot-path syntax inference into one deep module so implicit execution does not turn Click handling into a pile of special cases
-  - owns:
-    - mapping raw argv, stdin presence, cwd context, and file-path detection into typed invocation intents
-    - rules for implicit `exec`, file execution, stdin execution, and default `ensure-started`
-  - does not own:
-    - execution semantics
-    - rendering
-    - session resolution after an intent has been produced
-  - initial shape:
-    - a typed intent layer such as `ExecIntent`, `CommandIntent`, and related parse results
-    - a small interface from `cli.py` into that resolver
-  - first migration step:
-    - move code-input shape resolution and hot-path inference behind the resolver while keeping existing app request types stable
-  - done when:
-    - Click remains thin
-    - new hot-path syntax can be added without editing many subcommands
-    - implicit `agentnb "code"` does not require ad hoc command branching throughout `cli.py`
-  - tests:
-    - direct resolver tests for argv, stdin, and file inference behavior
-    - a few CLI contract tests for the surfaced syntax
-- Output-profile boundary: done
-  - purpose:
-    - separate exact machine contracts from cheap working output without letting mode checks spread through the CLI and renderer
-  - owns:
-    - output-profile selection
-    - compact versus full rendering policy
-    - suggestion visibility defaults by mode
-  - does not own:
-    - command business logic
-    - run/session lookup
-  - initial shape:
-    - explicit profiles rather than booleans, at least:
-      - full stable JSON contract
-      - compact agent working mode
-      - compact human mode
-  - first migration step:
-    - replace boolean render flags with a profile object or enum while preserving current behavior
-  - done when:
-    - `--agent` is a first-class compact working mode rather than quiet full JSON
-    - adding a new output mode does not require scattered conditionals
-  - tests:
-    - renderer tests at the profile boundary
-    - contract tests for full `--json`
-    - compact-mode tests for minimal success-path payloads
-- Selector-resolution boundary: done
-  - purpose:
-    - make convenient selectors possible without teaching every command how to guess ids and target objects
-  - owns:
-    - typed references for run, history, and session targets
-    - selector resolution for values such as `@latest`, `@active`, `@last-error`, and `@current`
-  - does not own:
-    - the underlying run-control or history storage model
-    - rendering of lookup results
-  - initial shape:
-    - typed reference values plus a resolver that returns concrete ids or target records before lower layers execute
-  - first migration step:
-    - introduce typed references alongside explicit ids, then teach `runs` and `history` commands to accept them
-  - done when:
-    - commands no longer need ad hoc list-then-show logic in the CLI
-    - selector precedence and ambiguity rules live in one place
-  - tests:
-    - direct resolver tests for active/latest/error cases
-    - owning-boundary tests around ambiguous or missing targets
-- Session-preferences state boundary: done
-  - purpose:
-    - keep sticky current-session behavior as explicit project state rather than hidden CLI memory or runtime heuristics
-  - owns:
-    - lightweight per-project session preferences such as current session
-    - persistence and retrieval of those preferences through `StateRepository`
-  - does not own:
-    - session runtime state
-    - kernel lifecycle
-  - initial shape:
-    - a small persisted preference record under `.agentnb/`, owned by `StateRepository`
-  - first migration step:
-    - persist and read a current-session preference without changing broader session runtime files
-  - done when:
-    - sticky session defaults work without scattering state across CLI and runtime
-    - session-selection rules remain explicit and testable
-  - tests:
-    - direct repository tests for reading and writing session preferences
-    - runtime/app tests for precedence between explicit, sticky, sole-live, and default sessions
-- Advice-policy boundary: done
-  - purpose:
-    - make next-step guidance cheap, mode-aware, and concrete instead of keeping a large hard-coded suggestion switch
-  - owns:
-    - whether to emit advice
-    - how much advice to emit
-    - interpolation of real ids and session names
-    - mode-aware suppression of routine success chatter
-  - does not own:
-    - command execution
-    - rendering format beyond returning advice content
-  - initial shape:
-    - an advisor that consumes command/result/error context plus output profile
-  - first migration step:
-    - move the current suggestion branching behind the advisor while preserving current user-visible behavior
-  - done when:
-    - routine success responses stay quiet
-    - recovery guidance is concrete and specific
-    - non-JSON modes are not constantly pushed back toward `--json`
-  - tests:
-    - advisor tests for success, error, ambiguous-session, and busy-session cases
-- Execution-invocation policy cleanup: done
-  - purpose:
-    - keep execution semantics stable while allowing hot-path ergonomics to evolve cleanly
-  - owns:
-    - execution-default policy such as implicit startup, background defaults, and output-selection defaults
-  - does not own:
-    - the meaning of execution itself
-    - lower-level runtime behavior
-  - initial shape:
-    - a policy/profile object distinct from the semantic execution request
-  - first migration step:
-    - stop encoding all invocation ergonomics as booleans directly on `ExecRequest`
-  - done when:
-    - hot-path default changes do not bloat or destabilize semantic request types
-    - execution semantics remain understandable independent of CLI convenience rules
-  - tests:
-    - app-level tests that separate semantic execution behavior from invocation-default policy
+- Invocation-resolution boundary: completed; raw argv/stdin/file-path inference and implicit exec routing now live behind a typed resolver instead of in `cli.py`.
+- Output-profile boundary: completed; output mode selection is centralized and compact/full JSON policy no longer spreads through CLI handlers.
+- Selector-resolution boundary: completed; typed run and history references plus selector-to-query/id resolution now own `@latest` and `@last-error` style targeting.
+- Session-preferences state boundary: completed; sticky current-session behavior is persisted in project state and resolved by runtime precedence rules.
+- Advice-policy boundary: completed; next-step guidance is centralized in a mode-aware advisor instead of a large command switch.
+- Execution-invocation policy cleanup: completed; invocation ergonomics now live in policy objects rather than bloating semantic execution requests.
 
 ## v0.3 - Agent Loop Efficiency
 
@@ -215,6 +99,17 @@ Apply an Ousterhout lens here:
 - Human-mode follow-up:
   - keep human output self-sufficient and compact
   - prefer short summaries over repeated routine success guidance
+
+### Implementation Seams
+
+- Put hot-path syntax and shorthand behavior in `InvocationResolver`; keep `cli.py` as an adapter from argv to typed intents and app requests.
+- Put default execution ergonomics such as implicit startup or future opt-outs in `ExecInvocationPolicy`, not on `ExecRequest` itself.
+- Put compact versus full JSON response shape decisions in `ResponseProjector`; keep full `--json` stable and treat `--agent` as a separate compact contract.
+- Put run/history symbolic defaults and selector expansion in the selector resolvers; lower layers should receive typed references or resolved queries, not ad hoc CLI guesses.
+- Put sticky session behavior in `StateRepository` plus `KernelRuntime` precedence rules; do not reintroduce CLI-side session memory.
+- Put recovery guidance and success-path quieting in `AdvicePolicy`; avoid command-specific suggestion branching in render helpers or handlers.
+- Keep feature work additive at the app boundary: shorthand syntax may change, but semantic request/response shapes and persisted provenance should stay clear and stable.
+- If a 0.3 feature does not fit one of these seams cleanly, define or deepen the owning module first instead of adding another CLI-local special case.
 
 ### Example Target Workflows
 

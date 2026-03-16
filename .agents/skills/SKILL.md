@@ -35,16 +35,32 @@ agentnb "from myapp.models import User"
 agentnb "User.query.limit(5)"
 ```
 
-For multiline work, prefer stdin/heredoc or a file:
+For multiline code or code with braces, quotes, or special characters, use
+stdin/heredoc or a file:
 
 ```bash
 agentnb <<'PY'
 import pandas as pd
 df = pd.read_csv("tips.csv")
-df.head()
+df.describe()
 PY
 
 agentnb analysis.py
+```
+
+`--session` and `--background` can go before or after the subcommand:
+
+```bash
+agentnb --session myenv "df.head()"
+agentnb --background "long_task()"
+```
+
+The default execution timeout is 30 seconds. Use `--timeout` for long-running
+code, and `--stream` to see output in real time:
+
+```bash
+agentnb --timeout 120 "train_model()"
+agentnb --stream "train_model(epochs=10)"
 ```
 
 The session auto-starts for normal execution. Use strict startup failure only when needed:
@@ -111,6 +127,13 @@ agentnb runs cancel @active
 - `runs wait` blocks until the run finishes
 - `runs cancel` requests cancellation for an active run
 
+Filter the runs list with `--last N` and `--errors`:
+
+```bash
+agentnb runs list --last 5
+agentnb runs list --errors
+```
+
 Use explicit ids or selectors when you want exact lookup:
 
 ```bash
@@ -123,6 +146,9 @@ Use `history` when you want the higher-level semantic transcript of what you ask
 
 ```bash
 agentnb history
+agentnb history --last 5
+agentnb history --errors
+agentnb history --latest
 agentnb history @last-error
 agentnb history @last-success
 ```
@@ -137,11 +163,17 @@ Default output is plain terminal text.
 
 Use `--json` when you want the full stable payload for scripting. Use `--agent` when you want a smaller JSON payload for agent/model consumption.
 
-Examples:
-
 ```bash
 agentnb --json "1 + 1"
 agentnb --agent "1 + 1"
+```
+
+Use `--quiet` to suppress non-essential output, or `--no-suggestions` to hide
+next-step suggestions:
+
+```bash
+agentnb --quiet "1 + 1"
+agentnb --no-suggestions "1 + 1"
 ```
 
 If you want only one `exec` stream:
@@ -170,13 +202,21 @@ agentnb doctor --fix
 - `stop` and `start` for a dead or wedged kernel
 - `doctor` when startup or interpreter detection fails
 
+Check session readiness with wait modes:
+
+```bash
+agentnb wait
+agentnb status --wait
+agentnb status --wait-idle
+```
+
 ## Sessions
 
 Use `--session NAME` when you want more than one live kernel for the same project:
 
 ```bash
+agentnb --session analysis "1 + 1"
 agentnb start --session analysis
-agentnb exec --session analysis "1 + 1"
 agentnb sessions list
 agentnb sessions delete analysis
 ```

@@ -40,13 +40,14 @@ agentnb "from myapp.models import User"
 agentnb "User.query.limit(5)"
 ```
 
-For multiline code, prefer stdin/heredoc:
+For multiline code or code containing braces, quotes, or special shell
+characters, prefer stdin/heredoc over inline strings:
 
 ```bash
 agentnb <<'PY'
 import pandas as pd
 df = pd.read_csv("tips.csv")
-df.head()
+df.describe()
 PY
 ```
 
@@ -55,6 +56,26 @@ You can also run a script directly, and then keep the state in session so you ca
 ```bash
 agentnb analysis.py
 agentnb "print(final_result)"
+```
+
+`--session` and `--background` can go before or after the subcommand:
+
+```bash
+agentnb --session myenv "df.head()"
+agentnb --background "long_task()"
+```
+
+The default execution timeout is 30 seconds. Use `--timeout` for long-running
+code:
+
+```bash
+agentnb --timeout 120 "train_model()"
+```
+
+Use `--stream` to see execution output in real time:
+
+```bash
+agentnb --stream "train_model(epochs=10)"
 ```
 
 ## Reading Results And Inspecting State
@@ -105,6 +126,13 @@ Use `wait` to just wait for the last command to finish:
 agentnb wait
 ```
 
+You can also check status with built-in wait modes:
+
+```bash
+agentnb status --wait         # wait until the session is ready
+agentnb status --wait-idle    # wait until idle (not executing)
+```
+
 Use `--background` when you want to start work and come back to it later:
 
 ```bash
@@ -136,6 +164,13 @@ How to read them:
 - `runs wait` blocks until a run finishes and returns its final state
 - `runs cancel` requests cancellation for an active run
 
+Filter the runs list with `--last N` and `--errors`:
+
+```bash
+agentnb runs list --last 5
+agentnb runs list --errors
+```
+
 By default, omitted run references mean "use the obvious next run":
 - `runs show` falls back to the current session's latest run, then the project latest
 - `runs follow`, `runs wait`, and `runs cancel` only auto-target an active run
@@ -161,6 +196,9 @@ steps such as `exec`, `vars`, `inspect`, `reload`, and `reset`:
 
 ```bash
 agentnb history
+agentnb history --last 5
+agentnb history --errors
+agentnb history --latest
 agentnb history @last-error
 agentnb history @last-success
 agentnb history --all
@@ -277,6 +315,14 @@ export AGENTNB_FORMAT=agent
 `AGENTNB_FORMAT=agent` enables compact JSON output and suppresses routine
 suggestions. `AGENTNB_FORMAT=json` selects the full stable envelope.
 
+Use `--quiet` to suppress non-essential human output, or `--no-suggestions` to
+hide next-step suggestions:
+
+```bash
+agentnb --quiet "1 + 1"
+agentnb --no-suggestions "1 + 1"
+```
+
 Top-level flags such as `--agent`, `--json`, `--quiet`, and `--no-suggestions`
 can appear before or after the subcommand.
 
@@ -328,8 +374,8 @@ uv run agentnb --project /path/to/project runs follow --agent
 Use `--session` when you want more than one live kernel for the same project:
 
 ```bash
+agentnb --session analysis "1 + 1"
 agentnb start --session analysis
-agentnb exec --session analysis "1 + 1"
 agentnb sessions list
 agentnb sessions delete analysis
 ```

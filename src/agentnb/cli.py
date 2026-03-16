@@ -129,45 +129,36 @@ def main(
 ) -> None:
     """Persistent project-scoped Python REPL for agent workflows.
 
-    The hot path is direct execution against a project-scoped kernel:
-
+    \b
+    Hot path:
       agentnb "import json"
       agentnb "payload.keys()"
       agentnb analysis.py
       agentnb --background "long_task()"
-      agentnb wait
-      agentnb runs follow
-      agentnb history @last-error
+      agentnb --session myenv "df.head()"
+      agentnb <<'PY'
+        import pandas as pd
+        df = pd.read_csv("tips.csv")
+      PY
 
-    agentnb starts the target session automatically for normal execution. Use
-    `exec --no-ensure-started` only when scripts must fail instead of starting
-    a kernel.
+    \b
+    Inspect and recover:
+      agentnb vars                  agentnb inspect df
+      agentnb history --last 5      agentnb history @last-error
+      agentnb runs show @latest     agentnb runs list --last 10
+      agentnb wait                  agentnb interrupt
+      agentnb reset                 agentnb reload
 
-    Think of agentnb as an agent REPL, or an append-only notebook without a
-    notebook editor. It preserves execution state and history, but does not
-    edit notebook cells or manage .ipynb files.
+    The session auto-starts for normal execution. Drive one session serially;
+    use `agentnb wait` between commands when needed.
 
-    One project session should be driven serially. Wait for each command to
-    finish before sending the next one to the same kernel. Use `agentnb wait`
-    to block until the session is usable for the next step.
+    `--session NAME` and `--background` can go before or after the subcommand.
+    When code contains braces or quotes, prefer heredoc or --file over inline
+    strings.
 
-    Use `--session NAME` on kernel-bound commands when working with more than
-    one live session. `sessions list` shows live session names and metadata.
-    `--background` returns an `execution_id`; `runs show|follow|wait|cancel`
-    accept that id explicitly, plus selectors such as `@latest`, `@active`,
-    `@last-error`, and `@last-success`. When safe, they also default to the
-    latest or active relevant run automatically.
-
-    For multiline code, prefer --file or stdin/heredoc over shell-escaped
-    backslashes. `vars` includes type information by default. `history`
-    shows semantic user-visible steps by default; pass --all to include
-    internal helper executions. Module reloading is explicit: use `reload`
-    after editing project-local modules.
-
-    Use `--agent` for the compact working contract. Use full `--json` when you
-    need the stable machine envelope. Top-level flags such as `--agent` and
-    `--json` can be placed before or after the subcommand. Use `doctor --fix`
-    when startup needs automatic remediation.
+    `--agent` returns compact JSON. `--json` returns the full stable envelope.
+    `--quiet` and `--no-suggestions` reduce noise. `history` and `runs list`
+    accept `--last N` and `--errors` to limit output.
     """
     ctx.obj = RenderOptions.resolve(
         root_as_json=root_as_json,

@@ -763,22 +763,19 @@ def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None
     assert result.exit_code == 0
     assert "Run `agentnb --help`" in result.output
     assert 'agentnb "import json"' in result.output
-    assert "Use `--agent` for the compact working contract." in result.output
-    assert "One project session should be driven serially." in result.output
+    assert "`--agent` returns compact JSON." in result.output
+    assert "agentnb wait" in result.output
 
 
 def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "Persistent project-scoped Python REPL for agent workflows." in result.output
-    assert "append-only notebook" in result.output
     assert 'agentnb "import json"' in result.output
-    assert "--no-ensure-started" in result.output
-    assert "Use `--session NAME`" in result.output
-    assert "runs follow" in result.output
+    assert "`--session NAME` and `--background`" in result.output
+    assert "runs show @latest" in result.output
     assert "@last-error" in result.output
-    assert "doctor --fix" in result.output
-    assert "@active" in result.output
+    assert "--quiet" in result.output
     assert "sessions" in result.output
     assert "Run Code:" in result.output
     assert "Read And Inspect:" in result.output

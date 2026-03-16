@@ -124,6 +124,18 @@ class _ScannedArgs:
     file_option_path: Path | None
 
 
+_SUBCOMMAND_WORDS: frozenset[str] = frozenset(
+    {
+        "list",
+        "show",
+        "follow",
+        "cancel",
+        "delete",
+        "help",
+    }
+)
+
+
 class InvocationResolver:
     def __init__(
         self,
@@ -153,7 +165,7 @@ class InvocationResolver:
         command_name = scanned.command_candidate
 
         if command_name in known_command_names:
-            if scanned.prefix_exec_tokens or scanned.saw_unknown_option:
+            if scanned.saw_unknown_option:
                 return CommandIntent(
                     argv=tuple(raw_args),
                     command_name=command_name,
@@ -163,6 +175,7 @@ class InvocationResolver:
                     *scanned.prefix_root_flags,
                     *scanned.tail_root_flags,
                     command_name,
+                    *scanned.prefix_exec_tokens,
                     *scanned.tail_tokens_without_root,
                     *scanned.suffix,
                 ),
@@ -329,7 +342,7 @@ class InvocationResolver:
         ):
             return False
         if scanned.command_candidate is not None:
-            return True
+            return scanned.command_candidate not in _SUBCOMMAND_WORDS
         if scanned.file_option_path is not None:
             return True
         return self._stdin_has_data(stdin)
@@ -367,10 +380,15 @@ class InvocationResolver:
 
     @staticmethod
     def _existing_file_path(token: str, *, cwd: Path) -> Path | None:
+        if len(token) > 255 or "\n" in token:
+            return None
         candidate = Path(token)
         resolved = candidate if candidate.is_absolute() else cwd / candidate
-        if resolved.exists() and resolved.is_file():
-            return candidate
+        try:
+            if resolved.exists() and resolved.is_file():
+                return candidate
+        except OSError:
+            return None
         return None
 
     @staticmethod

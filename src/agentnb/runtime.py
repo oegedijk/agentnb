@@ -190,6 +190,10 @@ class KernelRuntime:
         require_live_session: bool,
     ) -> str:
         if requested_session_id is not None:
+            self._check_session_prefix_collision(
+                project_root=project_root,
+                requested_session_id=requested_session_id,
+            )
             return requested_session_id
 
         preferred_session_id = self.current_session_id(project_root=project_root)
@@ -208,6 +212,19 @@ class KernelRuntime:
         if len(sessions) == 1:
             return str(sessions[0]["session_id"])
         raise AmbiguousSessionError([str(session["session_id"]) for session in sessions])
+
+    def _check_session_prefix_collision(
+        self, *, project_root: Path, requested_session_id: str
+    ) -> None:
+        sessions = self.list_sessions(project_root=project_root)
+        if not sessions:
+            return
+        live_ids = [str(s["session_id"]) for s in sessions]
+        if requested_session_id in live_ids:
+            return
+        prefix_matches = [sid for sid in live_ids if sid.startswith(requested_session_id)]
+        if prefix_matches:
+            raise AmbiguousSessionError(prefix_matches)
 
     def current_session_id(self, *, project_root: Path) -> str | None:
         return StateRepository(project_root).session_preferences().current_session_id

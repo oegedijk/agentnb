@@ -253,9 +253,11 @@ def _emit(response: CommandResponse, *, as_json: bool) -> None:
         response = replace(response, suggestions=[])
     if options.quiet or not options.show_suggestions:
         response = replace(response, suggestions=[])
+    elif not options.as_json:
+        response = replace(response, suggestions=_strip_json_suffix(response.suggestions))
     rendered = render_response(response, options=options)
     if rendered:
-        click.echo(rendered)
+        click.echo(rendered, err=(response.status == "error" and not options.as_json))
     if response.status == "error":
         raise click.exceptions.Exit(1)
 
@@ -322,6 +324,8 @@ def _emit_stream_completion(
     options = _current_render_options(local_as_json=as_json)
     if options.quiet or not options.show_suggestions:
         response = replace(response, suggestions=[])
+    elif not options.as_json:
+        response = replace(response, suggestions=_strip_json_suffix(response.suggestions))
 
     if options.as_json:
         _emit_json_stream_frame(
@@ -931,6 +935,10 @@ def background_run(execution_id: str, project: Path | None) -> None:
 
     project_root = resolve_project_root(cwd=Path.cwd(), override=project)
     executions.complete_background_run(project_root=project_root, execution_id=execution_id)
+
+
+def _strip_json_suffix(suggestions: list[str]) -> list[str]:
+    return [s.replace(" --json", "").replace("--json ", "") for s in suggestions]
 
 
 def _current_render_options(*, local_as_json: bool) -> RenderOptions:

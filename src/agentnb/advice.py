@@ -69,6 +69,8 @@ class AdvicePolicy:
                         "Run `agentnb history @latest --json` to review the last semantic step.",
                     ]
                 return []
+            if context.error_code == "INVALID_INPUT":
+                return []
             return [
                 "Run `agentnb history @last-error --json` to review the latest failure.",
                 "Run `agentnb interrupt --json` if execution may still be stuck.",

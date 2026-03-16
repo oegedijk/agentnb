@@ -205,6 +205,7 @@ class HistoryEntryPayload(TypedDict, total=False):
     user_visible: bool | None
     error_type: str
     execution_id: str
+    code: str
 
 
 class HistoryPayload(TypedDict):

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import cast
 
 from .compact import summarize_history_text
@@ -25,18 +28,79 @@ from .payloads import (
     VarDisplayEntry,
     VarsPayload,
 )
+from .projection import ResponseProjector
+
+projector = ResponseProjector()
+
+
+class OutputProfile(StrEnum):
+    HUMAN = "human"
+    FULL_JSON = "full-json"
+    AGENT = "agent"
 
 
 @dataclass(slots=True)
 class RenderOptions:
-    as_json: bool = False
-    show_suggestions: bool = True
-    quiet: bool = False
+    profile: OutputProfile = OutputProfile.HUMAN
+    quiet_human: bool = False
+    suppress_suggestions: bool = False
+
+    @property
+    def as_json(self) -> bool:
+        return self.profile in {OutputProfile.FULL_JSON, OutputProfile.AGENT}
+
+    @property
+    def quiet(self) -> bool:
+        return self.profile == OutputProfile.AGENT or self.quiet_human
+
+    @property
+    def show_suggestions(self) -> bool:
+        if self.profile == OutputProfile.AGENT:
+            return False
+        if self.quiet_human:
+            return False
+        return not self.suppress_suggestions
+
+    def with_local_json(self) -> RenderOptions:
+        if self.as_json:
+            return self
+        return replace(self, profile=OutputProfile.FULL_JSON)
+
+    @classmethod
+    def resolve(
+        cls,
+        *,
+        root_as_json: bool,
+        agent: bool,
+        quiet: bool,
+        no_suggestions: bool,
+        env: Mapping[str, str] | None = None,
+    ) -> RenderOptions:
+        environment = os.environ if env is None else env
+        env_mode = environment.get("AGENTNB_FORMAT", "").strip().lower()
+        env_quiet = _env_flag(environment, "AGENTNB_QUIET")
+        env_no_suggestions = _env_flag(environment, "AGENTNB_NO_SUGGESTIONS")
+
+        if agent or env_mode == OutputProfile.AGENT.value:
+            profile = OutputProfile.AGENT
+        elif root_as_json or env_mode == "json":
+            profile = OutputProfile.FULL_JSON
+        else:
+            profile = OutputProfile.HUMAN
+
+        return cls(
+            profile=profile,
+            quiet_human=quiet or env_quiet,
+            suppress_suggestions=no_suggestions or env_no_suggestions,
+        )
 
 
 def render_response(response: CommandResponse, *, options: RenderOptions) -> str:
     if options.as_json:
-        return json.dumps(response.to_dict(), ensure_ascii=True)
+        return json.dumps(
+            projector.project(response, profile=options.profile.value),
+            ensure_ascii=True,
+        )
     return render_human(response, options=options)
 
 
@@ -158,7 +222,12 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             else:
                 lines = []
                 for session in sessions:
-                    marker = " (default)" if session.get("is_default") else ""
+                    markers: list[str] = []
+                    if session.get("is_default"):
+                        markers.append("default")
+                    if session.get("is_current"):
+                        markers.append("current")
+                    marker = f" ({', '.join(markers)})" if markers else ""
                     python = session.get("python")
                     python_text = f" using {python}" if python else ""
                     session_label = session.get("session_id")
@@ -259,6 +328,11 @@ def _append_suggestions(body: str, suggestions: list[str]) -> str:
     lines = [body, "", "Next:"]
     lines.extend(f"- {suggestion}" for suggestion in suggestions)
     return "\n".join(lines)
+
+
+def _env_flag(env: Mapping[str, str], name: str) -> bool:
+    value = env.get(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _render_run_snapshot(run: RunSnapshot, *, snapshot_only: bool) -> str:

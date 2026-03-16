@@ -63,6 +63,7 @@ class SessionSummary(TypedDict, total=False):
     python: str | None
     last_activity: str | None
     is_default: bool
+    is_current: bool
 
 
 class DeleteSessionResult(TypedDict):

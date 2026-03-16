@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
+from .advice import AdviceContext, AdvicePolicy
 from .compact import (
     compact_execution_payload,
     compact_history_entry,
@@ -21,7 +22,7 @@ from .contracts import (
 )
 from .errors import AgentNBException
 from .execution import ExecutionService
-from .journal import JournalQuery
+from .execution_invocation import ExecInvocationPolicy, OutputSelector
 from .ops import NotebookOps
 from .payloads import (
     CompactExecPayloadInput,
@@ -43,9 +44,14 @@ from .payloads import (
     VarsPayload,
 )
 from .runtime import KernelRuntime
+from .selectors import (
+    HistoryReference,
+    HistorySelectorResolver,
+    RunReference,
+    RunSelectorResolver,
+)
 from .session import DEFAULT_SESSION_ID
 
-OutputSelector = str
 StatusWaitFor = Literal["ready", "idle"]
 
 
@@ -66,10 +72,7 @@ class SessionRequest(ProjectRequest):
 class ExecRequest(SessionRequest):
     code: str
     timeout_s: float = 30.0
-    ensure_started: bool = False
-    background: bool = False
-    stream: bool = False
-    output_selector: OutputSelector | None = None
+    invocation: ExecInvocationPolicy = field(default_factory=ExecInvocationPolicy)
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -103,6 +106,7 @@ class ReloadRequest(SessionRequest):
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class HistoryRequest(SessionRequest):
+    reference: HistoryReference | None = None
     errors: bool = False
     latest: bool = False
     last: int | None = None
@@ -148,7 +152,7 @@ class RunsListRequest(SessionRequest):
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class RunLookupRequest(ProjectRequest):
-    execution_id: str
+    run_reference: RunReference
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -173,11 +177,17 @@ class AgentNBApp:
         runtime: KernelRuntime | None = None,
         executions: ExecutionService | None = None,
         ops: NotebookOps | None = None,
+        advisor: AdvicePolicy | None = None,
+        run_selectors: RunSelectorResolver | None = None,
+        history_selectors: HistorySelectorResolver | None = None,
     ) -> None:
         resolved_runtime = runtime or KernelRuntime()
         self.runtime = resolved_runtime
         self.executions = executions or ExecutionService(resolved_runtime)
         self.ops = ops or NotebookOps(resolved_runtime)
+        self.advisor = advisor or AdvicePolicy()
+        self.run_selectors = run_selectors or RunSelectorResolver(self.executions)
+        self.history_selectors = history_selectors or HistorySelectorResolver()
 
     def start(self, request: StartRequest) -> CommandResponse:
         return self._handle_command(
@@ -343,7 +353,7 @@ class AgentNBApp:
             require_live_session=False,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
-                execution_id=request.execution_id,
+                run_reference=request.run_reference,
                 timeout_s=None,
                 event_sink=None,
             ),
@@ -357,7 +367,7 @@ class AgentNBApp:
             require_live_session=False,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
-                execution_id=request.execution_id,
+                run_reference=request.run_reference,
                 timeout_s=request.timeout_s,
                 event_sink=None,
             ),
@@ -376,7 +386,7 @@ class AgentNBApp:
             require_live_session=False,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
-                execution_id=request.execution_id,
+                run_reference=request.run_reference,
                 timeout_s=request.timeout_s,
                 event_sink=event_sink,
             ),
@@ -391,7 +401,10 @@ class AgentNBApp:
             require_live_session=False,
             handler=lambda _: self.executions.cancel_run(
                 project_root=request.project_root,
-                execution_id=request.execution_id,
+                execution_id=self.run_selectors.resolve_execution_id(
+                    project_root=request.project_root,
+                    reference=request.run_reference,
+                ),
             ),
         )
 
@@ -414,12 +427,13 @@ class AgentNBApp:
         session_id: str,
         event_sink: ExecutionSink | None,
     ) -> ExecPayload:
-        if request.background:
+        invocation = request.invocation
+        if invocation.is_background:
             managed = self.executions.start_background_code(
                 project_root=request.project_root,
                 session_id=session_id,
                 code=request.code,
-                ensure_started=request.ensure_started,
+                ensure_started=invocation.ensure_started,
             )
         else:
             managed = self.executions.execute_code(
@@ -427,23 +441,23 @@ class AgentNBApp:
                 session_id=session_id,
                 code=request.code,
                 timeout_s=request.timeout_s,
-                ensure_started=request.ensure_started,
-                event_sink=event_sink if request.stream else None,
+                ensure_started=invocation.ensure_started,
+                event_sink=invocation.streaming_sink(event_sink),
             )
 
         payload = compact_execution_payload(
             cast(CompactExecPayloadInput, managed.record.to_execution_payload())
         )
-        if request.background:
+        if invocation.is_background:
             payload["background"] = True
-        if request.ensure_started:
+        if invocation.ensure_started:
             payload["ensured_started"] = True
             payload["started_new_session"] = managed.started_new_session
-        if request.output_selector is not None:
-            payload["selected_output"] = request.output_selector
-            payload["selected_text"] = select_exec_output(payload, request.output_selector)
+        if invocation.output_selector is not None:
+            payload["selected_output"] = invocation.output_selector
+            payload["selected_text"] = select_exec_output(payload, invocation.output_selector)
 
-        if not request.background and managed.record.status == "error":
+        if not invocation.is_background and managed.record.status == "error":
             raise AgentNBException(
                 code="EXECUTION_ERROR",
                 message="Execution failed",
@@ -516,14 +530,18 @@ class AgentNBApp:
         )
 
     def _history_payload(self, *, request: HistoryRequest, session_id: str) -> HistoryPayload:
-        entries = self.runtime.history(
+        selection = self.runtime.select_history(
             project_root=request.project_root,
-            session_id=session_id,
-            errors_only=request.errors,
-            include_internal=request.include_internal,
-            latest=request.latest,
-            last=request.last,
+            query=self.history_selectors.resolve_query(
+                session_id=session_id,
+                include_internal=request.include_internal,
+                errors_only=request.errors,
+                latest=request.latest,
+                last=request.last,
+                reference=request.reference,
+            ),
         )
+        entries = selection.entries
         entries = [compact_history_entry(entry) for entry in entries]
         return {"entries": entries}
 
@@ -578,10 +596,14 @@ class AgentNBApp:
         self,
         *,
         project_root: Path,
-        execution_id: str,
+        run_reference: RunReference,
         timeout_s: float | None,
         event_sink: ExecutionSink | None,
     ) -> RunLookupPayload:
+        execution_id = self.run_selectors.resolve_execution_id(
+            project_root=project_root,
+            reference=run_reference,
+        )
         if event_sink is not None:
             run = self.executions.follow_run(
                 project_root=project_root,
@@ -603,37 +625,25 @@ class AgentNBApp:
         return {"run": _public_run_payload(run)}
 
     def _validate_exec_request(self, request: ExecRequest) -> CommandResponse | None:
-        if request.background and request.output_selector is not None:
+        message = request.invocation.validation_error()
+        if message is not None:
             return self._input_error(
                 command_name="exec",
                 project_root=request.project_root,
                 session_id=request.session_id,
-                message="Output selectors are not supported with --background.",
-            )
-        if request.stream and request.background:
-            return self._input_error(
-                command_name="exec",
-                project_root=request.project_root,
-                session_id=request.session_id,
-                message="--stream and --background cannot be used together.",
-            )
-        if request.stream and request.output_selector is not None:
-            return self._input_error(
-                command_name="exec",
-                project_root=request.project_root,
-                session_id=request.session_id,
-                message="Output selectors are not supported with --stream.",
+                message=message,
             )
         return None
 
     def _validate_history_request(self, request: HistoryRequest) -> CommandResponse | None:
         try:
-            JournalQuery(
+            self.history_selectors.resolve_query(
                 session_id=request.session_id,
                 include_internal=request.include_internal,
                 errors_only=request.errors,
                 latest=request.latest,
                 last=request.last,
+                reference=request.reference,
             )
         except ValueError as exc:
             return self._input_error(
@@ -658,11 +668,13 @@ class AgentNBApp:
             session_id=session_id or DEFAULT_SESSION_ID,
             code="INVALID_INPUT",
             message=message,
-            suggestions=suggestions_for_command(
-                command_name,
-                "error",
-                {},
-                error_code="INVALID_INPUT",
+            suggestions=self.advisor.suggestions(
+                AdviceContext(
+                    command_name=command_name,
+                    response_status="error",
+                    data={},
+                    error_code="INVALID_INPUT",
+                )
             ),
         )
 
@@ -685,6 +697,11 @@ class AgentNBApp:
                 require_live_session=require_live_session,
             )
             response_session_id = resolved_session_id
+            if requested_session_id is not None and command_name != "sessions-delete":
+                self.runtime.remember_current_session(
+                    project_root=project_root,
+                    session_id=resolved_session_id,
+                )
             data = handler(resolved_session_id)
             if response_session_id_resolver is not None:
                 response_session_id = response_session_id_resolver(response_session_id, data)
@@ -693,7 +710,13 @@ class AgentNBApp:
                 project=str(project_root),
                 session_id=response_session_id,
                 data=data,
-                suggestions=suggestions_for_command(command_name, "ok", data),
+                suggestions=self.advisor.suggestions(
+                    AdviceContext(
+                        command_name=command_name,
+                        response_status="ok",
+                        data=data,
+                    )
+                ),
             )
         except AgentNBException as exc:
             return error_response(
@@ -706,11 +729,13 @@ class AgentNBApp:
                 evalue=exc.evalue,
                 traceback=compact_traceback(exc.traceback),
                 data=exc.data,
-                suggestions=suggestions_for_command(
-                    command_name,
-                    "error",
-                    exc.data,
-                    error_code=exc.code,
+                suggestions=self.advisor.suggestions(
+                    AdviceContext(
+                        command_name=command_name,
+                        response_status="error",
+                        data=exc.data,
+                        error_code=exc.code,
+                    )
                 ),
             )
         except Exception as exc:
@@ -722,11 +747,13 @@ class AgentNBApp:
                 message=str(exc),
                 ename=type(exc).__name__,
                 evalue=str(exc),
-                suggestions=suggestions_for_command(
-                    command_name,
-                    "error",
-                    {},
-                    error_code="INTERNAL_ERROR",
+                suggestions=self.advisor.suggestions(
+                    AdviceContext(
+                        command_name=command_name,
+                        response_status="error",
+                        data={},
+                        error_code="INTERNAL_ERROR",
+                    )
                 ),
             )
 
@@ -739,193 +766,6 @@ def _run_response_session_id(current_session_id: str, data: Mapping[str, object]
         if isinstance(session_id, str) and session_id:
             return session_id
     return current_session_id
-
-
-def _run_is_active(status: object) -> bool:
-    return isinstance(status, str) and status in {"starting", "running"}
-
-
-def suggestions_for_command(
-    command_name: str,
-    response_status: str,
-    data: Mapping[str, object],
-    *,
-    error_code: str | None = None,
-) -> list[str]:
-    if error_code == "AMBIGUOUS_SESSION":
-        return [
-            "Run `agentnb sessions list --json` to see the live session names.",
-            f"Retry with `agentnb {command_name} --session NAME --json` to target one explicitly.",
-        ]
-    if command_name == "start":
-        return [
-            'Run `agentnb exec "..." --json` to execute code in the live kernel.',
-            "Run `agentnb vars --recent 5 --json` to inspect the newest namespace changes.",
-            "Run `agentnb status --json` to confirm the kernel is still alive.",
-        ]
-    if command_name == "status":
-        if data.get("alive"):
-            return [
-                'Run `agentnb exec "..." --json` to execute code.',
-                "Run `agentnb vars --recent 5 --json` to inspect current variables.",
-                "Run `agentnb stop --json` when the session is no longer needed.",
-            ]
-        return [
-            "Run `agentnb start --json` to start a project-scoped kernel.",
-            "Run `agentnb doctor --json` if startup has been failing.",
-        ]
-    if command_name == "exec":
-        if response_status == "ok":
-            if data.get("background"):
-                return [
-                    "Run `agentnb runs wait EXECUTION_ID --json` to wait for the final result.",
-                    (
-                        "Run `agentnb runs show EXECUTION_ID --json` "
-                        "to inspect the current run record."
-                    ),
-                    (
-                        "Run `agentnb runs cancel EXECUTION_ID --json` "
-                        "to stop a long-running background run."
-                    ),
-                ]
-            return [
-                "Run `agentnb vars --recent 5 --json` to inspect the updated namespace.",
-                "Run `agentnb inspect NAME --json` to inspect a specific variable.",
-                "Run `agentnb history --json` to review prior executions.",
-            ]
-        return [
-            "Run `agentnb history --errors --json` to review recent failures.",
-            "Run `agentnb interrupt --json` if execution may still be stuck.",
-            "Run `agentnb reset --json` if the namespace needs a clean slate.",
-        ]
-    if command_name == "vars":
-        return [
-            "Run `agentnb inspect NAME --json` for details on a variable.",
-            "Run `agentnb vars --match TEXT --json` to filter noisy namespaces by name.",
-            'Run `agentnb exec "..." --json` to add or modify live state.',
-        ]
-    if command_name == "inspect":
-        return [
-            "Run `agentnb vars --recent 5 --json` to inspect more of the namespace.",
-            'Run `agentnb exec "..." --json` to probe or transform that value.',
-        ]
-    if command_name == "reload":
-        return [
-            'Run `agentnb exec "..." --json` to verify the reloaded module behavior.',
-            "Run `agentnb reset --json` if stale state is still causing issues.",
-        ]
-    if command_name == "history":
-        return [
-            'Run `agentnb exec "..." --json` to continue iterating.',
-            "Run `agentnb history --errors --json` to focus on failures only.",
-        ]
-    if command_name == "interrupt":
-        return [
-            'Retry with `agentnb exec "..." --json` once the kernel is idle.',
-            "Run `agentnb reset --json` if interrupted code left partial state behind.",
-        ]
-    if command_name == "reset":
-        return [
-            'Run `agentnb exec "setup_code" --json` to rebuild required state.',
-            "Run `agentnb vars --json` to confirm the namespace is clean.",
-        ]
-    if command_name == "stop":
-        return [
-            "Run `agentnb start --json` to create a fresh kernel later.",
-        ]
-    if command_name == "doctor":
-        if data.get("ready"):
-            return [
-                "Run `agentnb start --json` to start the kernel.",
-            ]
-        return [
-            "Run `agentnb doctor --fix --json` to attempt automatic fixes.",
-            "Run `agentnb start --python /path/to/python --json` to try a specific interpreter.",
-        ]
-    if command_name == "sessions-list":
-        if not data.get("sessions"):
-            return [
-                "Run `agentnb start --json` to start the default session.",
-                (
-                    'Run `agentnb exec --ensure-started --json "..."` '
-                    "to start and execute in one step."
-                ),
-            ]
-        return [
-            "Run `agentnb start --session NAME --json` to start another named session.",
-            "Run `agentnb status --session NAME --json` to inspect one session.",
-        ]
-    if command_name == "sessions-delete":
-        return [
-            "Run `agentnb sessions list --json` to confirm the remaining sessions.",
-        ]
-    if command_name == "runs-list":
-        return [
-            "Run `agentnb runs show EXECUTION_ID --json` to inspect one run in detail.",
-            "Run `agentnb history --json` to review the semantic session history view.",
-        ]
-    if command_name == "runs-show":
-        run = data.get("run")
-        run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
-        run_status = run_payload.get("status") if run_payload is not None else None
-        if _run_is_active(run_status):
-            return [
-                (
-                    "Run `agentnb runs follow EXECUTION_ID --json` "
-                    "to stream new events until the run finishes."
-                ),
-                "Run `agentnb runs wait EXECUTION_ID --json` to block for the final snapshot.",
-                "Run `agentnb runs cancel EXECUTION_ID --json` to stop the background run.",
-            ]
-        return [
-            "Run `agentnb runs list --json` to inspect more recorded runs.",
-            "Run `agentnb history --json` to review the session-level history view.",
-        ]
-    if command_name == "runs-follow":
-        return [
-            "Run `agentnb runs show EXECUTION_ID --json` to inspect the latest persisted snapshot.",
-        ]
-    if command_name == "runs-wait":
-        return [
-            "Run `agentnb runs show EXECUTION_ID --json` to inspect the completed run.",
-        ]
-    if command_name == "runs-cancel":
-        if data.get("cancel_requested"):
-            if data.get("status") == "ok":
-                return [
-                    "Run `agentnb runs show EXECUTION_ID --json` to inspect the completed run.",
-                    (
-                        "Run `agentnb status --session NAME --wait-idle --json` "
-                        "to confirm the session is ready."
-                    ),
-                ]
-            if data.get("session_outcome") == "preserved":
-                session_id = data.get("session_id") or "default"
-                return [
-                    (
-                        f"Run `agentnb status --session {session_id} --wait-idle --json` "
-                        "to confirm the session is ready for more work."
-                    ),
-                    (
-                        "Run `agentnb runs show EXECUTION_ID --json` "
-                        "to inspect the cancelled run record."
-                    ),
-                ]
-            if data.get("session_outcome") == "stopped":
-                return [
-                    (
-                        "Run `agentnb start --session NAME --json` "
-                        "to start a fresh session explicitly."
-                    ),
-                    (
-                        'Run `agentnb exec --ensure-started "..." --json` '
-                        "to restart and execute in one step."
-                    ),
-                ]
-        return [
-            "Run `agentnb runs show EXECUTION_ID --json` to inspect the persisted run snapshot.",
-        ]
-    return []
 
 
 def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:

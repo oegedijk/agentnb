@@ -19,9 +19,9 @@ STATE_MANIFEST_FILE_NAME = "state-manifest.json"
 STATE_SCHEMA_VERSION = "1"
 HISTORY_FILE_NAME = "history.jsonl"
 EXECUTIONS_FILE_NAME = "executions.jsonl"
+SESSION_PREFERENCES_FILE_NAME = "session-preferences.json"
 LEGACY_SESSION_FILE_NAME = "session.json"
 COMMAND_LOCK_FILE_NAME = "command.lock"
-SESSION_FILE_GLOB = "session-*.json"
 RESOURCE_DESCRIPTOR_FILE_NAME = "descriptor.json"
 RESOURCE_PAYLOAD_DIR_NAME = "payload"
 SNAPSHOT_DESCRIPTOR_SCHEMA_VERSION = "1"
@@ -32,6 +32,7 @@ PersistedResourceKind = Literal["snapshot", "export"]
 ResourceLifecycle = Literal["allocating", "ready", "failed", "deleted"]
 
 _RESOURCE_ID_PATTERN = re.compile(r"^[a-f0-9]{16}$")
+_SESSION_RECORD_FILE_PATTERN = re.compile(r"^session-[a-f0-9]{12}\.json$")
 
 
 @dataclass(slots=True, frozen=True)
@@ -141,6 +142,26 @@ class StateManifest:
                     resource_versions[key] = value
 
         return cls(schema_version=schema_version, resource_versions=resource_versions)
+
+
+@dataclass(slots=True, frozen=True)
+class SessionPreferences:
+    current_session_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if self.current_session_id is not None:
+            payload["current_session_id"] = self.current_session_id
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> SessionPreferences:
+        current_session_id = payload.get("current_session_id")
+        if current_session_id is None:
+            return cls()
+        if not isinstance(current_session_id, str):
+            raise ValueError("Invalid current_session_id")
+        return cls(current_session_id=current_session_id)
 
 
 @dataclass(slots=True, frozen=True)
@@ -339,6 +360,10 @@ class StateRepository:
         return self.resource_path("legacy_session")
 
     @property
+    def session_preferences_file(self) -> Path:
+        return self.resource_path("session_preferences")
+
+    @property
     def snapshots_dir(self) -> Path:
         return self.resource_path("snapshots")
 
@@ -369,7 +394,11 @@ class StateRepository:
     def session_files(self) -> list[Path]:
         if not self.state_dir.exists():
             return []
-        return sorted(self.state_dir.glob(SESSION_FILE_GLOB))
+        return sorted(
+            path
+            for path in self.state_dir.iterdir()
+            if path.is_file() and _SESSION_RECORD_FILE_PATTERN.fullmatch(path.name)
+        )
 
     def ensure_state_dir(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -453,6 +482,40 @@ class StateRepository:
 
     def ensure_compatible(self) -> StateManifest:
         return self.manifest()
+
+    def session_preferences(self) -> SessionPreferences:
+        self.ensure_compatible()
+        if not self.session_preferences_file.exists():
+            return SessionPreferences()
+        try:
+            payload = json.loads(self.session_preferences_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            _safe_unlink(self.session_preferences_file)
+            return SessionPreferences()
+        if not isinstance(payload, dict):
+            _safe_unlink(self.session_preferences_file)
+            return SessionPreferences()
+        try:
+            return SessionPreferences.from_dict(payload)
+        except ValueError:
+            _safe_unlink(self.session_preferences_file)
+            return SessionPreferences()
+
+    def save_session_preferences(self, preferences: SessionPreferences) -> None:
+        self.ensure_initialized()
+        self.session_preferences_file.write_text(
+            json.dumps(preferences.to_dict(), ensure_ascii=True),
+            encoding="utf-8",
+        )
+
+    def set_current_session_id(self, session_id: str) -> None:
+        self.save_session_preferences(SessionPreferences(current_session_id=session_id))
+
+    def clear_current_session_id(self, *, expected_session_id: str | None = None) -> None:
+        current = self.session_preferences().current_session_id
+        if expected_session_id is not None and current != expected_session_id:
+            return
+        _safe_unlink(self.session_preferences_file)
 
     def session_runtime(self, session_id: str) -> SessionStateFiles:
         state_dir = self.state_dir
@@ -835,6 +898,11 @@ _STATE_RESOURCES: dict[str, StateResource] = {
         name="executions",
         kind="file",
         relative_path=Path(EXECUTIONS_FILE_NAME),
+    ),
+    "session_preferences": StateResource(
+        name="session_preferences",
+        kind="file",
+        relative_path=Path(SESSION_PREFERENCES_FILE_NAME),
     ),
     "legacy_session": StateResource(
         name="legacy_session",

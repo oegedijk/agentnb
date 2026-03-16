@@ -195,12 +195,15 @@ def test_runtime_list_sessions_reports_alive_entries(project_dir: Path) -> None:
         KernelStatus(alive=True, pid=222, python="python-analysis"),
     ]
     runtime = KernelRuntime(backend=backend)
+    runtime.remember_current_session(project_root=project_dir, session_id="analysis")
 
     sessions = runtime.list_sessions(project_root=project_dir)
 
     assert [session["session_id"] for session in sessions] == ["default", "analysis"]
     assert sessions[0]["is_default"] is True
     assert sessions[1]["is_default"] is False
+    assert sessions[0]["is_current"] is False
+    assert sessions[1]["is_current"] is True
 
 
 def test_runtime_list_sessions_uses_execution_history_for_last_activity(project_dir: Path) -> None:
@@ -304,6 +307,40 @@ def test_runtime_resolve_session_id_uses_only_live_session(project_dir: Path) ->
     assert resolved == "analysis"
 
 
+def test_runtime_resolve_session_id_prefers_current_session_preference(project_dir: Path) -> None:
+    default_store = SessionStore(project_dir, session_id="default")
+    analysis_store = SessionStore(project_dir, session_id="analysis")
+    default_store.ensure_state_dir()
+    for store in (default_store, analysis_store):
+        store.save_session(
+            SessionInfo(
+                session_id=store.session_id,
+                pid=os.getpid(),
+                connection_file=str(store.connection_file),
+                python_executable="python",
+                project_root=str(project_dir),
+                started_at="2026-03-09T00:00:00+00:00",
+            )
+        )
+        store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.side_effect = [
+        KernelStatus(alive=True, pid=111),
+        KernelStatus(alive=True, pid=222),
+    ]
+    runtime = KernelRuntime(backend=backend)
+    runtime.remember_current_session(project_root=project_dir, session_id="analysis")
+
+    resolved = runtime.resolve_session_id(
+        project_root=project_dir,
+        requested_session_id=None,
+        require_live_session=True,
+    )
+
+    assert resolved == "analysis"
+
+
 def test_runtime_resolve_session_id_raises_when_multiple_live_sessions_exist(
     project_dir: Path,
 ) -> None:
@@ -336,6 +373,61 @@ def test_runtime_resolve_session_id_raises_when_multiple_live_sessions_exist(
             requested_session_id=None,
             require_live_session=True,
         )
+
+
+def test_runtime_resolve_session_id_uses_current_session_preference_when_no_live_sessions(
+    project_dir: Path,
+) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    runtime.remember_current_session(project_root=project_dir, session_id="analysis")
+
+    resolved = runtime.resolve_session_id(
+        project_root=project_dir,
+        requested_session_id=None,
+        require_live_session=True,
+    )
+
+    assert resolved == "analysis"
+
+
+def test_runtime_resolve_session_id_uses_current_session_preference_for_non_live_lookup(
+    project_dir: Path,
+) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    runtime.remember_current_session(project_root=project_dir, session_id="analysis")
+
+    resolved = runtime.resolve_session_id(
+        project_root=project_dir,
+        requested_session_id=None,
+        require_live_session=False,
+    )
+
+    assert resolved == "analysis"
+
+
+def test_runtime_delete_session_clears_current_session_preference(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="analysis")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.return_value = KernelStatus(alive=False)
+    runtime = KernelRuntime(backend=backend)
+    runtime.remember_current_session(project_root=project_dir, session_id="analysis")
+
+    runtime.delete_session(project_root=project_dir, session_id="analysis")
+
+    assert runtime.current_session_id(project_root=project_dir) is None
 
 
 def test_runtime_wait_for_ready_returns_when_status_becomes_alive(

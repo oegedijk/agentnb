@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypedDict, cast
 
 import pytest
@@ -14,7 +15,7 @@ from agentnb.cli import main
 from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink, KernelStatus
 from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
-from agentnb.journal import JournalEntry
+from agentnb.journal import JournalEntry, JournalQuery
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
@@ -60,6 +61,10 @@ def _event_sink(kwargs: dict[str, object]) -> ExecutionSink:
     sink = kwargs["event_sink"]
     assert sink is not None
     return cast(ExecutionSink, sink)
+
+
+def _history_selection(entries: list[JournalEntry]) -> SimpleNamespace:
+    return SimpleNamespace(entries=entries)
 
 
 def _write_module(project_dir: Path, name: str, body: str) -> None:
@@ -198,6 +203,84 @@ def test_cli_exec_returns_top_level_error_when_execution_fails(
     traceback = error["traceback"]
     assert traceback is not None
     assert len(traceback) <= 6
+
+
+def test_cli_implicit_exec_argument_uses_hot_path(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    ensure_calls: list[dict[str, object]] = []
+
+    def ensure_stub(**kwargs: object) -> tuple[object, bool]:
+        ensure_calls.append(dict(kwargs))
+        return object(), True
+
+    cli.runtime.ensure_started = ensure_stub  # type: ignore[method-assign]
+    cli.runtime.execute = lambda **_: _ok_execution(result="2")  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["--project", str(project_dir), "--json", "1 + 1"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "exec"
+    assert payload["data"]["result"] == "2"
+    assert payload["data"]["ensured_started"] is True
+    assert ensure_calls[0]["session_id"] == "default"
+
+
+def test_cli_implicit_exec_file_uses_hot_path(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    script = project_dir / "analysis.py"
+    script.write_text("value = 1\nvalue + 1\n", encoding="utf-8")
+    executed_code: list[str] = []
+
+    cli.runtime.ensure_started = lambda **_: (object(), True)  # type: ignore[method-assign]
+
+    def execute_stub(**kwargs: object) -> ExecutionResult:
+        executed_code.append(str(kwargs["code"]))
+        return _ok_execution(result="2")
+
+    cli.runtime.execute = execute_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["--project", str(project_dir), "--json", str(script)])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "exec"
+    assert payload["data"]["result"] == "2"
+    assert payload["data"]["ensured_started"] is True
+    assert executed_code == ["value = 1\nvalue + 1\n"]
+
+
+def test_cli_implicit_exec_stdin_uses_hot_path(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    ensure_calls: list[dict[str, object]] = []
+
+    def ensure_stub(**kwargs: object) -> tuple[object, bool]:
+        ensure_calls.append(dict(kwargs))
+        return object(), True
+
+    cli.runtime.ensure_started = ensure_stub  # type: ignore[method-assign]
+    cli.runtime.execute = lambda **_: _ok_execution(result="2")  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["--project", str(project_dir), "--json"], input="1 + 1")
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "exec"
+    assert payload["data"]["result"] == "2"
+    assert payload["data"]["ensured_started"] is True
+    assert ensure_calls[0]["session_id"] == "default"
 
 
 def test_cli_exec_stream_json_emits_start_events_and_final(
@@ -648,19 +731,26 @@ def test_cli_agent_preset_enables_json_and_suppresses_suggestions(
     result = cli_runner.invoke(main, ["--agent", "status", "--project", str(project_dir)])
     assert result.exit_code == 0
 
-    payload = _payload(result.output)
-    assert payload["status"] == "ok"
-    assert payload["command"] == "status"
-    assert payload["suggestions"] == []
+    payload = json.loads(result.output)
+    assert payload == {
+        "ok": True,
+        "command": "status",
+        "session_id": "default",
+        "data": {"alive": False},
+    }
 
 
 def test_cli_root_flags_work_after_subcommand(cli_runner: CliRunner, project_dir: Path) -> None:
     result = cli_runner.invoke(main, ["status", "--agent", "--project", str(project_dir)])
     assert result.exit_code == 0
 
-    payload = _payload(result.output)
-    assert payload["command"] == "status"
-    assert payload["suggestions"] == []
+    payload = json.loads(result.output)
+    assert payload == {
+        "ok": True,
+        "command": "status",
+        "session_id": "default",
+        "data": {"alive": False},
+    }
 
 
 def test_cli_no_suggestions_strips_suggestions_from_json(
@@ -673,6 +763,14 @@ def test_cli_no_suggestions_strips_suggestions_from_json(
 
     payload = _payload(result.output)
     assert payload["suggestions"] == []
+
+
+def test_cli_quiet_root_flag_works_after_subcommand(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    result = cli_runner.invoke(main, ["status", "--quiet", "--project", str(project_dir)])
+    assert result.exit_code == 0
+    assert result.output == ""
 
 
 def test_cli_env_format_json_applies_without_per_command_flag(
@@ -868,13 +966,15 @@ def test_cli_history_latest_returns_only_most_recent_entry(
 ) -> None:
     import agentnb.cli as cli
 
-    history_calls: list[dict[str, object]] = []
+    queries: list[JournalQuery] = []
 
-    def history_stub(**kwargs: object) -> list[JournalEntry]:
-        history_calls.append(kwargs)
-        return [_journal_entry(label="exec x = 2 x + 2", input_text="x = 2\nx + 2")]
+    def select_history_stub(**kwargs: object) -> SimpleNamespace:
+        queries.append(cast(JournalQuery, kwargs["query"]))
+        return _history_selection(
+            [_journal_entry(label="exec x = 2 x + 2", input_text="x = 2\nx + 2")]
+        )
 
-    cli.runtime.history = history_stub  # type: ignore[method-assign]
+    cli.runtime.select_history = select_history_stub  # type: ignore[method-assign]
 
     history_res = cli_runner.invoke(
         main,
@@ -887,27 +987,24 @@ def test_cli_history_latest_returns_only_most_recent_entry(
     assert payload["data"]["entries"][0]["command_type"] == "exec"
     assert payload["data"]["entries"][0]["label"] == "exec x = 2 x + 2"
     assert payload["data"]["entries"][0]["kind"] == "user_command"
-    assert history_calls == [
-        {
-            "project_root": project_dir.resolve(),
-            "session_id": "default",
-            "errors_only": False,
-            "include_internal": False,
-            "latest": True,
-            "last": None,
-        }
-    ]
+    assert queries[0].session_id == "default"
+    assert queries[0].errors_only is False
+    assert queries[0].include_internal is False
+    assert queries[0].latest is True
+    assert queries[0].last is None
 
 
 def test_cli_history_hides_helper_code_by_default(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.runtime.history = lambda **_: [  # type: ignore[method-assign]
-        _journal_entry(command_type="exec", label="exec value = 42 import localmod"),
-        _journal_entry(command_type="vars", label="vars"),
-        _journal_entry(command_type="inspect", label="inspect value"),
-        _journal_entry(command_type="reload", label="reload localmod"),
-    ]
+    cli.runtime.select_history = lambda **_: _history_selection(  # type: ignore[method-assign]
+        [
+            _journal_entry(command_type="exec", label="exec value = 42 import localmod"),
+            _journal_entry(command_type="vars", label="vars"),
+            _journal_entry(command_type="inspect", label="inspect value"),
+            _journal_entry(command_type="reload", label="reload localmod"),
+        ]
+    )
 
     history_res = cli_runner.invoke(main, ["history", "--project", str(project_dir), "--json"])
     assert history_res.exit_code == 0
@@ -925,30 +1022,32 @@ def test_cli_history_all_includes_internal_helper_entries(
 ) -> None:
     import agentnb.cli as cli
 
-    history_calls: list[dict[str, object]] = []
+    queries: list[JournalQuery] = []
 
-    def history_stub(**kwargs: object) -> list[JournalEntry]:
-        history_calls.append(kwargs)
-        return [
-            _journal_entry(
-                kind="kernel_execution",
-                command_type="exec",
-                label="exec kernel execution",
-                user_visible=False,
-                code="value = 42",
-            ),
-            _journal_entry(command_type="exec", label="exec value = 42"),
-            _journal_entry(
-                kind="kernel_execution",
-                command_type="vars",
-                label="vars kernel execution",
-                user_visible=False,
-                code="get_ipython()",
-            ),
-            _journal_entry(command_type="vars", label="vars"),
-        ]
+    def select_history_stub(**kwargs: object) -> SimpleNamespace:
+        queries.append(cast(JournalQuery, kwargs["query"]))
+        return _history_selection(
+            [
+                _journal_entry(
+                    kind="kernel_execution",
+                    command_type="exec",
+                    label="exec kernel execution",
+                    user_visible=False,
+                    code="value = 42",
+                ),
+                _journal_entry(command_type="exec", label="exec value = 42"),
+                _journal_entry(
+                    kind="kernel_execution",
+                    command_type="vars",
+                    label="vars kernel execution",
+                    user_visible=False,
+                    code="get_ipython()",
+                ),
+                _journal_entry(command_type="vars", label="vars"),
+            ]
+        )
 
-    cli.runtime.history = history_stub  # type: ignore[method-assign]
+    cli.runtime.select_history = select_history_stub  # type: ignore[method-assign]
 
     history_res = cli_runner.invoke(
         main,
@@ -970,7 +1069,7 @@ def test_cli_history_all_includes_internal_helper_entries(
     assert entries[-2]["command_type"] == "vars"
     assert entries[-2]["user_visible"] is False
     assert "code" not in entries[-2]
-    assert history_calls[0]["include_internal"] is True
+    assert queries[0].include_internal is True
 
 
 def test_cli_history_errors_filters_semantic_failures(
@@ -978,19 +1077,21 @@ def test_cli_history_errors_filters_semantic_failures(
 ) -> None:
     import agentnb.cli as cli
 
-    history_calls: list[dict[str, object]] = []
+    queries: list[JournalQuery] = []
 
-    def history_stub(**kwargs: object) -> list[JournalEntry]:
-        history_calls.append(kwargs)
-        return [
-            _journal_entry(
-                command_type="inspect",
-                label="inspect missing_name",
-                status="error",
-            )
-        ]
+    def select_history_stub(**kwargs: object) -> SimpleNamespace:
+        queries.append(cast(JournalQuery, kwargs["query"]))
+        return _history_selection(
+            [
+                _journal_entry(
+                    command_type="inspect",
+                    label="inspect missing_name",
+                    status="error",
+                )
+            ]
+        )
 
-    cli.runtime.history = history_stub  # type: ignore[method-assign]
+    cli.runtime.select_history = select_history_stub  # type: ignore[method-assign]
 
     history_res = cli_runner.invoke(
         main,
@@ -1004,22 +1105,24 @@ def test_cli_history_errors_filters_semantic_failures(
     assert entries[0]["label"] == "inspect missing_name"
     assert entries[0]["kind"] == "user_command"
     assert entries[0]["status"] == "error"
-    assert history_calls[0]["errors_only"] is True
+    assert queries[0].errors_only is True
 
 
 def test_cli_history_last_limits_visible_entries(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    history_calls: list[dict[str, object]] = []
+    queries: list[JournalQuery] = []
 
-    def history_stub(**kwargs: object) -> list[JournalEntry]:
-        history_calls.append(kwargs)
-        return [
-            _journal_entry(command_type="vars", label="vars"),
-            _journal_entry(command_type="reload", label="reload localmod"),
-        ]
+    def select_history_stub(**kwargs: object) -> SimpleNamespace:
+        queries.append(cast(JournalQuery, kwargs["query"]))
+        return _history_selection(
+            [
+                _journal_entry(command_type="vars", label="vars"),
+                _journal_entry(command_type="reload", label="reload localmod"),
+            ]
+        )
 
-    cli.runtime.history = history_stub  # type: ignore[method-assign]
+    cli.runtime.select_history = select_history_stub  # type: ignore[method-assign]
 
     history_res = cli_runner.invoke(
         main,
@@ -1029,28 +1132,25 @@ def test_cli_history_last_limits_visible_entries(cli_runner: CliRunner, project_
 
     payload = _payload(history_res.output)
     assert [entry["command_type"] for entry in payload["data"]["entries"]] == ["vars", "reload"]
-    assert history_calls == [
-        {
-            "project_root": project_dir.resolve(),
-            "session_id": "default",
-            "errors_only": False,
-            "include_internal": False,
-            "latest": False,
-            "last": 2,
-        }
-    ]
+    assert queries[0].session_id == "default"
+    assert queries[0].errors_only is False
+    assert queries[0].include_internal is False
+    assert queries[0].latest is False
+    assert queries[0].last == 2
 
 
 def test_cli_history_error_exec_label_is_semantic(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.runtime.history = lambda **_: [  # type: ignore[method-assign]
-        _journal_entry(
-            label="exec error ZeroDivisionError",
-            status="error",
-            error_type="ZeroDivisionError",
-        )
-    ]
+    cli.runtime.select_history = lambda **_: _history_selection(  # type: ignore[method-assign]
+        [
+            _journal_entry(
+                label="exec error ZeroDivisionError",
+                status="error",
+                error_type="ZeroDivisionError",
+            )
+        ]
+    )
 
     history_res = cli_runner.invoke(
         main,
@@ -1060,6 +1160,67 @@ def test_cli_history_error_exec_label_is_semantic(cli_runner: CliRunner, project
 
     payload = _payload(history_res.output)
     assert payload["data"]["entries"][0]["label"] == "exec error ZeroDivisionError"
+
+
+def test_cli_history_latest_selector_uses_history_reference(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    queries: list[JournalQuery] = []
+
+    def select_history_stub(**kwargs: object) -> SimpleNamespace:
+        queries.append(cast(JournalQuery, kwargs["query"]))
+        return _history_selection([_journal_entry(command_type="vars", label="vars")])
+
+    cli.runtime.select_history = select_history_stub  # type: ignore[method-assign]
+
+    history_res = cli_runner.invoke(
+        main,
+        ["history", "@latest", "--project", str(project_dir), "--json"],
+    )
+
+    assert history_res.exit_code == 0
+    payload = _payload(history_res.output)
+    assert payload["data"]["entries"][0]["label"] == "vars"
+    assert queries[0].latest is True
+    assert queries[0].errors_only is False
+
+
+def test_cli_history_last_error_selector_uses_history_reference(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    queries: list[JournalQuery] = []
+
+    def select_history_stub(**kwargs: object) -> SimpleNamespace:
+        queries.append(cast(JournalQuery, kwargs["query"]))
+        return _history_selection(
+            [
+                _journal_entry(
+                    command_type="exec",
+                    label="exec error ZeroDivisionError",
+                    status="error",
+                    error_type="ZeroDivisionError",
+                )
+            ]
+        )
+
+    cli.runtime.select_history = select_history_stub  # type: ignore[method-assign]
+
+    history_res = cli_runner.invoke(
+        main,
+        ["history", "@last-error", "--project", str(project_dir), "--json"],
+    )
+
+    assert history_res.exit_code == 0
+    payload = _payload(history_res.output)
+    assert payload["data"]["entries"][0]["label"] == "exec error ZeroDivisionError"
+    assert queries[0].latest is True
+    assert queries[0].errors_only is True
 
 
 def test_cli_sessions_list_returns_runtime_entries(
@@ -1217,6 +1378,34 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
     assert payload["data"]["run"]["terminal_reason"] == "cancelled"
     assert payload["data"]["run"]["cancel_requested"] is True
     assert payload["data"]["run"]["recorded_ename"] == "KeyboardInterrupt"
+
+
+def test_cli_runs_show_accepts_latest_selector(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.list_runs = lambda **_: [  # type: ignore[method-assign]
+        {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
+        {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
+    ]
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-2",
+        "ts": "2026-03-11T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "ok",
+        "duration_ms": 10,
+        "result": "2",
+        "events": [],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "@latest", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["run"]["execution_id"] == "run-2"
 
 
 def test_cli_runs_show_human_clarifies_snapshot_for_running_run(
@@ -1630,20 +1819,22 @@ def test_cli_inspect_compacts_sequence_payload(cli_runner: CliRunner, project_di
 def test_cli_history_exec_label_shortens_urls(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.runtime.history = lambda **_: [  # type: ignore[method-assign]
-        _journal_entry(
-            label=(
-                "exec url = "
-                "'https://jsonplaceholder.typicode.com/comments?"
-                "postId=1&_limit=2&expand=author&include=metadata' url"
-            ),
-            input_text=(
-                "url = 'https://jsonplaceholder.typicode.com/comments?"
-                "postId=1&_limit=2&expand=author&include=metadata'\n"
-                "url"
-            ),
-        )
-    ]
+    cli.runtime.select_history = lambda **_: _history_selection(  # type: ignore[method-assign]
+        [
+            _journal_entry(
+                label=(
+                    "exec url = "
+                    "'https://jsonplaceholder.typicode.com/comments?"
+                    "postId=1&_limit=2&expand=author&include=metadata' url"
+                ),
+                input_text=(
+                    "url = 'https://jsonplaceholder.typicode.com/comments?"
+                    "postId=1&_limit=2&expand=author&include=metadata'\n"
+                    "url"
+                ),
+            )
+        ]
+    )
 
     history_res = cli_runner.invoke(
         main,

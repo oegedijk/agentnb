@@ -128,6 +128,22 @@ def test_resolve_invocation_intent_infers_stdin_exec_without_command() -> None:
     )
 
 
+def test_resolve_invocation_intent_does_not_infer_stdin_exec_for_empty_non_tty() -> None:
+    resolver = InvocationResolver()
+
+    intent = resolver.resolve_invocation_intent(
+        [],
+        known_commands=KNOWN_COMMANDS,
+        cwd=Path("/tmp/project"),
+        stdin=FakeStdin("", is_tty=False),
+    )
+
+    assert intent.kind == "command"
+    command_intent = cast(CommandIntent, intent)
+    assert command_intent.command_name is None
+    assert command_intent.argv == ()
+
+
 def test_resolve_invocation_intent_help_without_command_stays_command_intent() -> None:
     resolver = InvocationResolver()
 

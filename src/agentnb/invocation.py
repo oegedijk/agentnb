@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from io import UnsupportedOperation
 from pathlib import Path
-from typing import Literal, Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias, cast
 
 from .errors import InvalidInputError
 
@@ -66,6 +67,19 @@ class StdinReader(Protocol):
     def isatty(self) -> bool: ...
 
     def read(self) -> str: ...
+
+
+class SeekableStdin(StdinReader, Protocol):
+    def seekable(self) -> bool: ...
+
+    def tell(self) -> int: ...
+
+    def seek(self, position: int) -> int: ...
+
+
+class BufferedStdin(StdinReader, Protocol):
+    @property
+    def buffer(self) -> object: ...
 
 
 @dataclass(slots=True, frozen=True)
@@ -317,7 +331,7 @@ class InvocationResolver:
             return True
         if scanned.file_option_path is not None:
             return True
-        return not stdin.isatty()
+        return self._stdin_has_data(stdin)
 
     def _implicit_exec_intent(
         self,
@@ -359,3 +373,33 @@ class InvocationResolver:
         if resolved.exists() and resolved.is_file():
             return candidate
         return None
+
+    @staticmethod
+    def _stdin_has_data(stdin: StdinReader) -> bool:
+        if stdin.isatty():
+            return False
+
+        seekable = getattr(stdin, "seekable", None)
+        if callable(seekable):
+            try:
+                if seekable():
+                    seekable_stdin = cast(SeekableStdin, stdin)
+                    position = seekable_stdin.tell()
+                    data = stdin.read()
+                    seekable_stdin.seek(position)
+                    return bool(data.strip())
+            except (OSError, UnsupportedOperation):
+                pass
+
+        buffer = getattr(cast(BufferedStdin, stdin), "buffer", None)
+        peek = getattr(buffer, "peek", None)
+        if callable(peek):
+            try:
+                data = peek(1)
+            except OSError:
+                return False
+            if isinstance(data, bytes):
+                return bool(data.strip())
+            return bool(str(data).strip())
+
+        return False

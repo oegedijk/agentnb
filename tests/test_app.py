@@ -16,6 +16,7 @@ from agentnb.app import (
     SessionsDeleteRequest,
     SessionsListRequest,
     StatusRequest,
+    WaitRequest,
 )
 from agentnb.contracts import KernelStatus
 from agentnb.errors import AmbiguousSessionError
@@ -119,7 +120,7 @@ def test_app_exec_success_routes_through_resolved_session(project_dir) -> None:
             project_root=project_dir,
             code="1 + 1",
             timeout_s=7,
-            invocation=ExecInvocationPolicy(ensure_started=True),
+            invocation=ExecInvocationPolicy(startup_policy="always"),
         )
     )
 
@@ -182,7 +183,7 @@ def test_app_exec_streaming_failure_returns_top_level_execution_error(project_di
         session_id="default",
         code="1 / 0",
         timeout_s=30.0,
-        ensure_started=False,
+        ensure_started=True,
         event_sink=sink,
     )
 
@@ -210,7 +211,7 @@ def test_app_exec_background_success_uses_background_service(project_dir) -> Non
             project_root=project_dir,
             code="long_running()",
             session_id="analysis",
-            invocation=ExecInvocationPolicy(ensure_started=True, background=True),
+            invocation=ExecInvocationPolicy(startup_policy="always", background=True),
         )
     )
 
@@ -309,6 +310,38 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
         timeout_s=5.0,
     )
     runtime.status.assert_not_called()
+
+
+def test_app_wait_uses_runtime_wait_for_usable(project_dir, mocker) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.wait_for_usable.return_value = mocker.Mock(
+        status=KernelStatus(alive=True, pid=123, busy=False),
+        waited=True,
+        waited_for="idle",
+    )
+    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
+
+    response = app.wait(
+        WaitRequest(
+            project_root=project_dir,
+            timeout_s=5.0,
+        )
+    )
+
+    assert response.status == "ok"
+    assert response.command == "wait"
+    assert response.session_id == "analysis"
+    assert response.data["alive"] is True
+    assert response.data["waited"] is True
+    assert response.data["waited_for"] == "idle"
+    runtime.wait_for_usable.assert_called_once()
+    _assert_called_with_subset(
+        runtime.wait_for_usable,
+        project_root=project_dir.resolve(),
+        session_id="analysis",
+        timeout_s=5.0,
+    )
 
 
 def test_app_history_rejects_latest_and_last_combination_before_runtime_lookup(project_dir) -> None:
@@ -568,7 +601,10 @@ def test_app_runs_show_resolves_latest_selector_before_lookup(project_dir) -> No
 
     assert response.status == "ok"
     assert response.data["run"]["execution_id"] == "run-2"
-    executions.list_runs.assert_called_once_with(project_root=project_dir.resolve())
+    executions.list_runs.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        session_id=None,
+    )
     executions.get_run.assert_called_once_with(
         project_root=project_dir.resolve(),
         execution_id="run-2",

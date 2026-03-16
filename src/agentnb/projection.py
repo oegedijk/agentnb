@@ -38,7 +38,7 @@ class ResponseProjector:
         command_name: str,
         data: Mapping[str, object],
     ) -> dict[str, Any]:
-        if command_name in {"start", "status"}:
+        if command_name in {"start", "status", "wait"}:
             return _subset(
                 data,
                 "alive",
@@ -50,7 +50,29 @@ class ResponseProjector:
             )
         if command_name in {"stop", "interrupt"}:
             return dict(data)
+        if command_name in {"exec", "reset"}:
+            compacted = _subset(
+                data,
+                "status",
+                "execution_id",
+                "duration_ms",
+                "background",
+                "ensured_started",
+                "started_new_session",
+            )
+            for key in ("result", "stdout", "stderr", "selected_output", "selected_text"):
+                value = data.get(key)
+                if isinstance(value, str) and value:
+                    compacted[key] = value
+            return compacted
+        if command_name in {"history", "runs-list", "sessions-list"}:
+            return dict(data)
         if command_name == "runs-show":
+            run = data.get("run")
+            if isinstance(run, dict):
+                return {"run": compact_run_entry(cast(RunSnapshot, run))}
+            return {}
+        if command_name == "runs-follow":
             run = data.get("run")
             if isinstance(run, dict):
                 return {"run": compact_run_entry(cast(RunSnapshot, run))}
@@ -66,6 +88,16 @@ class ResponseProjector:
                     compacted["result_preview"] = result
                 return {"run": compacted}
             return {}
+        if command_name == "runs-cancel":
+            return _subset(
+                data,
+                "execution_id",
+                "session_id",
+                "cancel_requested",
+                "status",
+                "run_status",
+                "session_outcome",
+            )
         return dict(data)
 
     def _project_agent_error(self, response: CommandResponse) -> dict[str, Any]:

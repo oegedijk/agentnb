@@ -16,16 +16,33 @@ class DummySink:
 
 def test_exec_invocation_policy_from_cli_preserves_flag_state() -> None:
     policy = ExecInvocationPolicy.from_cli(
-        ensure_started=True,
+        startup_policy="always",
         background=False,
         stream=True,
         output_selector=None,
     )
 
+    assert policy.startup_policy == "always"
     assert policy.ensure_started is True
+    assert policy.explicitly_ensures_started is True
     assert policy.is_background is False
     assert policy.is_stream is True
     assert policy.output_selector is None
+
+
+def test_exec_invocation_policy_defaults_to_starting_sessions() -> None:
+    policy = ExecInvocationPolicy()
+
+    assert policy.startup_policy == "default"
+    assert policy.ensure_started is True
+    assert policy.explicitly_disables_startup is False
+
+
+def test_exec_invocation_policy_can_disable_startup_explicitly() -> None:
+    policy = ExecInvocationPolicy(startup_policy="never")
+
+    assert policy.ensure_started is False
+    assert policy.explicitly_disables_startup is True
 
 
 @pytest.mark.parametrize(

@@ -111,7 +111,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         command = response.command
         data = response.data
 
-        quiet_commands = {"start", "status", "stop", "interrupt", "reload", "doctor"}
+        quiet_commands = {"start", "status", "wait", "stop", "interrupt", "reload", "doctor"}
         if options.quiet and command in quiet_commands:
             body = ""
         elif command == "start":
@@ -137,6 +137,16 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     body = f"Kernel is running (pid {status_data.get('pid')}, busy)."
                 else:
                     body = f"Kernel is running (pid {status_data.get('pid')})."
+            else:
+                body = "Kernel is not running."
+        elif command == "wait":
+            status_data = cast(StatusPayload, data)
+            if status_data.get("alive"):
+                waited_for = status_data.get("waited_for")
+                if waited_for == "ready":
+                    body = f"Kernel is ready (pid {status_data.get('pid')})."
+                else:
+                    body = f"Kernel is idle (pid {status_data.get('pid')})."
             else:
                 body = "Kernel is not running."
 
@@ -243,8 +253,13 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             else:
                 lines = []
                 for run in runs:
+                    display_status = (
+                        "cancelled"
+                        if run.get("terminal_reason") == "cancelled"
+                        else run.get("status")
+                    )
                     lines.append(
-                        f"{run.get('ts')} [{run.get('status')}] {run.get('execution_id')} "
+                        f"{run.get('ts')} [{display_status}] {run.get('execution_id')} "
                         f"{run.get('command_type')} {run.get('duration_ms')}ms"
                     )
                 body = "\n".join(lines)
@@ -340,7 +355,9 @@ def _render_run_snapshot(run: RunSnapshot, *, snapshot_only: bool) -> str:
         return "{}"
 
     execution_id = run.get("execution_id", "(unknown)")
-    status = run.get("status", "unknown")
+    status = (
+        "cancelled" if run.get("terminal_reason") == "cancelled" else run.get("status", "unknown")
+    )
     command_type = run.get("command_type", "exec")
     session_id = run.get("session_id", "default")
     duration_ms = run.get("duration_ms")
@@ -412,7 +429,11 @@ def _render_dataframe_preview(preview: DataframePreview) -> list[str]:
 def _render_history_entry(entry: HistoryEntryPayload) -> str:
     label = _history_label(entry)
     prefix = "[internal] " if entry.get("kind") == "kernel_execution" else ""
-    return f"{entry.get('ts')} [{entry.get('status')}] {entry.get('duration_ms')}ms {prefix}{label}"
+    line = f"{entry.get('ts')} [{entry.get('status')}] {entry.get('duration_ms')}ms {prefix}{label}"
+    code = entry.get("code")
+    if code and entry.get("status") == "error" and code not in label:
+        line += f"\n  code: {code}"
+    return line
 
 
 def _history_label(entry: HistoryEntryPayload) -> str:

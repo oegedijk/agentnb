@@ -26,87 +26,83 @@ class AdvicePolicy:
                     "to target one explicitly."
                 ),
             ]
-        if command_name == "start":
+        if context.error_code == "AMBIGUOUS_EXECUTION":
             return [
-                'Run `agentnb exec "..." --json` to execute code in the live kernel.',
-                "Run `agentnb vars --recent 5 --json` to inspect the newest namespace changes.",
-                "Run `agentnb status --json` to confirm the kernel is still alive.",
+                "Run `agentnb runs list --json` to inspect matching run ids.",
+                "Retry with `agentnb runs show EXECUTION_ID --json` to target one explicitly.",
             ]
+        if command_name == "start":
+            return []
         if command_name == "status":
             if data.get("alive"):
-                return [
-                    'Run `agentnb exec "..." --json` to execute code.',
-                    "Run `agentnb vars --recent 5 --json` to inspect current variables.",
-                    "Run `agentnb stop --json` when the session is no longer needed.",
-                ]
+                if data.get("busy"):
+                    return [
+                        "Run `agentnb wait --json` to wait until the session is ready.",
+                    ]
+                return []
             return [
                 "Run `agentnb start --json` to start a project-scoped kernel.",
                 "Run `agentnb doctor --json` if startup has been failing.",
             ]
+        if command_name == "wait":
+            if context.response_status == "ok":
+                return []
+            return [
+                "Run `agentnb status --json` to inspect the current session state.",
+                "Run `agentnb start --json` if the target session is not running yet.",
+            ]
         if command_name == "exec":
             if context.response_status == "ok":
                 if data.get("background"):
+                    execution_id = _execution_id(data)
                     return [
-                        "Run `agentnb runs wait EXECUTION_ID --json` to wait for the final result.",
+                        f"Run `{_run_command('wait', execution_id)}` to wait for the final result.",
                         (
-                            "Run `agentnb runs show EXECUTION_ID --json` "
+                            f"Run `{_run_command('show', execution_id)}` "
                             "to inspect the current run record."
                         ),
-                        (
-                            "Run `agentnb runs cancel EXECUTION_ID --json` "
-                            "to stop a long-running background run."
-                        ),
+                        f"Run `{_run_command('cancel', execution_id)}` to stop the background run.",
                     ]
-                return [
-                    "Run `agentnb vars --recent 5 --json` to inspect the updated namespace.",
-                    "Run `agentnb inspect NAME --json` to inspect a specific variable.",
-                    "Run `agentnb history --json` to review prior executions.",
-                ]
+                if _exec_output_is_empty(data):
+                    return [
+                        "Run `agentnb vars --recent 5 --json` to inspect namespace changes.",
+                        "Run `agentnb history @latest --json` to review the last semantic step.",
+                    ]
+                return []
+            if context.error_code == "INVALID_INPUT":
+                return []
             return [
-                "Run `agentnb history --errors --json` to review recent failures.",
+                "Run `agentnb history @last-error --json` to review the latest failure.",
                 "Run `agentnb interrupt --json` if execution may still be stuck.",
                 "Run `agentnb reset --json` if the namespace needs a clean slate.",
             ]
         if command_name == "vars":
-            return [
-                "Run `agentnb inspect NAME --json` for details on a variable.",
-                "Run `agentnb vars --match TEXT --json` to filter noisy namespaces by name.",
-                'Run `agentnb exec "..." --json` to add or modify live state.',
-            ]
+            if not data.get("vars"):
+                return ['Run `agentnb "..." --json` to create some live state first.']
+            return []
         if command_name == "inspect":
-            return [
-                "Run `agentnb vars --recent 5 --json` to inspect more of the namespace.",
-                'Run `agentnb exec "..." --json` to probe or transform that value.',
-            ]
+            return []
         if command_name == "reload":
-            return [
-                'Run `agentnb exec "..." --json` to verify the reloaded module behavior.',
-                "Run `agentnb reset --json` if stale state is still causing issues.",
-            ]
+            stale_names = data.get("stale_names")
+            if stale_names:
+                return ["Run `agentnb reset --json` if stale objects are still causing issues."]
+            return []
         if command_name == "history":
-            return [
-                'Run `agentnb exec "..." --json` to continue iterating.',
-                "Run `agentnb history --errors --json` to focus on failures only.",
-            ]
+            if not data.get("entries"):
+                return ['Run `agentnb "..." --json` to record the first execution step.']
+            return []
         if command_name == "interrupt":
             return [
                 'Retry with `agentnb exec "..." --json` once the kernel is idle.',
                 "Run `agentnb reset --json` if interrupted code left partial state behind.",
             ]
         if command_name == "reset":
-            return [
-                'Run `agentnb exec "setup_code" --json` to rebuild required state.',
-                "Run `agentnb vars --json` to confirm the namespace is clean.",
-            ]
+            return ['Run `agentnb "setup_code" --json` to rebuild required state.']
         if command_name == "stop":
-            return [
-                "Run `agentnb start --json` to create a fresh kernel later.",
-            ]
+            return []
         if command_name == "doctor":
             if data.get("ready"):
-                return [
-                    "Run `agentnb start --json` to start the kernel.",
-                ]
+                return ["Run `agentnb start --json` to start the kernel."]
             return [
                 "Run `agentnb doctor --fix --json` to attempt automatic fixes.",
                 (
@@ -118,59 +114,39 @@ class AdvicePolicy:
             if not data.get("sessions"):
                 return [
                     "Run `agentnb start --json` to start the default session.",
-                    (
-                        'Run `agentnb exec --ensure-started --json "..."` '
-                        "to start and execute in one step."
-                    ),
+                    'Run `agentnb "..." --json` to start and execute in one step.',
                 ]
-            return [
-                "Run `agentnb start --session NAME --json` to start another named session.",
-                "Run `agentnb status --session NAME --json` to inspect one session.",
-            ]
+            return []
         if command_name == "sessions-delete":
-            return [
-                "Run `agentnb sessions list --json` to confirm the remaining sessions.",
-            ]
+            return []
         if command_name == "runs-list":
-            return [
-                "Run `agentnb runs show EXECUTION_ID --json` to inspect one run in detail.",
-                "Run `agentnb history --json` to review the semantic session history view.",
-            ]
+            if not data.get("runs"):
+                return ['Run `agentnb --background "..." --json` to create a persisted run record.']
+            return []
         if command_name == "runs-show":
             run = data.get("run")
             run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
             run_status = run_payload.get("status") if run_payload is not None else None
             if _run_is_active(run_status):
+                execution_id = _execution_id(run_payload)
                 return [
-                    (
-                        "Run `agentnb runs follow EXECUTION_ID --json` "
-                        "to stream new events until the run finishes."
-                    ),
-                    "Run `agentnb runs wait EXECUTION_ID --json` to block for the final snapshot.",
-                    "Run `agentnb runs cancel EXECUTION_ID --json` to stop the background run.",
+                    f"Run `{_run_command('follow', execution_id)}` to stream new events.",
+                    f"Run `{_run_command('wait', execution_id)}` to wait for the final snapshot.",
+                    f"Run `{_run_command('cancel', execution_id)}` to stop the background run.",
                 ]
-            return [
-                "Run `agentnb runs list --json` to inspect more recorded runs.",
-                "Run `agentnb history --json` to review the session-level history view.",
-            ]
+            return []
         if command_name == "runs-follow":
-            return [
-                (
-                    "Run `agentnb runs show EXECUTION_ID --json` "
-                    "to inspect the latest persisted snapshot."
-                ),
-            ]
+            return []
         if command_name == "runs-wait":
-            return [
-                "Run `agentnb runs show EXECUTION_ID --json` to inspect the completed run.",
-            ]
+            return []
         if command_name == "runs-cancel":
+            execution_id = _execution_id(data)
             if data.get("cancel_requested"):
                 if data.get("status") == "ok":
                     return [
-                        "Run `agentnb runs show EXECUTION_ID --json` to inspect the completed run.",
+                        f"Run `{_run_command('show', execution_id)}` to inspect the completed run.",
                         (
-                            "Run `agentnb status --session NAME --wait-idle --json` "
+                            "Run `agentnb wait --session NAME --json` "
                             "to confirm the session is ready."
                         ),
                     ]
@@ -178,11 +154,11 @@ class AdvicePolicy:
                     session_id = data.get("session_id") or "default"
                     return [
                         (
-                            f"Run `agentnb status --session {session_id} --wait-idle --json` "
+                            f"Run `agentnb wait --session {session_id} --json` "
                             "to confirm the session is ready for more work."
                         ),
                         (
-                            "Run `agentnb runs show EXECUTION_ID --json` "
+                            f"Run `{_run_command('show', execution_id)}` "
                             "to inspect the cancelled run record."
                         ),
                     ]
@@ -192,19 +168,37 @@ class AdvicePolicy:
                             "Run `agentnb start --session NAME --json` "
                             "to start a fresh session explicitly."
                         ),
-                        (
-                            'Run `agentnb exec --ensure-started "..." --json` '
-                            "to restart and execute in one step."
-                        ),
+                        'Run `agentnb "..." --json` to restart and execute in one step.',
                     ]
             return [
                 (
-                    "Run `agentnb runs show EXECUTION_ID --json` "
+                    f"Run `{_run_command('show', execution_id)}` "
                     "to inspect the persisted run snapshot."
-                ),
+                )
             ]
         return []
 
 
 def _run_is_active(status: object) -> bool:
     return isinstance(status, str) and status in {"starting", "running"}
+
+
+def _execution_id(data: Mapping[str, object] | None) -> str:
+    if data is None:
+        return "EXECUTION_ID"
+    execution_id = data.get("execution_id")
+    if isinstance(execution_id, str) and execution_id:
+        return execution_id
+    return "EXECUTION_ID"
+
+
+def _run_command(action: str, execution_id: str) -> str:
+    return f"agentnb runs {action} {execution_id} --json"
+
+
+def _exec_output_is_empty(data: Mapping[str, object]) -> bool:
+    for key in ("result", "stdout", "stderr", "selected_text"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            return False
+    return True

@@ -26,12 +26,15 @@ class JournalQuery:
     session_id: str | None = DEFAULT_SESSION_ID
     include_internal: bool = False
     errors_only: bool = False
+    success_only: bool = False
     latest: bool = False
     last: int | None = None
     replayable_only: bool = False
     execution_id: str | None = None
 
     def __post_init__(self) -> None:
+        if self.errors_only and self.success_only:
+            raise ValueError("Use either errors_only or success_only, not both.")
         if self.latest and self.last is not None:
             raise ValueError("Use either --latest or --last, not both.")
         if self.last is not None and self.last < 1:
@@ -290,6 +293,8 @@ class CommandJournal:
             selected = [entry for entry in selected if entry.classification != "internal"]
         if query.replayable_only:
             selected = [entry for entry in selected if entry.replayable]
+        if query.success_only:
+            selected = [entry for entry in selected if entry.status == "ok"]
         if query.latest:
             return selected[-1:]
         if query.last is not None:

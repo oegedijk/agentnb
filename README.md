@@ -30,155 +30,218 @@ uv add agentnb
 pip install agentnb
 ```
 
-## Quick Start
+## Running Code
+
+Run from the target project root when possible. The cheapest path is the
+implicit top-level execution form:
 
 ```bash
-agentnb exec --project /path/to/project --ensure-started --json "from myapp.models import User"
-agentnb exec --file analysis.py --json
-agentnb vars --json
-agentnb inspect User --json
-agentnb sessions list --json
-agentnb stop --json
+agentnb "from myapp.models import User"
+agentnb "User.query.limit(5)"
 ```
 
-For multiline code, prefer `--file` or stdin/heredoc:
+For multiline code or code containing braces, quotes, or special shell
+characters, prefer stdin/heredoc over inline strings:
 
 ```bash
-agentnb exec --json <<'PY'
+agentnb <<'PY'
 import pandas as pd
 df = pd.read_csv("tips.csv")
-df.head()
+df.describe()
 PY
 ```
 
-That applies to background work too. Avoid passing literal `\n` escapes inside a
-single shell argument for multiline snippets; use `--file` or stdin/heredoc.
-
-For lower-noise agent integrations, you can set defaults once per shell:
+You can also run a script directly, and then keep the state in session so you can poke around:
 
 ```bash
-export AGENTNB_FORMAT=agent
+agentnb analysis.py
+agentnb "print(final_result)"
 ```
 
-That enables JSON output and suppresses suggestions across commands. You can also use
-top-level flags such as `agentnb --agent ...`, `agentnb --json ...`,
-`agentnb --no-suggestions ...`, and `agentnb --quiet ...`.
+`--session` and `--background` can go before or after the subcommand:
 
-In `--agent` mode, default payloads are compacted to reduce token usage:
-trimmed error tracebacks, compact history entries, compact dataframe previews,
-and structural summaries for common containers such as `list` and `dict`.
+```bash
+agentnb --session myenv "df.head()"
+agentnb --background "long_task()"
+```
 
-You can place top-level flags such as `--agent` and `--json` before or after
-the subcommand, for example `agentnb --agent status` or `agentnb status --agent`.
+The default execution timeout is 30 seconds. Use `--timeout` for long-running
+code:
 
-## Recommended Workflow
+```bash
+agentnb --timeout 120 "train_model()"
+```
 
-The normal agent loop is:
+Use `--stream` to see execution output in real time:
 
-1. `agentnb exec --ensure-started "..." --json` for short snippets
-2. `agentnb status --wait-idle --json` when you need to know the session is safe for the next command
-3. `agentnb exec --file analysis.py --json` or pipe code through stdin for multiline work
-4. `agentnb vars --json`
-5. `agentnb inspect NAME --json`
-6. `agentnb reload --json` after editing project-local modules
-7. `agentnb reload myapp.module --json` to target one imported module
-8. `agentnb history --json`
-9. `agentnb runs list --json` when you need durable execution records
-10. `agentnb runs follow EXECUTION_ID --json` when you need live background progress
+```bash
+agentnb --stream "train_model(epochs=10)"
+```
 
-Important:
-- Drive one session serially: wait for each command to finish before sending the next.
-- Prefer a final expression over `print(...)` when you want a compact `result` payload.
-- Use `vars --recent N` or `vars --match TEXT` once the namespace gets noisy.
-- Once more than one live session exists, pass `--session NAME` on kernel-bound commands.
+## Reading Results And Inspecting State
 
-Use `agentnb doctor --json` if startup fails, `agentnb interrupt --json` if execution hangs, and `agentnb reset --json` if the namespace needs a clean slate.
+`agentnb` follows normal IPython/Notebook behavior: a final expression becomes the
+execution `result`, while `print(...)` goes to `stdout`.
 
-If startup reports that `ipykernel` is missing, rerun `agentnb start` with
-`--auto-install` or use `agentnb doctor --fix --json`.
 
-Running `agentnb` with no arguments, or `agentnb --help`, prints an agent-oriented command guide and workflow summary.
+Human-oriented output:
 
-## Positioning
+```text
+$ agentnb "x = 40 + 2; x"
+42
 
-`agentnb` is optimized for stateful agent iteration inside a project:
-- a persistent REPL the agent can keep using across steps
-- a lightweight append-only notebook model backed by execution history
-- module reload and variable inspection without a notebook editor
+$ agentnb "print('hello')"
+hello
+```
 
-It is not a notebook editing tool:
-- it does not edit cells
-- it does not write `.ipynb` files
-- it does not synchronize with JupyterLab
+Use `vars` to see the current namespace and `inspect` to drill into one value:
 
-## Commands
+```bash
+agentnb vars
+agentnb vars --recent 5
+agentnb vars --match rows
+agentnb inspect df
+```
 
-- `agentnb start [--project PATH] [--python PATH] [--auto-install]`
-- top-level flags: `agentnb [--json] [--agent] [--quiet] [--no-suggestions] <command>`
-- `agentnb status [--project PATH] [--session NAME] [--wait|--wait-idle] [--timeout SECONDS]`
-- `agentnb exec [CODE] [-f FILE] [--timeout SECONDS] [--ensure-started] [--background|--stream] [--stdout-only|--stderr-only|--result-only] [--project PATH] [--session NAME] [--json]`
-- `agentnb vars [--project PATH] [--session NAME] [--json] [--types|--no-types] [--match TEXT] [--recent N]`
-- `agentnb inspect NAME [--project PATH] [--session NAME] [--json]`
-- `agentnb reload [MODULE] [--project PATH] [--session NAME] [--json]`
-- `agentnb history [--project PATH] [--session NAME] [--errors] [--latest|--last N] [--all] [--json]`
-- `agentnb runs list [--project PATH] [--session NAME] [--errors] [--json]`
-- `agentnb runs show EXECUTION_ID [--project PATH] [--json]`
-- `agentnb runs follow EXECUTION_ID [--project PATH] [--timeout SECONDS] [--json]`
-- `agentnb runs wait EXECUTION_ID [--project PATH] [--timeout SECONDS] [--json]`
-- `agentnb runs cancel EXECUTION_ID [--project PATH] [--json]`
-- `agentnb sessions list [--project PATH] [--json]`
-- `agentnb sessions delete NAME [--project PATH] [--json]`
-- `agentnb interrupt [--project PATH] [--session NAME] [--json]`
-- `agentnb reset [--project PATH] [--session NAME] [--json]`
-- `agentnb stop [--project PATH] [--session NAME] [--json]`
-- `agentnb doctor [--project PATH] [--python PATH] [--fix] [--json]`
+## Reloading Local Imports
 
-Notes:
-- `vars` includes type information by default.
-- `vars --recent N` shows the newest matching variables; `vars --match TEXT` filters by name.
-- `vars` hides imported helper routines and classes, and summarizes common containers compactly.
-- `history` shows semantic user-visible steps by default such as `exec`, `vars`, `inspect`, `reload`, and `reset`.
-- Use `history --all` to include internal helper executions sent to the kernel.
-- `runs` exposes durable execution records keyed by `execution_id`; use it for background work and exact run lookup.
-- `exec --background` returns immediately with an `execution_id`; use `runs show` for the latest persisted snapshot, `runs follow` for live progress, `runs wait` for the final snapshot, and `runs cancel` to stop the run.
-- When multiple live sessions exist, kernel-bound commands require `--session NAME` unless there is only one live session to infer.
-- Module reloading is explicit. `reload MODULE` reloads one imported project-local module.
-- Bare `reload` reloads all currently imported project-local modules and reports rebound names and possible stale objects.
-- If reload reports stale objects, recreate them or run `agentnb reset` when stale state is widespread.
-- `inspect` gives compact previews for pandas-like dataframes and for common `list`/`dict` API payloads.
+`agentnb` does not auto-reload edited modules by default. But after changing
+project-local code on disk, you can reload explicitly:
 
-## Out-of-the-box startup
+```bash
+agentnb reload
+agentnb reload myapp.models
+```
 
-On `agentnb start`, the runtime selects an interpreter in this order:
+Bare `reload` reloads imported project-local modules and reports rebound names
+and possible stale objects. `reload MODULE` targets one imported module. This allows you to 
+try out local functions as you improve them and reload them. 
 
-1. `--python` interpreter
-2. `<project>/.venv` interpreter
-3. active `VIRTUAL_ENV` interpreter
-4. current Python executable
 
-If `ipykernel` is missing for the selected interpreter, `agentnb start` fails
-with the exact install command. Pass `--auto-install` to let `agentnb` install
-it for you, or use `agentnb doctor --fix --json`.
+## Background Runs And History
 
-## JSON Mode
+Use `wait` to just wait for the last command to finish:
 
-Pass `--json` to emit a stable machine-readable envelope. This is the preferred mode for agent integrations.
+```bash
+agentnb wait
+```
 
-Command-level success and execution success now align: if `exec` or `reset`
-fails in the kernel, the top-level response has `"status": "error"` and the
-command exits non-zero. The execution payload is still included in `data`.
-Default JSON is intentionally compact for agent use: large event lists are
-omitted, tracebacks are trimmed, and inspection/history payloads prefer short
-previews over raw internal detail.
+You can also check status with built-in wait modes:
 
-For agents, the usual pattern is:
-- short `exec`
-- inspect the returned `result`
-- narrow further with another short `exec`
-- use `vars --recent` or `inspect NAME` only when needed
+```bash
+agentnb status --wait         # wait until the session is ready
+agentnb status --wait-idle    # wait until idle (not executing)
+```
 
-If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORMAT=agent`.
-`agent` also suppresses suggestions and enables quiet mode.
+Use `--background` when you want to start work and come back to it later:
+
+```bash
+agentnb --background "long_task()"
+```
+
+That command returns quickly with an `execution_id`. `agentnb` also records a
+durable run record for that execution, so you can look it up again even after
+the original command has finished printing output.
+
+Use `runs` when the question is about one specific execution:
+- "What is the latest stored state of this run?"
+- "Show me live progress from the active run."
+- "Wait until that run finishes."
+- "Cancel the active run."
+
+The common `runs` commands are:
+
+```bash
+agentnb runs show
+agentnb runs follow
+agentnb runs wait
+agentnb runs cancel @active
+```
+
+How to read them:
+- `runs show` returns the latest persisted snapshot for a run
+- `runs follow` streams new events from an active run
+- `runs wait` blocks until a run finishes and returns its final state
+- `runs cancel` requests cancellation for an active run
+
+Filter the runs list with `--last N` and `--errors`:
+
+```bash
+agentnb runs list --last 5
+agentnb runs list --errors
+```
+
+By default, omitted run references mean "use the obvious next run":
+- `runs show` falls back to the current session's latest run, then the project latest
+- `runs follow`, `runs wait`, and `runs cancel` only auto-target an active run
+
+Use an explicit id or selector when you want an exact lookup instead of the
+cheap default:
+
+```bash
+agentnb runs show run_123
+agentnb runs wait @latest
+agentnb runs show @last-success
+agentnb runs show @last-error
+```
+
+Selectors supported by `runs` are `@latest`, `@active`, `@last-error`, and
+`@last-success`.
+
+`history` is related, but it answers a different question.
+
+Use `history` when you want the semantic transcript of what you asked `agentnb`
+to do, not the low-level run record for one execution. It includes user-visible
+steps such as `exec`, `vars`, `inspect`, `reload`, and `reset`:
+
+```bash
+agentnb history
+agentnb history --last 5
+agentnb history --errors
+agentnb history --latest
+agentnb history @last-error
+agentnb history @last-success
+agentnb history --all
+```
+
+The difference is:
+- `runs` is for exact execution records and background-run control
+- `history` is for the notebook-like semantic transcript of your workflow
+
+A simple rule:
+- If you care about one `execution_id`, use `runs`
+- If you care about the recent flow of work in the session, use `history`
+
+## Output Modes
+
+Default output is plain terminal text, not JSON.
+
+What that means in practice:
+- for `exec`, you usually just see the produced output: `stdout`, `stderr`, and a final `result` if there is one
+- for status-style commands such as `start`, `status`, `wait`, `stop`, and `interrupt`, you get a short sentence
+- for commands such as `vars`, `history`, and `runs`, you get a compact text listing
+
+Examples:
+
+```text
+$ agentnb "1 + 1"
+2
+
+$ agentnb "print('hello')"
+hello
+
+$ agentnb wait
+Kernel is idle (pid 91098).
+```
+
+Use `--json` when you want the full stable payload for scripting:
+
+```bash
+agentnb --json "1 + 1"
+agentnb runs show @latest --json
+```
+
+Example:
 
 ```json
 {
@@ -187,24 +250,138 @@ If you want that behavior by default, set `AGENTNB_FORMAT=json` or `AGENTNB_FORM
   "command": "exec",
   "project": "/path/to/project",
   "session_id": "default",
-  "timestamp": "2026-03-08T21:00:00+00:00",
+  "timestamp": "2026-03-16T20:26:15.207123+00:00",
   "data": {
+    "duration_ms": 16,
     "status": "ok",
-    "execution_id": "run_123",
-    "stdout": "",
-    "stderr": "",
-    "result": "42",
-    "execution_count": 1,
-    "duration_ms": 12
+    "execution_id": "919910f9e8e1",
+    "execution_count": 12,
+    "result": "2",
+    "ensured_started": true,
+    "started_new_session": false
   },
-  "suggestions": [
-    "Run `agentnb vars --json` to inspect the updated namespace.",
-    "Run `agentnb inspect NAME --json` to inspect a specific variable.",
-    "Run `agentnb history --json` to review prior executions."
-  ],
+  "suggestions": [],
   "error": null
 }
 ```
+
+Use `--agent` when you still want JSON, but a smaller payload:
+
+```bash
+agentnb --agent "1 + 1"
+agentnb runs follow --agent
+```
+
+Example:
+
+```json
+{
+  "ok": true,
+  "command": "exec",
+  "session_id": "default",
+  "data": {
+    "status": "ok",
+    "execution_id": "31690003f3c0",
+    "duration_ms": 50,
+    "ensured_started": true,
+    "started_new_session": false,
+    "result": "2"
+  }
+}
+```
+
+If you truly want only one stream from `exec`, use the output selectors
+instead:
+
+```bash
+agentnb --result-only "1 + 1"
+agentnb "print('hello')" --stdout-only
+agentnb --stderr-only "raise RuntimeError('boom')"
+```
+
+Typical scripting patterns:
+
+```bash
+agentnb --agent "1 + 1" | jq .
+agentnb --json "1 + 1" | python -c 'import json,sys; print(json.load(sys.stdin)["data"]["result"])'
+```
+
+If you want a default mode per shell:
+
+```bash
+export AGENTNB_FORMAT=agent
+```
+
+`AGENTNB_FORMAT=agent` enables compact JSON output and suppresses routine
+suggestions. `AGENTNB_FORMAT=json` selects the full stable envelope.
+
+Use `--quiet` to suppress non-essential human output, or `--no-suggestions` to
+hide next-step suggestions:
+
+```bash
+agentnb --quiet "1 + 1"
+agentnb --no-suggestions "1 + 1"
+```
+
+Top-level flags such as `--agent`, `--json`, `--quiet`, and `--no-suggestions`
+can appear before or after the subcommand.
+
+## Recovery And Lifecycle
+
+Use the lifecycle commands based on the failure mode:
+
+```bash
+agentnb start
+agentnb status
+agentnb wait
+agentnb interrupt
+agentnb reset
+agentnb stop
+agentnb doctor
+agentnb doctor --fix
+```
+
+Use:
+- `interrupt` when code hangs but the kernel should survive
+- `reset` when the namespace is polluted but the process is still healthy
+- `stop` and then `start` when the kernel is dead or badly wedged
+- `doctor` when startup or environment detection fails
+
+On `agentnb start`, the runtime selects an interpreter in this order:
+
+1. `--python`
+2. `<project>/.venv`
+3. active `VIRTUAL_ENV`
+4. current Python executable
+
+If `ipykernel` is missing for the selected interpreter, `agentnb start` fails
+with the exact install command. Pass `--auto-install` to let `agentnb` install
+it, or use `agentnb doctor --fix`.
+
+## Projects And Sessions
+
+If you are already in the target project root, you usually do not need
+`--project`.
+
+Use `--project` when you are driving another repo from this checkout or from
+some other working directory:
+
+```bash
+uv run agentnb --project /path/to/project "from myapp.models import User"
+uv run agentnb --project /path/to/project runs follow --agent
+```
+
+Use `--session` when you want more than one live kernel for the same project:
+
+```bash
+agentnb --session analysis "1 + 1"
+agentnb start --session analysis
+agentnb sessions list
+agentnb sessions delete analysis
+```
+
+When only one live session exists, kernel-bound commands can infer it. Once
+multiple live sessions exist, pass `--session NAME` explicitly.
 
 ## How It Works
 
@@ -232,27 +409,6 @@ uv run ruff format --check src tests
 uv run ty check src tests
 uv run pytest
 ```
-
-## 0.1.1 Ergonomics
-
-- top-level `--agent`, `--json`, `--quiet`, and `--no-suggestions` flags
-- `AGENTNB_FORMAT`, `AGENTNB_NO_SUGGESTIONS`, and `AGENTNB_QUIET` environment defaults
-- `exec --stdout-only`, `--stderr-only`, and `--result-only` for script-friendly capture
-- `history --latest` and `history --last N` shortcuts
-
-## Current Ergonomics
-
-- multi-session targeting with `--session`, plus `sessions list` and `sessions delete`
-- `exec --ensure-started`, `status --wait`, and `status --wait-idle` for first-use/startup and session-idleness flows
-- persisted run records with `execution_id`
-- `runs list`, `runs show`, `runs follow`, `runs wait`, and `runs cancel` for durable execution control
-- `exec` accepts short inline code, `--file`, or stdin/heredoc for multiline snippets
-- `exec --stream` for foreground live event delivery on the same execution model
-- `vars` includes type information by default
-- `vars` hides imported helper routines and classes and summarizes common containers compactly
-- `inspect` gives compact previews for pandas-like objects and common `list`/`dict` payloads
-- `history` defaults to semantic user-visible steps, with `--all` for internal kernel executions
-- `--agent` returns compact JSON by default to reduce token usage during iterative workflows
 
 ## License
 

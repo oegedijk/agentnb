@@ -17,16 +17,28 @@ from agentnb.selectors import (
 )
 
 
-def test_parse_run_reference_parses_latest_selector() -> None:
-    reference = parse_run_reference("@latest")
-
-    assert reference == RunReference(kind="latest", value=None, raw="@latest")
-
-
-def test_parse_run_reference_treats_plain_value_as_execution_id() -> None:
-    reference = parse_run_reference("run-123")
-
-    assert reference == RunReference(kind="execution_id", value="run-123", raw="run-123")
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("@latest", RunReference(kind="latest", value=None, raw="@latest")),
+        ("@active", RunReference(kind="active", value=None, raw="@active")),
+        (
+            "@last-error",
+            RunReference(kind="last_error", value=None, raw="@last-error"),
+        ),
+        (
+            "@last-success",
+            RunReference(kind="last_success", value=None, raw="@last-success"),
+        ),
+        ("run-123", RunReference(kind="execution_id", value="run-123", raw="run-123")),
+        (None, None),
+    ],
+)
+def test_parse_run_reference_parses_supported_targets(
+    value: str | None,
+    expected: RunReference | None,
+) -> None:
+    assert parse_run_reference(value) == expected
 
 
 @pytest.mark.parametrize(
@@ -36,6 +48,10 @@ def test_parse_run_reference_treats_plain_value_as_execution_id() -> None:
         (
             "@last-error",
             HistoryReference(kind="last_error", value=None, raw="@last-error"),
+        ),
+        (
+            "@last-success",
+            HistoryReference(kind="last_success", value=None, raw="@last-success"),
         ),
         (
             "run-123",
@@ -64,32 +80,128 @@ def test_run_selector_resolver_returns_explicit_execution_id_without_lookup(proj
     executions.list_runs.assert_not_called()
 
 
-def test_run_selector_resolver_resolves_latest_run_by_timestamp(project_dir) -> None:
+def test_run_selector_resolver_prefers_current_session_for_latest(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.return_value = [
-        {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
-        {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
+    executions.list_runs.side_effect = [
+        [{"execution_id": "run-analysis", "ts": "2026-03-12T00:00:00+00:00"}],
     ]
     resolver = RunSelectorResolver(executions)
 
     execution_id = resolver.resolve_execution_id(
         project_root=project_dir,
         reference=parse_run_reference("@latest"),
+        current_session_id="analysis",
+    )
+
+    assert execution_id == "run-analysis"
+    executions.list_runs.assert_called_once_with(project_root=project_dir, session_id="analysis")
+
+
+def test_run_selector_resolver_falls_back_to_project_latest(project_dir) -> None:
+    executions = Mock(spec=ExecutionService)
+    executions.list_runs.side_effect = [
+        [],
+        [
+            {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
+            {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
+        ],
+    ]
+    resolver = RunSelectorResolver(executions)
+
+    execution_id = resolver.resolve_execution_id(
+        project_root=project_dir,
+        reference=None,
+        current_session_id="analysis",
+        default_behavior="latest",
     )
 
     assert execution_id == "run-2"
-    executions.list_runs.assert_called_once_with(project_root=project_dir)
 
 
-def test_run_selector_resolver_rejects_latest_when_no_runs_exist(project_dir) -> None:
+def test_run_selector_resolver_uses_last_error_and_last_success(project_dir) -> None:
+    executions = Mock(spec=ExecutionService)
+    executions.list_runs.side_effect = [
+        [],
+        [
+            {"execution_id": "run-ok", "ts": "2026-03-10T00:00:00+00:00", "status": "ok"},
+            {
+                "execution_id": "run-error",
+                "ts": "2026-03-11T00:00:00+00:00",
+                "status": "error",
+            },
+        ],
+        [],
+        [
+            {"execution_id": "run-ok", "ts": "2026-03-10T00:00:00+00:00", "status": "ok"},
+            {
+                "execution_id": "run-error",
+                "ts": "2026-03-11T00:00:00+00:00",
+                "status": "error",
+            },
+        ],
+    ]
+    resolver = RunSelectorResolver(executions)
+
+    assert (
+        resolver.resolve_execution_id(
+            project_root=project_dir,
+            reference=parse_run_reference("@last-error"),
+            current_session_id="analysis",
+        )
+        == "run-error"
+    )
+    assert (
+        resolver.resolve_execution_id(
+            project_root=project_dir,
+            reference=parse_run_reference("@last-success"),
+            current_session_id="analysis",
+        )
+        == "run-ok"
+    )
+
+
+def test_run_selector_resolver_defaults_waits_to_active_run(project_dir) -> None:
+    executions = Mock(spec=ExecutionService)
+    executions.list_runs.side_effect = [
+        [{"execution_id": "run-analysis", "ts": "2026-03-12T00:00:00+00:00", "status": "running"}],
+    ]
+    resolver = RunSelectorResolver(executions)
+
+    execution_id = resolver.resolve_execution_id(
+        project_root=project_dir,
+        reference=None,
+        current_session_id="analysis",
+        default_behavior="active",
+    )
+
+    assert execution_id == "run-analysis"
+
+
+def test_run_selector_resolver_rejects_ambiguous_active_run_without_preference(project_dir) -> None:
+    executions = Mock(spec=ExecutionService)
+    executions.list_runs.return_value = [
+        {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00", "status": "running"},
+        {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00", "status": "starting"},
+    ]
+    resolver = RunSelectorResolver(executions)
+
+    with pytest.raises(AgentNBException, match="Multiple active runs match"):
+        resolver.resolve_execution_id(
+            project_root=project_dir,
+            reference=parse_run_reference("@active"),
+        )
+
+
+def test_run_selector_resolver_rejects_missing_active_default(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
     executions.list_runs.return_value = []
     resolver = RunSelectorResolver(executions)
 
-    with pytest.raises(AgentNBException, match="No runs found for selector: @latest"):
+    with pytest.raises(AgentNBException, match="No runs found for selector: @active"):
         resolver.resolve_execution_id(
             project_root=project_dir,
-            reference=parse_run_reference("@latest"),
+            reference=None,
+            default_behavior="active",
         )
 
 
@@ -127,6 +239,15 @@ def test_history_selector_resolver_uses_plain_query_without_reference() -> None:
                 session_id="default",
                 include_internal=False,
                 errors_only=True,
+                latest=True,
+            ),
+        ),
+        (
+            parse_history_reference("@last-success"),
+            JournalQuery(
+                session_id="default",
+                include_internal=False,
+                success_only=True,
                 latest=True,
             ),
         ),

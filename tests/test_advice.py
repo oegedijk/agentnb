@@ -12,13 +12,9 @@ from agentnb.advice import AdviceContext, AdvicePolicy
             AdviceContext(
                 command_name="status",
                 response_status="ok",
-                data={"alive": True},
+                data={"alive": True, "busy": True},
             ),
-            [
-                'Run `agentnb exec "..." --json` to execute code.',
-                "Run `agentnb vars --recent 5 --json` to inspect current variables.",
-                "Run `agentnb stop --json` when the session is no longer needed.",
-            ],
+            ["Run `agentnb wait --json` to wait until the session is ready."],
         ),
         (
             AdviceContext(
@@ -39,11 +35,8 @@ from agentnb.advice import AdviceContext, AdvicePolicy
             ),
             [
                 "Run `agentnb runs wait EXECUTION_ID --json` to wait for the final result.",
-                "Run `agentnb runs show EXECUTION_ID --json` to inspect the current run record.",
-                (
-                    "Run `agentnb runs cancel EXECUTION_ID --json` "
-                    "to stop a long-running background run."
-                ),
+                ("Run `agentnb runs show EXECUTION_ID --json` to inspect the current run record."),
+                "Run `agentnb runs cancel EXECUTION_ID --json` to stop the background run.",
             ],
         ),
     ],
@@ -92,8 +85,26 @@ def test_advice_policy_uses_session_name_for_preserved_run_cancel() -> None:
 
     assert suggestions == [
         (
-            "Run `agentnb status --session analysis --wait-idle --json` "
+            "Run `agentnb wait --session analysis --json` "
             "to confirm the session is ready for more work."
         ),
         "Run `agentnb runs show EXECUTION_ID --json` to inspect the cancelled run record.",
+    ]
+
+
+def test_advice_policy_interpolates_execution_id_for_background_exec() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="ok",
+            data={"background": True, "execution_id": "run-7"},
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb runs wait run-7 --json` to wait for the final result.",
+        "Run `agentnb runs show run-7 --json` to inspect the current run record.",
+        "Run `agentnb runs cancel run-7 --json` to stop the background run.",
     ]

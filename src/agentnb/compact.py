@@ -215,6 +215,10 @@ def compact_history_entry(entry: JournalEntry) -> HistoryEntryPayload:
     execution_id = entry.execution_id
     if execution_id is not None:
         compacted["execution_id"] = execution_id
+    if entry.user_visible and entry.code is not None:
+        summary = summarize_history_text(entry.code)
+        if summary is not None:
+            compacted["code"] = summary
     return compacted
 
 

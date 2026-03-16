@@ -72,13 +72,13 @@ class AmbiguousSessionError(AgentNBException):
 
 
 class KernelWaitTimedOutError(AgentNBException):
-    def __init__(self, timeout_s: float) -> None:
+    def __init__(self, timeout_s: float, *, waiting_for: str = "ready") -> None:
         super().__init__(
             code="TIMEOUT",
-            message=f"Kernel did not become ready within {timeout_s:g}s.",
+            message=f"Kernel did not become {waiting_for} within {timeout_s:g}s.",
             ename="TimeoutError",
-            evalue=f"Kernel readiness wait exceeded timeout of {timeout_s:g}s",
-            data={"timeout_s": timeout_s},
+            evalue=f"Kernel {waiting_for} wait exceeded timeout of {timeout_s:g}s",
+            data={"timeout_s": timeout_s, "waiting_for": waiting_for},
         )
 
 

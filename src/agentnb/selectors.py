@@ -9,8 +9,10 @@ from .errors import AgentNBException
 from .execution import ExecutionService
 from .journal import JournalQuery
 
-RunReferenceKind = Literal["execution_id", "latest"]
-HistoryReferenceKind = Literal["execution_id", "latest", "last_error"]
+RunReferenceKind = Literal["execution_id", "latest", "active", "last_error", "last_success"]
+HistoryReferenceKind = Literal["execution_id", "latest", "last_error", "last_success"]
+RunDefaultBehavior = Literal["latest", "active"]
+_ACTIVE_RUN_STATUSES = frozenset({"starting", "running"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -27,10 +29,20 @@ class HistoryReference:
     raw: str
 
 
-def parse_run_reference(value: str) -> RunReference:
+def parse_run_reference(value: str | None) -> RunReference | None:
+    if value is None:
+        return None
     normalized = value.strip()
+    if not normalized:
+        return None
     if normalized == "@latest":
         return RunReference(kind="latest", value=None, raw=normalized)
+    if normalized == "@active":
+        return RunReference(kind="active", value=None, raw=normalized)
+    if normalized == "@last-error":
+        return RunReference(kind="last_error", value=None, raw=normalized)
+    if normalized == "@last-success":
+        return RunReference(kind="last_success", value=None, raw=normalized)
     return RunReference(kind="execution_id", value=normalized, raw=normalized)
 
 
@@ -44,6 +56,8 @@ def parse_history_reference(value: str | None) -> HistoryReference | None:
         return HistoryReference(kind="latest", value=None, raw=normalized)
     if normalized == "@last-error":
         return HistoryReference(kind="last_error", value=None, raw=normalized)
+    if normalized == "@last-success":
+        return HistoryReference(kind="last_success", value=None, raw=normalized)
     return HistoryReference(kind="execution_id", value=normalized, raw=normalized)
 
 
@@ -51,28 +65,142 @@ class RunSelectorResolver:
     def __init__(self, executions: ExecutionService) -> None:
         self._executions = executions
 
-    def resolve_execution_id(self, *, project_root: Path, reference: RunReference) -> str:
+    def resolve_execution_id(
+        self,
+        *,
+        project_root: Path,
+        reference: RunReference | None,
+        current_session_id: str | None = None,
+        default_behavior: RunDefaultBehavior = "latest",
+    ) -> str:
+        if reference is None:
+            if default_behavior == "active":
+                return self._resolve_active_run(
+                    project_root=project_root,
+                    current_session_id=current_session_id,
+                    raw="@active",
+                )
+            return self._resolve_latest_run(
+                project_root=project_root,
+                current_session_id=current_session_id,
+                raw="@latest",
+            )
+
         if reference.kind == "execution_id":
             assert reference.value is not None
             return reference.value
 
+        if reference.kind == "latest":
+            return self._resolve_latest_run(
+                project_root=project_root,
+                current_session_id=current_session_id,
+                raw=reference.raw,
+            )
+        if reference.kind == "last_error":
+            return self._resolve_matching_run(
+                project_root=project_root,
+                current_session_id=current_session_id,
+                raw=reference.raw,
+                predicate=lambda run: run.get("status") == "error",
+            )
+        if reference.kind == "last_success":
+            return self._resolve_matching_run(
+                project_root=project_root,
+                current_session_id=current_session_id,
+                raw=reference.raw,
+                predicate=lambda run: run.get("status") == "ok",
+            )
+        return self._resolve_active_run(
+            project_root=project_root,
+            current_session_id=current_session_id,
+            raw=reference.raw,
+        )
+
+    def _resolve_latest_run(
+        self,
+        *,
+        project_root: Path,
+        current_session_id: str | None,
+        raw: str,
+    ) -> str:
+        return self._resolve_matching_run(
+            project_root=project_root,
+            current_session_id=current_session_id,
+            raw=raw,
+            predicate=lambda _: True,
+        )
+
+    def _resolve_matching_run(
+        self,
+        *,
+        project_root: Path,
+        current_session_id: str | None,
+        raw: str,
+        predicate,
+    ) -> str:
+        if current_session_id is not None:
+            preferred = self._matching_runs(
+                project_root=project_root,
+                session_id=current_session_id,
+                predicate=predicate,
+            )
+            if preferred:
+                return _require_execution_id(_latest_run(preferred), raw=raw)
+
+        runs = self._matching_runs(project_root=project_root, session_id=None, predicate=predicate)
+        return _require_execution_id(_latest_run(runs), raw=raw)
+
+    def _resolve_active_run(
+        self,
+        *,
+        project_root: Path,
+        current_session_id: str | None,
+        raw: str,
+    ) -> str:
+        if current_session_id is not None:
+            preferred = self._matching_runs(
+                project_root=project_root,
+                session_id=current_session_id,
+                predicate=_is_active_run,
+            )
+            if preferred:
+                return _require_execution_id(_latest_run(preferred), raw=raw)
+
+        active_runs = self._matching_runs(
+            project_root=project_root,
+            session_id=None,
+            predicate=_is_active_run,
+        )
+        if not active_runs:
+            raise AgentNBException(
+                code="EXECUTION_NOT_FOUND",
+                message=f"No runs found for selector: {raw}",
+            )
+        if len(active_runs) > 1:
+            execution_ids = [
+                str(run.get("execution_id"))
+                for run in active_runs
+                if isinstance(run.get("execution_id"), str)
+            ]
+            raise AgentNBException(
+                code="AMBIGUOUS_EXECUTION",
+                message="Multiple active runs match; pass an execution_id explicitly.",
+                data={"execution_ids": execution_ids},
+            )
+        return _require_execution_id(active_runs[0], raw=raw)
+
+    def _matching_runs(
+        self,
+        *,
+        project_root: Path,
+        session_id: str | None,
+        predicate,
+    ) -> list[Mapping[str, object]]:
         runs = cast(
             list[Mapping[str, object]],
-            self._executions.list_runs(project_root=project_root),
+            self._executions.list_runs(project_root=project_root, session_id=session_id),
         )
-        latest = _latest_run(runs)
-        if latest is None:
-            raise AgentNBException(
-                code="EXECUTION_NOT_FOUND",
-                message=f"No runs found for selector: {reference.raw}",
-            )
-        execution_id = latest.get("execution_id")
-        if not isinstance(execution_id, str) or not execution_id:
-            raise AgentNBException(
-                code="EXECUTION_NOT_FOUND",
-                message=f"No runs found for selector: {reference.raw}",
-            )
-        return execution_id
+        return [run for run in runs if predicate(run)]
 
 
 class HistorySelectorResolver:
@@ -113,10 +241,17 @@ class HistorySelectorResolver:
                 include_internal=include_internal,
                 latest=True,
             )
+        if reference.kind == "last_error":
+            return JournalQuery(
+                session_id=session_id,
+                include_internal=include_internal,
+                errors_only=True,
+                latest=True,
+            )
         return JournalQuery(
             session_id=session_id,
             include_internal=include_internal,
-            errors_only=True,
+            success_only=True,
             latest=True,
         )
 
@@ -130,3 +265,23 @@ def _latest_run(runs: list[Mapping[str, object]]) -> Mapping[str, object] | None
         key=lambda item: (str(item[1].get("ts", "")), item[0]),
     )
     return latest
+
+
+def _require_execution_id(run: Mapping[str, object] | None, *, raw: str) -> str:
+    if run is None:
+        raise AgentNBException(
+            code="EXECUTION_NOT_FOUND",
+            message=f"No runs found for selector: {raw}",
+        )
+    execution_id = run.get("execution_id")
+    if not isinstance(execution_id, str) or not execution_id:
+        raise AgentNBException(
+            code="EXECUTION_NOT_FOUND",
+            message=f"No runs found for selector: {raw}",
+        )
+    return execution_id
+
+
+def _is_active_run(run: Mapping[str, object]) -> bool:
+    status = run.get("status")
+    return isinstance(status, str) and status in _ACTIVE_RUN_STATUSES

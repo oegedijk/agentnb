@@ -164,11 +164,11 @@ def main(
     The session auto-starts for normal execution. Drive one session serially;
     use `agentnb wait` between commands when needed.
 
-    `--session NAME` and `--background` work before the code argument for
-    inline exec. For other subcommands (`history`, `runs`, `status`, etc.)
-    they must go after the subcommand name. When code contains braces or
-    quotes, prefer heredoc or --file over inline strings. Do not use `\\n`
-    to embed newlines in an inline string; use heredoc instead.
+    `--session NAME` and `--background` work in prefix position for inline
+    exec and for most subcommands. Putting them after the subcommand name
+    always works. When code contains braces or quotes, prefer heredoc or
+    --file over inline strings. Do not use `\\n` to embed newlines in an
+    inline string; use heredoc instead.
 
     `--agent` returns compact JSON. `--json` returns the full stable envelope.
     `--quiet` and `--no-suggestions` reduce noise. `history` and `runs list`

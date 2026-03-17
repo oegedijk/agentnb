@@ -58,14 +58,14 @@ agentnb analysis.py
 agentnb "print(final_result)"
 ```
 
-`--session` and `--background` work in prefix position for inline code and file
-execution. For lifecycle subcommands (`status`, `history`, `runs`, etc.), put
-them after the subcommand name:
+`--session` and `--background` work in prefix position for inline code, file
+execution, and most subcommands. Putting them after the subcommand name always
+works:
 
 ```bash
 agentnb --session myenv "df.head()"     # prefix works for inline exec
 agentnb --background "long_task()"
-agentnb history --session myenv         # must go after for non-exec subcommands
+agentnb history --session myenv
 agentnb runs list --session myenv
 ```
 
@@ -235,7 +235,7 @@ $ agentnb "print('hello')"
 hello
 
 $ agentnb wait
-Kernel is idle (pid 91098).
+Kernel is idle (session: default, pid 91098).
 ```
 
 Use `--json` when you want the full stable payload for scripting:
@@ -330,11 +330,8 @@ agentnb --no-suggestions "1 + 1"
 Top-level flags such as `--agent`, `--json`, `--quiet`, and `--no-suggestions`
 can appear before or after the subcommand.
 
-In default (human) mode, errors are written to stderr and the rendered output
-to stdout. When a shell combines both (e.g., `2>&1` or subprocess capture), the
-error message appears twice. Use `--agent` or `--json` to get a single JSON
-object on stdout instead, which is the recommended pattern for programmatic
-consumers:
+Use `--agent` or `--json` when consuming output programmatically to get a
+stable, parseable single JSON object on stdout:
 
 ## Recovery And Lifecycle
 

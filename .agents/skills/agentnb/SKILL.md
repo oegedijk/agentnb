@@ -48,14 +48,14 @@ PY
 agentnb analysis.py
 ```
 
-`--session` and `--background` work in prefix position for inline code and file
-execution. For lifecycle subcommands (`status`, `history`, `runs`, etc.), put
-them after the subcommand name:
+`--session` and `--background` work in prefix position for inline code, file
+execution, and most subcommands. Putting them after the subcommand name always
+works:
 
 ```bash
 agentnb --session myenv "df.head()"     # prefix works for inline exec
 agentnb --background "long_task()"
-agentnb history --session myenv         # must go after for non-exec subcommands
+agentnb history --session myenv
 agentnb runs list --session myenv
 ```
 

@@ -135,6 +135,8 @@ _SUBCOMMAND_WORDS: frozenset[str] = frozenset(
     }
 )
 
+_GROUP_COMMANDS: frozenset[str] = frozenset({"runs", "sessions"})
+
 
 class InvocationResolver:
     def __init__(
@@ -170,15 +172,37 @@ class InvocationResolver:
                     argv=tuple(raw_args),
                     command_name=command_name,
                 )
-            return CommandIntent(
-                argv=(
+            if (
+                command_name in _GROUP_COMMANDS
+                and scanned.prefix_exec_tokens
+                and scanned.tail_positionals
+            ):
+                # For group commands (runs, sessions), prefix exec tokens like --session / --project
+                # must appear after the subcommand name, not between the group and its subcommand.
+                first_pos = scanned.tail_positionals[0]
+                split = scanned.tail_tokens_without_root.index(first_pos) + 1
+                tail_before = scanned.tail_tokens_without_root[:split]
+                tail_after = scanned.tail_tokens_without_root[split:]
+                argv: tuple[str, ...] = (
+                    *scanned.prefix_root_flags,
+                    *scanned.tail_root_flags,
+                    command_name,
+                    *tail_before,
+                    *scanned.prefix_exec_tokens,
+                    *tail_after,
+                    *scanned.suffix,
+                )
+            else:
+                argv = (
                     *scanned.prefix_root_flags,
                     *scanned.tail_root_flags,
                     command_name,
                     *scanned.prefix_exec_tokens,
                     *scanned.tail_tokens_without_root,
                     *scanned.suffix,
-                ),
+                )
+            return CommandIntent(
+                argv=argv,
                 command_name=command_name,
                 root_flags=tuple(root_flags),
             )

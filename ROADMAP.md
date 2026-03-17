@@ -53,78 +53,19 @@ These boundaries now own specific categories of complexity. New feature work sho
 
 If a feature does not fit one of these seams cleanly, define or deepen the owning module first instead of adding a CLI-local special case.
 
-## v0.3.1 - Output Correctness And Ergonomic Fixes
+## v0.3.1 - Output Correctness And Ergonomic Fixes (shipped)
 
-### Goals
+v0.3.1 fixed the output-path bugs that most affected agent consumption and corrected the ergonomic rough edges identified in smoke testing.
 
-- Fix output-path bugs that break agent and human consumption.
-- Make error responses, background dispatch, and run-control messages say what they mean.
-- Improve context-awareness of suggestions and inspection so the agent wastes fewer tokens on wrong guesses.
+### Shipped
 
-### Planned Features
-
-- Fix duplicate error output (highest impact):
-  - execution errors print the full traceback and "Next:" suggestions twice — once as human text and once as the error block
-  - confirmed across every error scenario including `--quiet` mode; the duplication is unconditional
-  - root cause: errors are written to stderr and the rendered output to stdout; combined capture doubles the content
-- Fix `reset` output message:
-  - `reset` currently prints "Execution completed." which sounds like code was run, not that state was cleared
-  - change to "Namespace cleared." or "User variables removed." to reflect what actually happened
-- Context-aware suggestions (remaining):
-  - after `SESSION_BUSY` (serialization lock), suggest `agentnb wait` as the primary recovery path, not `history @last-error` / `interrupt` / `reset`
-  - after a dead-kernel error ("Kernel process is not running"), suggest `agentnb start` or `agentnb doctor`, not `interrupt` / `reset`
-  - put this logic in `AdvicePolicy` rather than spreading special cases
-- Fix `--session` and `--project` position consistency:
-  - `agentnb --session X history` and `agentnb --project /path runs list` fail; both flags must go after the subcommand name for non-exec commands
-  - documentation and help text corrected to reflect the actual constraint; the underlying fix is to make both flags work in prefix position for all commands
-- Show session name in `status` output:
-  - `agentnb status` reports "Kernel is running (pid N)" with no session name
-  - when multiple sessions are live this gives the agent no basis for knowing which session it checked; include the session name
-- Add stdout truncation notice:
-  - when stdout is truncated (e.g., large `print()` calls), output ends with `...` but there is no explicit notice that truncation occurred or how many bytes were dropped
-  - add a short note like `[stdout truncated at N chars]` so the agent knows the value is incomplete
-- Fix `--auto-install` fallback suggestion for pip-less venvs:
-  - `start --auto-install` falls back to `pip install ipykernel` which fails in fresh uv venvs that have no `pip`
-  - the error message also suggests the `pip` command as the manual fix; for uv projects it should suggest `uv add ipykernel`
-
-### Implementation Seams
-
-Each item below maps a planned feature to the module that should own the change. No item should require touching more than one or two modules.
-
-#### Output and rendering (`output.py`, `cli.py`)
-
-- **Duplicate error output**: `_emit()` in `cli.py` (line 263) writes the rendered response to `err=True` (stderr) when `response.status == "error"`. A caller that captures both channels (e.g. `2>&1` or subprocess with `stderr=STDOUT`) sees the output twice — once from each channel. Fix: remove the `err=...` routing in `_emit()` and always write to stdout in non-JSON mode. The one-liner is changing line 263 from `click.echo(rendered, err=(response.status == "error" and not options.as_json))` to `click.echo(rendered)`. The `--agent` and `--json` paths are unaffected since they never reach this branch.
-
-- **Reset output message**: `render_human()` in `output.py` (line 159) dispatches `reset` into `_render_exec_like()` alongside `exec`. `_render_exec_like()` (line 318-322) falls through to `"Execution completed."` when there is no stdout/stderr/result. Split the dispatch: keep `exec` going to `_render_exec_like()`, and for `reset` return `"Namespace cleared."` directly. One-line change at line 159: `elif command in {"exec", "reset"}:` → two separate branches.
-
-- **Stdout truncation notice**: Truncation happens in `compact.py` (line 66) via `summarize_history_text(stdout, limit=_STDOUT_LIMIT)` where `_STDOUT_LIMIT = 200`. `summarize_history_text` appends `...` but does not indicate truncation explicitly. Fix at line 66-67: after computing the summary, check `if summary is not None and len(stdout) > _STDOUT_LIMIT` and append `f" [{len(stdout) - _STDOUT_LIMIT} chars truncated]"` to the summary. Apply the same guard to the `stderr` summary at line 71-73. This affects only the `--agent` projection; the human render in `output.py` `_render_exec_like()` emits stdout verbatim and does not truncate.
-
-- **Status session name**: `render_human()` in `output.py` (lines 133-141) renders the `status` command using `status_data` only. `CommandResponse.session_id` is already available in `response`. At lines 137 and 138, include the session name: `f"Kernel is running (session: {response.session_id}, pid {status_data.get('pid')})."` Do the same at line 149 for the `wait` command which uses identical pid-only rendering.
-
-#### Advice (`advice.py`)
-
-- **SESSION_BUSY suggestion**: `SessionBusyError` in `errors.py` (line 43) raises with `code="SESSION_BUSY"`. `AdvicePolicy.suggestions()` has no branch for this code and falls through to the generic exec fallback (`history @last-error` / `interrupt` / `reset`) — all wrong when the session is merely locked. Add a top-level guard before the `command_name` dispatch (after the `AMBIGUOUS_EXECUTION` branch at line 36):
-  ```python
-  if context.error_code == "SESSION_BUSY":
-      return ["Run `agentnb wait --json` to block until the session is idle, then retry."]
-  ```
-
-- **Dead kernel suggestion**: `BackendOperationError` in `errors.py` (line 111) raises with `code="BACKEND_ERROR"`. The relevant instance is `backend.py` line 275: `"Kernel process is not running"`. `NoKernelRunningError` (line 27) raises with `code="NO_KERNEL"`. Both fall through to the generic exec fallback in `AdvicePolicy`. Add alongside the `SESSION_BUSY` guard:
-  ```python
-  if context.error_code in {"NO_KERNEL", "BACKEND_ERROR"}:
-      return [
-          "Run `agentnb start --json` to start the kernel.",
-          "Run `agentnb doctor --json` if startup has been failing.",
-      ]
-  ```
-
-#### Invocation (`invocation.py`)
-
-- **`--session` and `--project` position for non-exec commands**: The resolver (`invocation.py` lines 167-184) correctly moves `prefix_exec_tokens` (which includes `--session X` and `--project X`) after the command name when building the final argv. For top-level commands like `history` and `status` this works because those commands accept `--session` directly. The failure case is group commands: `agentnb --session X runs list` produces argv `["runs", "--session", "X", "list"]`, and Click rejects `--session` on the `runs` group because the group itself has no `--session` option (only the `list` subcommand does). Fix: in `_implicit_exec_intent()` (line 357), or in the `CommandIntent` argv assembly (line 174-183), detect when `command_candidate` is a known group name (`runs`, `sessions`) and move exec tokens after the first subcommand positional in `tail_tokens_without_root` rather than between the group name and its subcommand.
-
-#### Startup (`kernel/provisioner.py`)
-
-- **`--auto-install` fallback for pip-less venvs**: `ensure_ipykernel()` in `provisioner.py` (lines 114-130) always uses `install_cmd = [selected.executable, "-m", "pip", "install", IPYKERNEL_REQUIREMENT]`. This fails in fresh uv venvs where `pip` is absent. The error messages at lines 121-123 and 133-137 repeat the same pip command. Fix in two parts: (1) before running, probe whether `pip` is available with `_python_supports_module(Path(selected.executable), "pip")`; if not, substitute `["uv", "pip", "install", IPYKERNEL_REQUIREMENT]` (or `["uv", "add", "ipykernel"]` if `uv.lock` is detectable). (2) When the install fails, parse `result.stderr` for `"No module named pip"` and if found, emit a targeted message: `f"pip is not available in this environment. Try: uv add ipykernel"` instead of the generic retry-with-pip suggestion.
+- Fixed duplicate error output: errors now always go to stdout; the `err=True` routing in `_emit()` was the root cause of double output when stderr was captured alongside stdout.
+- Fixed `reset` output message: `reset` now prints `"Namespace cleared."` instead of `"Execution completed."` to distinguish it from code execution.
+- Context-aware suggestions in `AdvicePolicy`: `SESSION_BUSY` now suggests `agentnb wait` as the primary recovery path; `NO_KERNEL` and `BACKEND_ERROR` now suggest `agentnb start` / `agentnb doctor` instead of the generic exec fallback.
+- Fixed `--session` and `--project` prefix position for group commands: `agentnb --session X runs list` and `agentnb --project /path runs list` now work by detecting group command names (`runs`, `sessions`) in `InvocationResolver` and moving prefix exec tokens after the first subcommand positional.
+- Added session name to `status` and `wait` output: both commands now include `session: NAME` alongside the pid so the agent can identify which session was checked.
+- Added stdout/stderr truncation notice in `--agent` mode: when output is truncated in `compact_execution_payload`, the summary now ends with `[N chars truncated]` so the agent knows the value is incomplete.
+- Fixed `--auto-install` fallback for pip-less venvs: `ensure_ipykernel()` now probes pip availability before choosing an install command; falls back to `uv add ipykernel` (when `uv.lock` is present) or `uv pip install ipykernel>=6.0`; "No module named pip" in installer stderr triggers a targeted error message.
 
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 

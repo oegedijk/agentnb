@@ -132,21 +132,23 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
 
         elif command == "status":
             status_data = cast(StatusPayload, data)
+            session_label = f"session: {response.session_id}, " if response.session_id else ""
             if status_data.get("alive"):
                 if status_data.get("busy"):
-                    body = f"Kernel is running (pid {status_data.get('pid')}, busy)."
+                    body = f"Kernel is running ({session_label}pid {status_data.get('pid')}, busy)."
                 else:
-                    body = f"Kernel is running (pid {status_data.get('pid')})."
+                    body = f"Kernel is running ({session_label}pid {status_data.get('pid')})."
             else:
                 body = "Kernel is not running."
         elif command == "wait":
             status_data = cast(StatusPayload, data)
+            session_label = f"session: {response.session_id}, " if response.session_id else ""
             if status_data.get("alive"):
                 waited_for = status_data.get("waited_for")
                 if waited_for == "ready":
-                    body = f"Kernel is ready (pid {status_data.get('pid')})."
+                    body = f"Kernel is ready ({session_label}pid {status_data.get('pid')})."
                 else:
-                    body = f"Kernel is idle (pid {status_data.get('pid')})."
+                    body = f"Kernel is idle ({session_label}pid {status_data.get('pid')})."
             else:
                 body = "Kernel is not running."
 
@@ -156,8 +158,11 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         elif command == "interrupt":
             body = "Interrupt signal sent."
 
-        elif command in {"exec", "reset"}:
+        elif command == "exec":
             body = _render_exec_like(cast(ExecPayload, data))
+
+        elif command == "reset":
+            body = "Namespace cleared."
 
         elif command == "vars":
             vars_data = cast(VarsPayload, data).get("vars", [])

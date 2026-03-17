@@ -254,3 +254,37 @@ def test_resolve_invocation_intent_session_prefix_position() -> None:
     command_intent = cast(CommandIntent, intent)
     assert command_intent.command_name == "history"
     assert command_intent.argv == ("history", "--session", "analysis")
+
+
+def test_resolve_invocation_intent_session_prefix_for_group_command() -> None:
+    # `agentnb --session X runs list` must produce argv ("runs", "list", "--session", "X")
+    # so Click sees --session on the `list` subcommand, not on the `runs` group.
+    resolver = InvocationResolver()
+
+    intent = resolver.resolve_invocation_intent(
+        ["--session", "analysis", "runs", "list"],
+        known_commands=KNOWN_COMMANDS,
+        cwd=Path("/tmp/project"),
+        stdin=FakeStdin("", is_tty=True),
+    )
+
+    assert intent.kind == "command"
+    command_intent = cast(CommandIntent, intent)
+    assert command_intent.command_name == "runs"
+    assert command_intent.argv == ("runs", "list", "--session", "analysis")
+
+
+def test_resolve_invocation_intent_project_prefix_for_group_command() -> None:
+    resolver = InvocationResolver()
+
+    intent = resolver.resolve_invocation_intent(
+        ["--project", "/other", "runs", "show"],
+        known_commands=KNOWN_COMMANDS,
+        cwd=Path("/tmp/project"),
+        stdin=FakeStdin("", is_tty=True),
+    )
+
+    assert intent.kind == "command"
+    command_intent = cast(CommandIntent, intent)
+    assert command_intent.command_name == "runs"
+    assert command_intent.argv == ("runs", "show", "--project", "/other")

@@ -262,7 +262,7 @@ def _emit(response: CommandResponse, *, as_json: bool) -> None:
         response = replace(response, suggestions=_strip_json_suffix(response.suggestions))
     rendered = render_response(response, options=options)
     if rendered:
-        click.echo(rendered, err=(response.status == "error" and not options.as_json))
+        click.echo(rendered)
     if response.status == "error":
         raise click.exceptions.Exit(1)
 

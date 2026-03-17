@@ -200,6 +200,42 @@ def test_advice_policy_doctor_ready_without_session() -> None:
     assert suggestions == ["Run `agentnb start --json` to start the kernel."]
 
 
+def test_advice_policy_session_busy_suggests_wait() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={},
+            error_code="SESSION_BUSY",
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb wait --json` to block until the session is idle, then retry."
+    ]
+
+
+@pytest.mark.parametrize("error_code", ["NO_KERNEL", "BACKEND_ERROR"])
+def test_advice_policy_dead_kernel_suggests_start_and_doctor(error_code: str) -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={},
+            error_code=error_code,
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb start --json` to start the kernel.",
+        "Run `agentnb doctor --json` if startup has been failing.",
+    ]
+
+
 @pytest.mark.parametrize(
     ("error_value", "expected"),
     [

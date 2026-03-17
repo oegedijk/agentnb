@@ -34,6 +34,13 @@ class AdvicePolicy:
                 "Run `agentnb runs list --json` to inspect matching run ids.",
                 "Retry with `agentnb runs show EXECUTION_ID --json` to target one explicitly.",
             ]
+        if context.error_code == "SESSION_BUSY":
+            return ["Run `agentnb wait --json` to block until the session is idle, then retry."]
+        if context.error_code in {"NO_KERNEL", "BACKEND_ERROR"}:
+            return [
+                "Run `agentnb start --json` to start the kernel.",
+                "Run `agentnb doctor --json` if startup has been failing.",
+            ]
         if command_name == "start":
             return []
         if command_name == "status":

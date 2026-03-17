@@ -65,12 +65,16 @@ def compact_execution_payload(payload: CompactExecPayloadInput) -> ExecPayload:
     if isinstance(stdout, str) and stdout:
         summary = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
         if summary is not None:
+            if len(stdout) > _STDOUT_LIMIT:
+                summary = summary + f" [{len(stdout) - _STDOUT_LIMIT} chars truncated]"
             compacted["stdout"] = summary
 
     stderr = payload.get("stderr")
     if isinstance(stderr, str) and stderr:
         summary = summarize_history_text(stderr, limit=_STDOUT_LIMIT)
         if summary is not None:
+            if len(stderr) > _STDOUT_LIMIT:
+                summary = summary + f" [{len(stderr) - _STDOUT_LIMIT} chars truncated]"
             compacted["stderr"] = summary
 
     result = payload.get("result")

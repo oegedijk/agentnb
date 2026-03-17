@@ -163,10 +163,9 @@ Simple rule:
 
 ## Output
 
-Default output is plain terminal text. Errors go to stderr, other output to
-stdout. When a shell captures both channels together the error message appears
-twice. Use `--agent` or `--json` to get a single JSON object on stdout — this
-is the preferred output mode for agent-driven workflows.
+Default output is plain terminal text on stdout. Use `--agent` or `--json` to
+get a single JSON object on stdout — this is the preferred output mode for
+agent-driven workflows.
 
 Use `--json` when you want the full stable payload for scripting. Use `--agent` when you want a smaller JSON payload for agent/model consumption.
 
@@ -241,6 +240,6 @@ When only one live session exists, commands can infer it. Once multiple live ses
 - Use `reload` after editing importable project modules instead of assuming live definitions updated automatically.
 - Use `runs` for exact execution lookup and background control.
 - Use `wait` for session readiness, not `status --wait-idle` (same semantics, shorter).
-- Use `--agent` or `--json` when consuming output programmatically. In default mode errors are split across stderr and stdout, which causes duplication in combined capture.
+- Use `--agent` or `--json` when consuming output programmatically for a stable, parseable single JSON object.
 - Use `vars` and `inspect` to check live state rather than `print()` — they produce bounded output regardless of object size.
 - Treat the kernel as project-scoped state. Stop it when the task is complete or stale state could confuse later work.

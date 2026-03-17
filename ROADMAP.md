@@ -36,96 +36,143 @@ The roadmap assumes the existing persistent-kernel baseline remains intact:
 - stable machine-readable responses
 - app, state, kernel, introspection, and run-control boundaries that can absorb new behavior without leaking low-level details upward
 
-## Pre-v0.3 Preparatory Refactors
+## v0.3 - Agent Loop Efficiency (shipped)
 
-These refactors are complete and now define the main seams for 0.3 feature work.
+v0.3 shipped the core agent loop: implicit exec, auto-start, compact `--agent` mode, sticky sessions, symbolic selectors, lower-noise output, and the help/discoverability rewrite.
 
-Apply an Ousterhout lens here:
+### Architecture Seams
 
-- prefer deep modules with shallow interfaces
-- hide syntax inference, selector lookup, output policy, and sticky-default complexity behind a few owning boundaries
-- avoid spreading special cases across `cli.py`, app handlers, runtime methods, and render helpers
-- define each refactor by the complexity it should absorb, not by the number of files it touches
+These boundaries now own specific categories of complexity. New feature work should land in the appropriate seam rather than spreading policy across CLI handlers.
 
-- Invocation-resolution boundary: completed; raw argv/stdin/file-path inference and implicit exec routing now live behind a typed resolver instead of in `cli.py`.
-- Output-profile boundary: completed; output mode selection is centralized and compact/full JSON policy no longer spreads through CLI handlers.
-- Selector-resolution boundary: completed; typed run and history references plus selector-to-query/id resolution now own `@latest` and `@last-error` style targeting.
-- Session-preferences state boundary: completed; sticky current-session behavior is persisted in project state and resolved by runtime precedence rules.
-- Advice-policy boundary: completed; next-step guidance is centralized in a mode-aware advisor instead of a large command switch.
-- Execution-invocation policy cleanup: completed; invocation ergonomics now live in policy objects rather than bloating semantic execution requests.
+- `InvocationResolver`: hot-path syntax, argv/stdin/file-path inference, implicit exec routing.
+- `ExecInvocationPolicy`: default execution ergonomics (startup, background, output selection).
+- `ResponseProjector`: compact `--agent` vs full `--json` response shapes.
+- Selector resolvers: `@latest`, `@active`, `@last-error`, `@last-success` expansion for runs and history.
+- `StateRepository` + `KernelRuntime`: sticky session preferences and precedence rules.
+- `AdvicePolicy`: next-step suggestions, success-path quieting, recovery guidance.
 
-## v0.3 - Agent Loop Efficiency
+If a feature does not fit one of these seams cleanly, define or deepen the owning module first instead of adding a CLI-local special case.
+
+## v0.3.1 - Output Correctness And Ergonomic Fixes
 
 ### Goals
 
-- Make the cheapest useful command also be the easiest command.
-- Reduce the number of tokens needed to start, continue, recover, and inspect.
-- Reduce wrong guesses and follow-up discovery commands.
-- Separate compact working output from exact machine-contract output.
+- Fix output-path bugs that break agent and human consumption.
+- Make error responses, background dispatch, and run-control messages say what they mean.
+- Improve context-awareness of suggestions and inspection so the agent wastes fewer tokens on wrong guesses.
 
 ### Planned Features
 
-- Implicit hot-path execution:
-  - `agentnb "code"` behaves like `agentnb exec --ensure-started "code"`
-  - `agentnb path/to/script.py` behaves like `agentnb exec --ensure-started --file path/to/script.py`
-  - `agentnb` with stdin executes stdin through the same path
-  - explicit `exec` remains available for clarity and scripting
-- Default startup on execution:
-  - make `ensure-started` the default behavior for the main execution path
-  - keep an explicit opt-out only if needed for strict scripts/tests
-- Compact agent working mode:
-  - define `--agent` as a compact iterative mode, not just quiet full JSON
-  - return only the minimum fields needed for the next step during normal success cases
-  - keep full `--json` as the exact stable envelope
-- Lower-noise default output:
-  - reduce success-path suggestions by default in agent mode
-  - only emit suggestions when the next action is genuinely ambiguous or recovery-oriented
-  - interpolate concrete ids and session names instead of placeholder text like `EXECUTION_ID`
-- Stronger run-control ergonomics:
-  - always surface `execution_id` clearly for background execution in every output mode
-  - allow `runs show|follow|wait|cancel` to default to the active or latest relevant run where safe
-- Sticky session defaults:
-  - remember the current session per project once a session is selected explicitly
-  - make ambiguity rarer without hiding multi-session state
-  - show the current session clearly in `sessions list`
-- History and query shortcuts:
-  - direct selectors for the latest failed or successful history/run entries
-  - clearer failed-only flows without requiring extra list-then-show commands
-  - optional flat machine-friendly query output where it reduces parsing overhead
-- Help and discoverability rewrite:
-  - replace the long first-contact workflow with a short hot-path guide
-  - prioritize examples like `agentnb "import json"` over verbose control-plane examples
-  - keep extended help for deeper workflows, but move it off the critical path
-- Human-mode follow-up:
-  - keep human output self-sufficient and compact
-  - prefer short summaries over repeated routine success guidance
+- Fix `inspect` crash on MultiIndex DataFrames:
+  - `TypeError: keys must be str, int, float, bool or None, not tuple` when inspecting a DataFrame with tuple column keys from `groupby().agg()`
+  - MultiIndex columns are common in pandas workflows and should serialize cleanly
+- Fix background dispatch message:
+  - `--background` currently prints "Execution completed" when the execution is only dispatched
+  - change to "Background execution started" or similar to reflect the actual state
+- Fix `runs cancel` wording for already-finished runs:
+  - currently says "Run is already ok" which is confusing
+  - change to "Run already completed" or "Run already finished"
+- Fix `runs follow` timeout behavior:
+  - timing out while tailing a still-running background job exits with code 1 and an error message
+  - this is normal flow, not an error; use exit code 0 or a distinct non-error exit
+- Fix `runs follow` replay semantics:
+  - `follow` currently replays all output from the beginning
+  - the name implies `tail -f` semantics; either stream only new events or document the replay behavior clearly
+- Context-aware suggestions:
+  - after `ModuleNotFoundError`, suggest how to install the missing module rather than `history @last-error` / `interrupt` / `reset`
+  - after `NameError` with multiple sessions running, mention which session was targeted and suggest `sessions list`
+  - after `doctor`, do not suggest `agentnb start` when sessions are already running
+  - put this logic in `AdvicePolicy` rather than spreading special cases
+- Fix `--session` position consistency:
+  - the main help says `--session` works "before or after the subcommand" but `agentnb --session X history` fails
+  - either make it work in both positions or correct the documentation
+- Add a default limit to `runs list`:
+  - currently dumps all historical runs with no limit, producing a wall of text
+  - add a sensible default (e.g., last 20) or at least suggest `--last N` when output is large
+- Add `help` as a command alias:
+  - `agentnb help` currently fails with "No such command"
+  - alias it to `--help` since it is a natural first thing to type
+- Reduce noise in `inspect` for scalars:
+  - inspecting an `int` shows method lists like `as_integer_ratio`, `bit_count`, etc.
+  - for primitive types, show just the value; reserve member listing for complex objects
+- Make implicit session switching visible:
+  - using `--session X` silently makes X the "current" session with no indication
+  - surface the switch in human output so the agent knows which session subsequent commands will target
+
+### Preparatory Refactor: Deepen AdviceContext
+
+Three of the planned features (ModuleNotFoundError suggestion, NameError session context, doctor awareness) need information that `AdviceContext` does not carry today. Patching each one individually would mean three separate ad-hoc additions and three corresponding changes to every `AdviceContext(...)` construction site in `_handle_command()`.
+
+Deepen `AdviceContext` once before the feature work:
+
+```python
+@dataclass(slots=True, frozen=True)
+class AdviceContext:
+    command_name: str
+    response_status: str
+    data: Mapping[str, object]
+    error_code: str | None = None
+    # execution error identity (currently buried in data dict or lost on generic except path)
+    error_name: str | None = None
+    error_value: str | None = None
+    # session context (currently available in _handle_command but not forwarded)
+    session_id: str | None = None
+    live_session_count: int = 0
+```
+
+Why this is the right refactor:
+
+- `error_name` / `error_value`: Today the exec error branch (line ~74) would have to reach into `data.get("ename")`, which only works when the `AgentNBException` carried error details. The generic `except Exception` path (line ~779) passes `data={}`, losing the ename/evalue entirely. Promoting these to first-class fields ensures they are always available regardless of which exception path constructed the context.
+- `session_id` / `live_session_count`: `_handle_command()` has `resolved_session_id` (line ~737) and can cheaply query the session count, but neither flows to `AdvicePolicy` today. The NameError and doctor suggestions both need this context. Passing it through `AdviceContext` keeps the advice module decoupled from runtime — it never needs to query session state itself.
+- Testability: Advice logic becomes testable by constructing `AdviceContext` directly with typed fields, rather than building fake `data` dicts with undocumented keys.
+
+Populate the new fields in the two `AdviceContext(...)` construction sites inside `_handle_command()` (success at line ~752, error at line ~770) and the generic exception handler (line ~788). No other call sites exist.
 
 ### Implementation Seams
 
-- Put hot-path syntax and shorthand behavior in `InvocationResolver`; keep `cli.py` as an adapter from argv to typed intents and app requests.
-- Put default execution ergonomics such as implicit startup or future opt-outs in `ExecInvocationPolicy`, not on `ExecRequest` itself.
-- Put compact versus full JSON response shape decisions in `ResponseProjector`; keep full `--json` stable and treat `--agent` as a separate compact contract.
-- Put run/history symbolic defaults and selector expansion in the selector resolvers; lower layers should receive typed references or resolved queries, not ad hoc CLI guesses.
-- Put sticky session behavior in `StateRepository` plus `KernelRuntime` precedence rules; do not reintroduce CLI-side session memory.
-- Put recovery guidance and success-path quieting in `AdvicePolicy`; avoid command-specific suggestion branching in render helpers or handlers.
-- Keep feature work additive at the app boundary: shorthand syntax may change, but semantic request/response shapes and persisted provenance should stay clear and stable.
-- If a 0.3 feature does not fit one of these seams cleanly, define or deepen the owning module first instead of adding another CLI-local special case.
+Each item below maps a planned feature to the module that should own the change. No item should require touching more than one or two modules.
 
-### Example Target Workflows
+#### Introspection (`introspection.py`)
 
-- `agentnb "import json"`
-- `agentnb "payload.keys()"`
-- `agentnb analysis.py`
-- `agentnb --background "long_task()"`
-- `agentnb runs follow`
-- `agentnb history @last-error`
+- **MultiIndex inspect crash**: The kernel-side helper `_inspect_helper()` calls `_dtype_summary()` (line ~601) and `_null_counts()` (line ~617), both of which call `.to_dict()` on a Series with tuple keys from MultiIndex columns. The resulting dict has tuple keys that `json.dumps()` cannot serialize. Fix both helpers to coerce all dict keys to `str` before returning, matching the `{str(key): ...}` pattern already used at line ~607 but applied too late. The same coercion should guard the `columns` list in `_dataframe_preview()` since MultiIndex columns are tuples there too.
 
-### API / Contract Notes
+- **Scalar member noise**: The kernel-side helper `_inspect_helper()` (line ~754) populates `_members` via `dir(_value)` whenever `_preview is None`, which includes all primitives. Add a guard: skip `dir()` for types in `{int, float, str, bool, bytes, complex, type(None)}`. For these types `repr` alone is sufficient; the method list adds no useful information.
 
-- Keep full `--json` as the stable machine contract with predictable fields such as `session_id`, `execution_id`, `duration_ms`, and typed error codes.
-- Define a separate compact `--agent` contract for working-loop efficiency rather than assuming the full envelope is the right default for every step.
-- Keep shorthand syntax and symbolic selectors as CLI affordances over stable underlying request/response shapes.
-- Do not let convenience defaults obscure persisted provenance or session identity.
+#### Output and rendering (`output.py`)
+
+- **Background dispatch message**: `_render_exec_like()` (line ~313) falls through to `"Execution completed."` when there is no stdout/stderr/result. For background dispatch, the response data includes `background: True` and an `execution_id`. Add a branch: when `data.get("background")` is truthy, render `"Background execution started (execution_id)."` instead of the generic message.
+
+- **Cancel wording**: `render_human()` for `runs-cancel` (line ~286) renders `f"Run {id} is already {status}."` when `cancel_requested` is false. Change to `f"Run {id} already {status}."` — dropping "is" — or use an explicit mapping: `{"ok": "already finished", "error": "already failed", "cancelled": "already cancelled"}` for clarity.
+
+#### Run control (`runs/local_manager.py`, `cli.py`)
+
+- **Follow timeout exit code**: `follow_run()` (line ~129) raises `RunWaitTimedOutError` on timeout, which propagates to `cli.py` → `_emit_stream_completion()` → `Exit(1)`. The timeout is not a failure of the run itself. Either catch the timeout in `runs_follow` in `cli.py` and exit cleanly (code 0) with a note that following stopped, or introduce a distinct exit code (e.g., 2) that agents can distinguish from execution failure.
+
+- **Follow replay semantics**: `follow_run()` (line ~123) emits `record.events[emitted_events:]` starting from `emitted_events = 0`, so the first iteration replays all historical events. Two options: (a) accept this as the documented behavior and rename the docstring/help from "stream newly recorded events" to "replay and then stream"; or (b) add an `--offset` or `--skip-history` flag that sets `emitted_events` to `len(record.events)` before entering the poll loop so only new events stream.
+
+#### Advice (`advice.py`)
+
+These items depend on the `AdviceContext` deepening described above.
+
+- **ModuleNotFoundError suggestion**: After the refactor, `context.error_name` is available directly. Add a branch in the `exec` error handler (line ~74): when `context.error_name == "ModuleNotFoundError"`, extract the module name from `context.error_value` and suggest the install command (e.g., `pip install {module}` or `uv add {module}`). No `data` dict inspection needed.
+
+- **NameError with session context**: With `context.session_id` and `context.live_session_count` available, add a branch: when `context.error_name == "NameError"` and `context.live_session_count > 1`, include the targeted session name in the suggestion and mention `sessions list`. No runtime queries from inside `AdvicePolicy`.
+
+- **Doctor suggestion awareness**: The `doctor` handler (line ~103) always suggests `agentnb start` when `data.get("ready")` is true. Check `data.get("session_exists")` (already present in `DoctorPayload`). When true, suppress the `start` suggestion or change it to `"Kernel is already running."`. This one does not need the new `AdviceContext` fields — it uses `data` which already carries the doctor payload.
+
+#### Invocation (`invocation.py`, `cli.py`)
+
+- **`--session` position for non-exec commands**: `InvocationResolver._scan_args()` classifies `--session` as `kind="exec"` (line ~54), so it is recognized in both prefix and tail positions. The issue is that for known subcommands like `history`, the prefix exec tokens are forwarded correctly, but Click's own parsing of `agentnb --session X history` may consume `--session` as a root-level unknown option before `AgentGroup.parse_args` runs. Verify whether the `InvocationResolver` is actually invoked before Click's root option parsing. If the option is consumed too early, either promote `--session` to a root option (like `--json`) or ensure the resolver runs first.
+
+- **`help` command alias**: Add a hidden Click command `help` to the `AgentGroup` that prints the same output as `--help`. Alternatively, handle it in `AgentGroup.parse_args` by rewriting `["help"]` to `["--help"]` before passing to `super().parse_args()`.
+
+#### Query defaults (`app.py`)
+
+- **`runs list` default limit**: `_runs_list_payload()` (line ~626) only slices when `request.last` is not None. Add a default: when `request.last` is None and not in JSON/agent mode, default to 20. Keep the unlimited behavior for `--json` and `--agent` so programmatic consumers can still get everything. Alternatively, add the default in the CLI layer (`runs_list` command in `cli.py`) so the app layer stays mode-unaware.
+
+#### Session visibility (`app.py`, `output.py`)
+
+- **Implicit session switch**: `_handle_command()` (line ~738) calls `remember_current_session()` when `--session` is provided but produces no output about the switch. Add a field to `CommandResponse.data` (e.g., `switched_session: str | None`) when the current session changes. In `render_human()`, append a short note like `"(now targeting session: X)"` when this field is set. Keep it out of `--agent` and `--json` modes to avoid breaking contracts — or add it as an optional field that agents can ignore.
 
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 

@@ -136,9 +136,14 @@ def main(
       agentnb analysis.py
       agentnb --background "long_task()"
       agentnb --session myenv "df.head()"
+      agentnb --timeout 120 "train_model()"
+      agentnb --stream "train_model(epochs=10)"
+
+    \b
+    Multiline code (braces, quotes, special chars):
       agentnb <<'PY'
-        import pandas as pd
-        df = pd.read_csv("tips.csv")
+      import pandas as pd
+      df = pd.read_csv("tips.csv")
       PY
 
     \b
@@ -149,12 +154,17 @@ def main(
       agentnb wait                  agentnb interrupt
       agentnb reset                 agentnb reload
 
+    \b
+    Output control:
+      agentnb --result-only "1+1"   agentnb --stdout-only "print('hi')"
+      agentnb --agent "1+1"         agentnb --json "1+1"
+
     The session auto-starts for normal execution. Drive one session serially;
     use `agentnb wait` between commands when needed.
 
-    `--session NAME` and `--background` can go before or after the subcommand.
-    When code contains braces or quotes, prefer heredoc or --file over inline
-    strings.
+    `--session NAME` and `--background` go after the subcommand or code
+    argument. When code contains braces or quotes, prefer heredoc or --file
+    over inline strings.
 
     `--agent` returns compact JSON. `--json` returns the full stable envelope.
     `--quiet` and `--no-suggestions` reduce noise. `history` and `runs list`

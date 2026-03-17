@@ -683,6 +683,7 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
             execution_id="run-1",
             timeout_s=4.0,
             event_sink=sink,
+            skip_history=False,
         )
 
     assert response.status == "ok"

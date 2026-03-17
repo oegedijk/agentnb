@@ -103,7 +103,9 @@ class LocalRunManager(RunManager):
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
         observer: RunObserver | None = None,
+        skip_history: bool = False,
     ) -> RunSnapshot:
+        """Replay and then stream events for a run until it finishes."""
         deadline = time.monotonic() + timeout_s
         emitted_events = 0
         started_observer = False
@@ -120,6 +122,8 @@ class LocalRunManager(RunManager):
                     session_id=record.session_id,
                 )
                 started_observer = True
+                if skip_history:
+                    emitted_events = len(record.events)
             if observer is not None:
                 for event in record.events[emitted_events:]:
                     observer.accept(event)

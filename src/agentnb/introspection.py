@@ -582,7 +582,10 @@ def _safe_head_rows(value, limit):
     except Exception:
         return None
 
-    return rows if isinstance(rows, list) else None
+    if not isinstance(rows, list):
+        return None
+    rows = [{{str(k): v for k, v in row.items()}} for row in rows]
+    return rows
 
 
 def _dtype_summary(value):
@@ -751,9 +754,10 @@ if _preview is None:
     _preview = _mapping_preview(_value)
 if _preview is None:
     _preview = _sequence_preview(_value)
+_SCALAR_TYPES = (int, float, str, bool, bytes, complex, type(None))
 _members = []
 _doc = ""
-if _preview is None:
+if _preview is None and not isinstance(_value, _SCALAR_TYPES):
     _members = [member for member in dir(_value) if not member.startswith("_")]
     _doc = getattr(_value, "__doc__", None)
     if _doc is None:

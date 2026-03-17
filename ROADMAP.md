@@ -36,96 +36,36 @@ The roadmap assumes the existing persistent-kernel baseline remains intact:
 - stable machine-readable responses
 - app, state, kernel, introspection, and run-control boundaries that can absorb new behavior without leaking low-level details upward
 
-## Pre-v0.3 Preparatory Refactors
+## v0.3 - Agent Loop Efficiency (shipped)
 
-These refactors are complete and now define the main seams for 0.3 feature work.
+v0.3 shipped the core agent loop: implicit exec, auto-start, compact `--agent` mode, sticky sessions, symbolic selectors, lower-noise output, and the help/discoverability rewrite.
 
-Apply an Ousterhout lens here:
+### Architecture Seams
 
-- prefer deep modules with shallow interfaces
-- hide syntax inference, selector lookup, output policy, and sticky-default complexity behind a few owning boundaries
-- avoid spreading special cases across `cli.py`, app handlers, runtime methods, and render helpers
-- define each refactor by the complexity it should absorb, not by the number of files it touches
+These boundaries now own specific categories of complexity. New feature work should land in the appropriate seam rather than spreading policy across CLI handlers.
 
-- Invocation-resolution boundary: completed; raw argv/stdin/file-path inference and implicit exec routing now live behind a typed resolver instead of in `cli.py`.
-- Output-profile boundary: completed; output mode selection is centralized and compact/full JSON policy no longer spreads through CLI handlers.
-- Selector-resolution boundary: completed; typed run and history references plus selector-to-query/id resolution now own `@latest` and `@last-error` style targeting.
-- Session-preferences state boundary: completed; sticky current-session behavior is persisted in project state and resolved by runtime precedence rules.
-- Advice-policy boundary: completed; next-step guidance is centralized in a mode-aware advisor instead of a large command switch.
-- Execution-invocation policy cleanup: completed; invocation ergonomics now live in policy objects rather than bloating semantic execution requests.
+- `InvocationResolver`: hot-path syntax, argv/stdin/file-path inference, implicit exec routing.
+- `ExecInvocationPolicy`: default execution ergonomics (startup, background, output selection).
+- `ResponseProjector`: compact `--agent` vs full `--json` response shapes.
+- Selector resolvers: `@latest`, `@active`, `@last-error`, `@last-success` expansion for runs and history.
+- `StateRepository` + `KernelRuntime`: sticky session preferences and precedence rules.
+- `AdvicePolicy`: next-step suggestions, success-path quieting, recovery guidance.
 
-## v0.3 - Agent Loop Efficiency
+If a feature does not fit one of these seams cleanly, define or deepen the owning module first instead of adding a CLI-local special case.
 
-### Goals
+## v0.3.1 - Output Correctness And Ergonomic Fixes (shipped)
 
-- Make the cheapest useful command also be the easiest command.
-- Reduce the number of tokens needed to start, continue, recover, and inspect.
-- Reduce wrong guesses and follow-up discovery commands.
-- Separate compact working output from exact machine-contract output.
+v0.3.1 fixed the output-path bugs that most affected agent consumption and corrected the ergonomic rough edges identified in smoke testing.
 
-### Planned Features
+### Shipped
 
-- Implicit hot-path execution:
-  - `agentnb "code"` behaves like `agentnb exec --ensure-started "code"`
-  - `agentnb path/to/script.py` behaves like `agentnb exec --ensure-started --file path/to/script.py`
-  - `agentnb` with stdin executes stdin through the same path
-  - explicit `exec` remains available for clarity and scripting
-- Default startup on execution:
-  - make `ensure-started` the default behavior for the main execution path
-  - keep an explicit opt-out only if needed for strict scripts/tests
-- Compact agent working mode:
-  - define `--agent` as a compact iterative mode, not just quiet full JSON
-  - return only the minimum fields needed for the next step during normal success cases
-  - keep full `--json` as the exact stable envelope
-- Lower-noise default output:
-  - reduce success-path suggestions by default in agent mode
-  - only emit suggestions when the next action is genuinely ambiguous or recovery-oriented
-  - interpolate concrete ids and session names instead of placeholder text like `EXECUTION_ID`
-- Stronger run-control ergonomics:
-  - always surface `execution_id` clearly for background execution in every output mode
-  - allow `runs show|follow|wait|cancel` to default to the active or latest relevant run where safe
-- Sticky session defaults:
-  - remember the current session per project once a session is selected explicitly
-  - make ambiguity rarer without hiding multi-session state
-  - show the current session clearly in `sessions list`
-- History and query shortcuts:
-  - direct selectors for the latest failed or successful history/run entries
-  - clearer failed-only flows without requiring extra list-then-show commands
-  - optional flat machine-friendly query output where it reduces parsing overhead
-- Help and discoverability rewrite:
-  - replace the long first-contact workflow with a short hot-path guide
-  - prioritize examples like `agentnb "import json"` over verbose control-plane examples
-  - keep extended help for deeper workflows, but move it off the critical path
-- Human-mode follow-up:
-  - keep human output self-sufficient and compact
-  - prefer short summaries over repeated routine success guidance
-
-### Implementation Seams
-
-- Put hot-path syntax and shorthand behavior in `InvocationResolver`; keep `cli.py` as an adapter from argv to typed intents and app requests.
-- Put default execution ergonomics such as implicit startup or future opt-outs in `ExecInvocationPolicy`, not on `ExecRequest` itself.
-- Put compact versus full JSON response shape decisions in `ResponseProjector`; keep full `--json` stable and treat `--agent` as a separate compact contract.
-- Put run/history symbolic defaults and selector expansion in the selector resolvers; lower layers should receive typed references or resolved queries, not ad hoc CLI guesses.
-- Put sticky session behavior in `StateRepository` plus `KernelRuntime` precedence rules; do not reintroduce CLI-side session memory.
-- Put recovery guidance and success-path quieting in `AdvicePolicy`; avoid command-specific suggestion branching in render helpers or handlers.
-- Keep feature work additive at the app boundary: shorthand syntax may change, but semantic request/response shapes and persisted provenance should stay clear and stable.
-- If a 0.3 feature does not fit one of these seams cleanly, define or deepen the owning module first instead of adding another CLI-local special case.
-
-### Example Target Workflows
-
-- `agentnb "import json"`
-- `agentnb "payload.keys()"`
-- `agentnb analysis.py`
-- `agentnb --background "long_task()"`
-- `agentnb runs follow`
-- `agentnb history @last-error`
-
-### API / Contract Notes
-
-- Keep full `--json` as the stable machine contract with predictable fields such as `session_id`, `execution_id`, `duration_ms`, and typed error codes.
-- Define a separate compact `--agent` contract for working-loop efficiency rather than assuming the full envelope is the right default for every step.
-- Keep shorthand syntax and symbolic selectors as CLI affordances over stable underlying request/response shapes.
-- Do not let convenience defaults obscure persisted provenance or session identity.
+- Fixed duplicate error output: errors now always go to stdout; the `err=True` routing in `_emit()` was the root cause of double output when stderr was captured alongside stdout.
+- Fixed `reset` output message: `reset` now prints `"Namespace cleared."` instead of `"Execution completed."` to distinguish it from code execution.
+- Context-aware suggestions in `AdvicePolicy`: `SESSION_BUSY` now suggests `agentnb wait` as the primary recovery path; `NO_KERNEL` and `BACKEND_ERROR` now suggest `agentnb start` / `agentnb doctor` instead of the generic exec fallback.
+- Fixed `--session` and `--project` prefix position for group commands: `agentnb --session X runs list` and `agentnb --project /path runs list` now work by detecting group command names (`runs`, `sessions`) in `InvocationResolver` and moving prefix exec tokens after the first subcommand positional.
+- Added session name to `status` and `wait` output: both commands now include `session: NAME` alongside the pid so the agent can identify which session was checked.
+- Added stdout/stderr truncation notice in `--agent` mode: when output is truncated in `compact_execution_payload`, the summary now ends with `[N chars truncated]` so the agent knows the value is incomplete.
+- Fixed `--auto-install` fallback for pip-less venvs: `ensure_ipykernel()` now probes pip availability before choosing an install command; falls back to `uv add ipykernel` (when `uv.lock` is present) or `uv pip install ipykernel>=6.0`; "No module named pip" in installer stderr triggers a targeted error message.
 
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 
@@ -151,7 +91,6 @@ Apply an Ousterhout lens here:
   - replay and verify provenance once those features exist
   - optional tags if they add real value without bloating defaults
 - Recovery-oriented control-plane improvements:
-  - more actionable `SESSION_BUSY` and `AMBIGUOUS_SESSION` responses
   - health checks and structured diagnostics
   - improved cleanup for stale state
 

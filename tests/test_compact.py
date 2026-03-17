@@ -50,9 +50,37 @@ def test_compact_execution_payload_truncates_large_fields_and_preserves_selected
     assert compacted["execution_id"] == "run-1"
     assert compacted["selected_output"] == "stdout"
     assert compacted["selected_text"] == "exact output\n"
-    assert compacted["stdout"].endswith("...")
-    assert compacted["stderr"].endswith("...")
+    assert "..." in compacted["stdout"] and "chars truncated" in compacted["stdout"]
+    assert "..." in compacted["stderr"] and "chars truncated" in compacted["stderr"]
     assert compacted["result"].endswith("...")
+
+
+def test_compact_execution_payload_truncation_notice_includes_char_count() -> None:
+    # stdout is 300 chars raw; _STDOUT_LIMIT is 200, so notice should say 100 chars truncated
+    stdout = "x" * 300
+    payload: CompactExecPayloadInput = {
+        "status": "ok",
+        "duration_ms": 5,
+        "stdout": stdout,
+    }
+
+    compacted = compact_execution_payload(payload)
+
+    assert "stdout" in compacted
+    assert "[100 chars truncated]" in compacted["stdout"]
+
+
+def test_compact_execution_payload_no_truncation_notice_for_short_stdout() -> None:
+    stdout = "hello world"
+    payload: CompactExecPayloadInput = {
+        "status": "ok",
+        "duration_ms": 5,
+        "stdout": stdout,
+    }
+
+    compacted = compact_execution_payload(payload)
+
+    assert compacted.get("stdout") == "hello world"
 
 
 def test_compact_collection_preview_limits_nested_values() -> None:

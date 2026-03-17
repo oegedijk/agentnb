@@ -141,3 +141,103 @@ Intent:
 Good signs:
 - the CLI surface suggests the next useful step at the right moments
 - the agent can recover from wrong guesses without much friction
+
+## Scenario 11: Streaming And Wait Discipline
+
+Intent:
+- run a computation that produces incremental output using `--stream`
+- observe output arriving in real time rather than all at once after completion
+- run a second command immediately after a background run without waiting
+- observe the serialization error or busy signal
+- use `wait` or `status --wait-idle` to block until the session is usable
+- send the follow-up command after the wait succeeds
+
+Good signs:
+- `--stream` provides useful real-time feedback during long computations
+- the busy/serialization error is clear and actionable
+- `wait` and `status --wait-idle` reliably gate the next command
+
+## Scenario 12: Kernel Crash And Recovery
+
+Intent:
+- build meaningful state in a session
+- force the kernel to die (e.g., `import os; os._exit(1)` or a segfault-like crash)
+- try to use the session after the crash
+- use `status` or `doctor` to diagnose the dead kernel
+- restart with `start` or let auto-start recover on the next `exec`
+- verify that stale `.agentnb` state does not block the new session
+
+Good signs:
+- the agent gets a clear signal that the kernel is dead, not a hang or cryptic error
+- recovery to a usable session takes one or two commands, not a manual cleanup
+- `doctor` or `status` correctly identifies the problem
+
+## Scenario 13: Large Output And Context Pressure
+
+Intent:
+- create a large DataFrame or deeply nested structure in the session
+- print or return it without truncation and observe how much output is produced
+- compare the output size in default, `--agent`, `--result-only`, and `--json` modes
+- use `vars` and `inspect` instead of printing to check whether they provide bounded previews
+- decide which output mode keeps the agent's context window under control
+
+Good signs:
+- `vars` and `inspect` provide compact summaries regardless of value size
+- `--agent` and `--result-only` do not blow up on large values
+- there is a practical path to inspect large state without dumping it all to stdout
+
+## Scenario 14: JSON Parsing Loop
+
+Intent:
+- drive a multi-step workflow using `--agent` or `--json` as the output mode throughout
+- parse the JSON output after each command to extract the field needed for the next step
+- use `execution_id`, `session_id`, and `status` fields from the envelope to make decisions
+- hit at least one error and parse the error envelope to decide recovery
+- exercise `runs show` and `history` in JSON mode
+
+Good signs:
+- JSON output is always valid, single-object-per-command, and parseable without heuristics
+- the fields needed for the next step are present and in predictable positions
+- error envelopes contain enough information to decide between retry, interrupt, and reset
+
+## Scenario 15: Cross-Project Driving
+
+Intent:
+- use `--project /path/to/other` to drive a kernel for a different project from the current directory
+- verify that the session, history, and run records are scoped to the target project
+- check that `--project` works consistently across `exec`, `vars`, `history`, `runs`, and lifecycle commands
+- verify that the target project's `.venv` is used, not the current directory's
+
+Good signs:
+- `--project` works uniformly across all commands without surprises
+- interpreter selection follows the target project, not the caller's environment
+- there is no cross-contamination between the current directory and the target project
+
+## Scenario 16: Serialization Violation And Concurrent Access
+
+Intent:
+- start a long-running foreground execution with a generous timeout
+- while it is still running, try to send a second command to the same session
+- observe the error or queuing behavior
+- use `interrupt` to stop the first execution
+- verify the session is usable after the interrupt
+
+Good signs:
+- the second command gets a clear, actionable error (not a hang or silent failure)
+- `interrupt` reliably frees the session
+- the agent can resume normal work without restarting
+
+## Scenario 17: Interpreter Selection And Missing Dependencies
+
+Intent:
+- use `doctor` to check the current interpreter and ipykernel availability
+- try starting a session without ipykernel installed and observe the error message
+- use `start --auto-install` or `doctor --fix` to install ipykernel automatically
+- try importing a missing third-party module inside the session
+- install it from within the session using `!pip install` or subprocess and verify it works
+- use `reload` to pick up the new module without restarting
+
+Good signs:
+- the error message for missing ipykernel gives the exact install command
+- `--auto-install` and `doctor --fix` work without manual steps
+- installing a module inside the session and importing it does not require a restart

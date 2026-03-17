@@ -510,6 +510,7 @@ def test_execution_service_follow_run_delegates_observer_to_run_manager(project_
         timeout_s=3.0,
         poll_interval_s=0.5,
         observer=sink,
+        skip_history=False,
     )
 
 

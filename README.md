@@ -58,11 +58,15 @@ agentnb analysis.py
 agentnb "print(final_result)"
 ```
 
-`--session` and `--background` can go before or after the subcommand:
+`--session` and `--background` work in prefix position for inline code, file
+execution, and most subcommands. Putting them after the subcommand name always
+works:
 
 ```bash
-agentnb --session myenv "df.head()"
+agentnb --session myenv "df.head()"     # prefix works for inline exec
 agentnb --background "long_task()"
+agentnb history --session myenv
+agentnb runs list --session myenv
 ```
 
 The default execution timeout is 30 seconds. Use `--timeout` for long-running
@@ -160,7 +164,7 @@ agentnb runs cancel @active
 
 How to read them:
 - `runs show` returns the latest persisted snapshot for a run
-- `runs follow` streams new events from an active run
+- `runs follow` replays all output so far, then streams new events until done; use `--tail` to skip history and only stream new events
 - `runs wait` blocks until a run finishes and returns its final state
 - `runs cancel` requests cancellation for an active run
 
@@ -231,7 +235,7 @@ $ agentnb "print('hello')"
 hello
 
 $ agentnb wait
-Kernel is idle (pid 91098).
+Kernel is idle (session: default, pid 91098).
 ```
 
 Use `--json` when you want the full stable payload for scripting:
@@ -326,6 +330,9 @@ agentnb --no-suggestions "1 + 1"
 Top-level flags such as `--agent`, `--json`, `--quiet`, and `--no-suggestions`
 can appear before or after the subcommand.
 
+Use `--agent` or `--json` when consuming output programmatically to get a
+stable, parseable single JSON object on stdout:
+
 ## Recovery And Lifecycle
 
 Use the lifecycle commands based on the failure mode:
@@ -376,7 +383,7 @@ Use `--session` when you want more than one live kernel for the same project:
 ```bash
 agentnb --session analysis "1 + 1"
 agentnb start --session analysis
-agentnb sessions list
+agentnb sessions list        # bare `agentnb sessions` shows help, not the list
 agentnb sessions delete analysis
 ```
 

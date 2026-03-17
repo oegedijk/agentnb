@@ -11,6 +11,9 @@ class AdviceContext:
     response_status: str
     data: Mapping[str, object]
     error_code: str | None = None
+    error_name: str | None = None
+    error_value: str | None = None
+    session_id: str | None = None
 
 
 class AdvicePolicy:
@@ -30,6 +33,13 @@ class AdvicePolicy:
             return [
                 "Run `agentnb runs list --json` to inspect matching run ids.",
                 "Retry with `agentnb runs show EXECUTION_ID --json` to target one explicitly.",
+            ]
+        if context.error_code == "SESSION_BUSY":
+            return ["Run `agentnb wait --json` to block until the session is idle, then retry."]
+        if context.error_code in {"NO_KERNEL", "BACKEND_ERROR"}:
+            return [
+                "Run `agentnb start --json` to start the kernel.",
+                "Run `agentnb doctor --json` if startup has been failing.",
             ]
         if command_name == "start":
             return []
@@ -71,6 +81,20 @@ class AdvicePolicy:
                 return []
             if context.error_code == "INVALID_INPUT":
                 return []
+            if context.error_name == "ModuleNotFoundError":
+                module = _extract_module_name(context.error_value)
+                if module:
+                    return [
+                        f"Install the missing module: `pip install {module}` or `uv add {module}`.",
+                        "Then retry the execution.",
+                    ]
+            if context.error_name == "NameError" and context.session_id:
+                session = context.session_id
+                return [
+                    f"Run `agentnb vars --session {session} --json` to inspect the namespace.",
+                    "Run `agentnb sessions list --json` to see all live sessions.",
+                    "Run `agentnb history @last-error --json` to review the latest failure.",
+                ]
             return [
                 "Run `agentnb history @last-error --json` to review the latest failure.",
                 "Run `agentnb interrupt --json` if execution may still be stuck.",
@@ -102,6 +126,8 @@ class AdvicePolicy:
             return []
         if command_name == "doctor":
             if data.get("ready"):
+                if data.get("session_exists"):
+                    return ["Kernel is already running."]
                 return ["Run `agentnb start --json` to start the kernel."]
             return [
                 "Run `agentnb doctor --fix --json` to attempt automatic fixes.",
@@ -194,6 +220,16 @@ def _execution_id(data: Mapping[str, object] | None) -> str:
 
 def _run_command(action: str, execution_id: str) -> str:
     return f"agentnb runs {action} {execution_id} --json"
+
+
+def _extract_module_name(error_value: str | None) -> str | None:
+    if not error_value:
+        return None
+    prefix = "No module named '"
+    if error_value.startswith(prefix) and error_value.endswith("'"):
+        name = error_value[len(prefix) : -1]
+        return name.split(".")[0]
+    return None
 
 
 def _exec_output_is_empty(data: Mapping[str, object]) -> bool:

@@ -181,7 +181,7 @@ def test_render_human_status_busy_and_interrupt_stop() -> None:
             status_response,
             options=RenderOptions(),
         )
-        == "Kernel is running (pid 321, busy)."
+        == "Kernel is running (session: default, pid 321, busy)."
     )
     assert render_human(stop_response, options=RenderOptions()) == "Kernel stopped."
     assert render_human(interrupt_response, options=RenderOptions()) == "Interrupt signal sent."
@@ -201,8 +201,14 @@ def test_render_human_wait_variants() -> None:
         data={"alive": True, "pid": 654, "busy": False, "waited": True, "waited_for": "ready"},
     )
 
-    assert render_human(idle_response, options=RenderOptions()) == "Kernel is idle (pid 321)."
-    assert render_human(ready_response, options=RenderOptions()) == "Kernel is ready (pid 654)."
+    assert (
+        render_human(idle_response, options=RenderOptions())
+        == "Kernel is idle (session: default, pid 321)."
+    )
+    assert (
+        render_human(ready_response, options=RenderOptions())
+        == "Kernel is ready (session: default, pid 654)."
+    )
 
 
 def test_render_human_exec_renders_stdout_stderr_and_result() -> None:
@@ -231,14 +237,49 @@ def test_render_human_exec_selected_output_returns_selected_text_only() -> None:
 
 
 def test_render_human_exec_without_output_reports_completion() -> None:
-    response = success_response(
+    exec_response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={},
+    )
+    reset_response = success_response(
         command="reset",
         project="/tmp/project",
         session_id="default",
         data={},
     )
 
-    assert render_human(response, options=RenderOptions()) == "Execution completed."
+    assert render_human(exec_response, options=RenderOptions()) == "Execution completed."
+    assert render_human(reset_response, options=RenderOptions()) == "Namespace cleared."
+
+
+def test_render_human_status_includes_session_name() -> None:
+    response = success_response(
+        command="status",
+        project="/tmp/project",
+        session_id="analysis",
+        data={"alive": True, "pid": 999, "busy": False},
+    )
+
+    body = render_human(response, options=RenderOptions())
+
+    assert "session: analysis" in body
+    assert "pid 999" in body
+
+
+def test_render_human_wait_includes_session_name() -> None:
+    response = success_response(
+        command="wait",
+        project="/tmp/project",
+        session_id="analysis",
+        data={"alive": True, "pid": 999, "waited_for": "idle"},
+    )
+
+    body = render_human(response, options=RenderOptions())
+
+    assert "session: analysis" in body
+    assert "pid 999" in body
 
 
 def test_render_human_vars_and_empty_history() -> None:
@@ -454,7 +495,15 @@ def test_render_human_runs_list_and_wait_error_shape() -> None:
         ),
         (
             {"execution_id": "run-1", "cancel_requested": False, "status": "ok"},
-            "Run run-1 is already ok.",
+            "Run run-1 already finished.",
+        ),
+        (
+            {"execution_id": "run-1", "cancel_requested": False, "status": "error"},
+            "Run run-1 already failed.",
+        ),
+        (
+            {"execution_id": "run-1", "cancel_requested": False, "status": "cancelled"},
+            "Run run-1 already cancelled.",
         ),
     ],
 )
@@ -542,3 +591,27 @@ def test_render_response_agent_uses_compact_projection() -> None:
         "session_id": "default",
         "data": {"alive": True, "pid": 123, "busy": False},
     }
+
+
+def test_render_human_exec_background_dispatch_message() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={"background": True, "execution_id": "run-42"},
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "Background execution started (run-42)."
+    )
+
+
+def test_render_human_session_switch_note() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="analysis",
+        data={"stdout": "2\n", "switched_session": "analysis"},
+    )
+
+    assert render_human(response, options=RenderOptions()) == "2\n(now targeting session: analysis)"

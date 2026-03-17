@@ -69,6 +69,8 @@ HELP_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 class AgentGroup(click.Group):
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if args and args[0] == "help":
+            args = ["--help", *args[1:]]
         intent = invocations.resolve_invocation_intent(
             args,
             known_commands=self.list_commands(ctx),
@@ -136,9 +138,14 @@ def main(
       agentnb analysis.py
       agentnb --background "long_task()"
       agentnb --session myenv "df.head()"
+      agentnb --timeout 120 "train_model()"
+      agentnb --stream "train_model(epochs=10)"
+
+    \b
+    Multiline code (braces, quotes, special chars):
       agentnb <<'PY'
-        import pandas as pd
-        df = pd.read_csv("tips.csv")
+      import pandas as pd
+      df = pd.read_csv("tips.csv")
       PY
 
     \b
@@ -149,12 +156,19 @@ def main(
       agentnb wait                  agentnb interrupt
       agentnb reset                 agentnb reload
 
+    \b
+    Output control:
+      agentnb --result-only "1+1"   agentnb --stdout-only "print('hi')"
+      agentnb --agent "1+1"         agentnb --json "1+1"
+
     The session auto-starts for normal execution. Drive one session serially;
     use `agentnb wait` between commands when needed.
 
-    `--session NAME` and `--background` can go before or after the subcommand.
-    When code contains braces or quotes, prefer heredoc or --file over inline
-    strings.
+    `--session NAME` and `--background` work in prefix position for inline
+    exec and for most subcommands. Putting them after the subcommand name
+    always works. When code contains braces or quotes, prefer heredoc or
+    --file over inline strings. Do not use `\\n` to embed newlines in an
+    inline string; use heredoc instead.
 
     `--agent` returns compact JSON. `--json` returns the full stable envelope.
     `--quiet` and `--no-suggestions` reduce noise. `history` and `runs list`
@@ -248,7 +262,7 @@ def _emit(response: CommandResponse, *, as_json: bool) -> None:
         response = replace(response, suggestions=_strip_json_suffix(response.suggestions))
     rendered = render_response(response, options=options)
     if rendered:
-        click.echo(rendered, err=(response.status == "error" and not options.as_json))
+        click.echo(rendered)
     if response.status == "error":
         raise click.exceptions.Exit(1)
 
@@ -462,6 +476,8 @@ def exec_cmd(
                     response_status="error",
                     data={},
                     error_code=exc.code,
+                    error_name=exc.ename,
+                    error_value=exc.evalue,
                 )
             ),
         )
@@ -769,9 +785,15 @@ def doctor(
     _emit(application.doctor(request), as_json=as_json)
 
 
-@main.group("sessions")
-def sessions_group() -> None:
-    """Inspect and manage named sessions for the current project."""
+@main.group("sessions", invoke_without_command=True)
+@click.pass_context
+def sessions_group(ctx: click.Context) -> None:
+    """Inspect and manage named sessions for the current project.
+
+    Bare `agentnb sessions` lists all live sessions (same as `sessions list`).
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(sessions_list)
 
 
 @sessions_group.command("list")
@@ -820,6 +842,9 @@ def runs_list(
 ) -> None:
     """List persisted exec/reset runs for the current project."""
 
+    options = _current_render_options(local_as_json=as_json)
+    if last is None and not options.as_json:
+        last = 20
     request = RunsListRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
         session_id=session_id,
@@ -875,18 +900,20 @@ def runs_wait(
 @runs_group.command("follow")
 @click.argument("run_reference", required=False, callback=_run_reference_callback)
 @click.option("--timeout", default=30.0, show_default=True, type=float)
+@click.option("--tail", is_flag=True, help="Skip historical events and only stream new ones.")
 @project_option
 @json_option
 def runs_follow(
     run_reference: RunReference | None,
     timeout: float,
+    tail: bool,
     project: Path | None,
     as_json: bool,
 ) -> None:
-    """Follow one persisted run and stream newly recorded events until it finishes.
+    """Replay and stream events for one persisted run until it finishes.
 
     Omit RUN_REFERENCE to follow the active relevant run when there is a safe
-    default.
+    default. Use --tail to skip historical events and only stream new ones.
     """
     project_root = resolve_project_root(cwd=Path.cwd(), override=project)
     options = _current_render_options(local_as_json=as_json)
@@ -895,8 +922,20 @@ def runs_follow(
         project_root=project_root,
         run_reference=run_reference,
         timeout_s=timeout,
+        tail=tail,
     )
     response = application.runs_follow(request, event_sink=stream)
+    if response.error is not None and response.error.code == "TIMEOUT":
+        if options.as_json:
+            _emit_json_stream_frame(
+                {
+                    "type": "final",
+                    "response": projector.project(response, profile=options.profile.value),
+                }
+            )
+        else:
+            click.echo("Following stopped (timeout).")
+        raise click.exceptions.Exit(2)
     _emit_stream_completion(response, as_json=as_json, stream=stream)
 
 

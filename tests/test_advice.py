@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentnb.advice import AdviceContext, AdvicePolicy
+from agentnb.advice import AdviceContext, AdvicePolicy, _extract_module_name
 
 
 @pytest.mark.parametrize(
@@ -108,3 +108,144 @@ def test_advice_policy_interpolates_execution_id_for_background_exec() -> None:
         "Run `agentnb runs show run-7 --json` to inspect the current run record.",
         "Run `agentnb runs cancel run-7 --json` to stop the background run.",
     ]
+
+
+def test_advice_policy_module_not_found_error_suggests_install() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={},
+            error_code="EXECUTION_ERROR",
+            error_name="ModuleNotFoundError",
+            error_value="No module named 'pandas'",
+        )
+    )
+
+    assert suggestions == [
+        "Install the missing module: `pip install pandas` or `uv add pandas`.",
+        "Then retry the execution.",
+    ]
+
+
+def test_advice_policy_module_not_found_extracts_top_level_package() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={},
+            error_code="EXECUTION_ERROR",
+            error_name="ModuleNotFoundError",
+            error_value="No module named 'sklearn.ensemble'",
+        )
+    )
+
+    assert suggestions == [
+        "Install the missing module: `pip install sklearn` or `uv add sklearn`.",
+        "Then retry the execution.",
+    ]
+
+
+def test_advice_policy_name_error_with_session_suggests_vars() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={},
+            error_code="EXECUTION_ERROR",
+            error_name="NameError",
+            error_value="name 'df' is not defined",
+            session_id="analysis",
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb vars --session analysis --json` to inspect the namespace.",
+        "Run `agentnb sessions list --json` to see all live sessions.",
+        "Run `agentnb history @last-error --json` to review the latest failure.",
+    ]
+
+
+def test_advice_policy_doctor_ready_with_session_exists() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="doctor",
+            response_status="ok",
+            data={"ready": True, "session_exists": True},
+        )
+    )
+
+    assert suggestions == ["Kernel is already running."]
+
+
+def test_advice_policy_doctor_ready_without_session() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="doctor",
+            response_status="ok",
+            data={"ready": True},
+        )
+    )
+
+    assert suggestions == ["Run `agentnb start --json` to start the kernel."]
+
+
+def test_advice_policy_session_busy_suggests_wait() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={},
+            error_code="SESSION_BUSY",
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb wait --json` to block until the session is idle, then retry."
+    ]
+
+
+@pytest.mark.parametrize("error_code", ["NO_KERNEL", "BACKEND_ERROR"])
+def test_advice_policy_dead_kernel_suggests_start_and_doctor(error_code: str) -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={},
+            error_code=error_code,
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb start --json` to start the kernel.",
+        "Run `agentnb doctor --json` if startup has been failing.",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error_value", "expected"),
+    [
+        ("No module named 'pandas'", "pandas"),
+        ("No module named 'sklearn.ensemble'", "sklearn"),
+        ("No module named 'foo.bar.baz'", "foo"),
+        (None, None),
+        ("something else", None),
+        ("", None),
+    ],
+)
+def test_extract_module_name(error_value: str | None, expected: str | None) -> None:
+    assert _extract_module_name(error_value) == expected

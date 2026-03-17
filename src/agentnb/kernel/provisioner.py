@@ -115,7 +115,7 @@ class KernelProvisioner:
         if selected.ipykernel_available:
             return False
 
-        install_cmd = [selected.executable, "-m", "pip", "install", IPYKERNEL_REQUIREMENT]
+        install_cmd = self._ipykernel_install_cmd(selected.executable)
         install_cmd_text = " ".join(install_cmd)
 
         if not auto_install:
@@ -131,7 +131,11 @@ class KernelProvisioner:
             timeout=180,
         )
         if result.returncode != 0:
-            detail = _tail_text(result.stderr or result.stdout)
+            stderr_text = result.stderr or ""
+            if "No module named pip" in stderr_text:
+                uv_cmd = self._uv_install_cmd_text()
+                raise ProvisioningError(f"pip is not available in this environment. Try: {uv_cmd}")
+            detail = _tail_text(stderr_text or result.stdout)
             raise ProvisioningError(
                 "Failed to auto-install ipykernel. "
                 f"Try running manually: {install_cmd_text}. "
@@ -145,6 +149,19 @@ class KernelProvisioner:
             )
 
         return True
+
+    def _ipykernel_install_cmd(self, executable: str) -> list[str]:
+        if _python_supports_module(Path(executable), "pip"):
+            return [executable, "-m", "pip", "install", IPYKERNEL_REQUIREMENT]
+        return list(self._uv_install_cmd())
+
+    def _uv_install_cmd(self) -> tuple[str, ...]:
+        if (self.project_root / "uv.lock").exists():
+            return ("uv", "add", "ipykernel")
+        return ("uv", "pip", "install", IPYKERNEL_REQUIREMENT)
+
+    def _uv_install_cmd_text(self) -> str:
+        return " ".join(self._uv_install_cmd())
 
     def doctor(self, preferred_python: Path | None = None, auto_fix: bool = False) -> DoctorReport:
         checks: list[DoctorCheck] = []
@@ -184,7 +201,7 @@ class KernelProvisioner:
                 )
             )
         else:
-            install_cmd = f"{selected.executable} -m pip install {IPYKERNEL_REQUIREMENT}"
+            install_cmd = " ".join(self._ipykernel_install_cmd(selected.executable))
             if auto_fix:
                 try:
                     self.ensure_ipykernel(selected, auto_install=True)

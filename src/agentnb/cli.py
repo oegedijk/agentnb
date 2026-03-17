@@ -164,9 +164,11 @@ def main(
     The session auto-starts for normal execution. Drive one session serially;
     use `agentnb wait` between commands when needed.
 
-    `--session NAME` and `--background` go after the subcommand or code
-    argument. When code contains braces or quotes, prefer heredoc or --file
-    over inline strings.
+    `--session NAME` and `--background` work before the code argument for
+    inline exec. For other subcommands (`history`, `runs`, `status`, etc.)
+    they must go after the subcommand name. When code contains braces or
+    quotes, prefer heredoc or --file over inline strings. Do not use `\\n`
+    to embed newlines in an inline string; use heredoc instead.
 
     `--agent` returns compact JSON. `--json` returns the full stable envelope.
     `--quiet` and `--no-suggestions` reduce noise. `history` and `runs list`
@@ -783,9 +785,15 @@ def doctor(
     _emit(application.doctor(request), as_json=as_json)
 
 
-@main.group("sessions")
-def sessions_group() -> None:
-    """Inspect and manage named sessions for the current project."""
+@main.group("sessions", invoke_without_command=True)
+@click.pass_context
+def sessions_group(ctx: click.Context) -> None:
+    """Inspect and manage named sessions for the current project.
+
+    Bare `agentnb sessions` lists all live sessions (same as `sessions list`).
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(sessions_list)
 
 
 @sessions_group.command("list")

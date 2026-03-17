@@ -48,11 +48,15 @@ PY
 agentnb analysis.py
 ```
 
-`--session` and `--background` can go before or after the subcommand:
+`--session` and `--background` work in prefix position for inline code and file
+execution. For lifecycle subcommands (`status`, `history`, `runs`, etc.), put
+them after the subcommand name:
 
 ```bash
-agentnb --session myenv "df.head()"
+agentnb --session myenv "df.head()"     # prefix works for inline exec
 agentnb --background "long_task()"
+agentnb history --session myenv         # must go after for non-exec subcommands
+agentnb runs list --session myenv
 ```
 
 The default execution timeout is 30 seconds. Use `--timeout` for long-running
@@ -123,7 +127,7 @@ agentnb runs cancel @active
 ```
 
 - `runs show` reads the latest stored snapshot
-- `runs follow` streams live progress
+- `runs follow` replays all output so far then streams new events; use `--tail` to skip history
 - `runs wait` blocks until the run finishes
 - `runs cancel` requests cancellation for an active run
 
@@ -159,7 +163,10 @@ Simple rule:
 
 ## Output
 
-Default output is plain terminal text.
+Default output is plain terminal text. Errors go to stderr, other output to
+stdout. When a shell captures both channels together the error message appears
+twice. Use `--agent` or `--json` to get a single JSON object on stdout — this
+is the preferred output mode for agent-driven workflows.
 
 Use `--json` when you want the full stable payload for scripting. Use `--agent` when you want a smaller JSON payload for agent/model consumption.
 
@@ -167,6 +174,9 @@ Use `--json` when you want the full stable payload for scripting. Use `--agent` 
 agentnb --json "1 + 1"
 agentnb --agent "1 + 1"
 ```
+
+Set `AGENTNB_FORMAT=agent` to make `--agent` mode the default for all commands
+in a shell session.
 
 Use `--quiet` to suppress non-essential output, or `--no-suggestions` to hide
 next-step suggestions:
@@ -217,7 +227,7 @@ Use `--session NAME` when you want more than one live kernel for the same projec
 ```bash
 agentnb --session analysis "1 + 1"
 agentnb start --session analysis
-agentnb sessions list
+agentnb sessions list        # bare `agentnb sessions` shows help, not the list
 agentnb sessions delete analysis
 ```
 
@@ -226,10 +236,11 @@ When only one live session exists, commands can infer it. Once multiple live ses
 ## Rules
 
 - Prefer implicit top-level exec for the first command in a workflow.
-- Prefer short inline snippets for one-liners and stdin or files for multiline work.
+- Prefer short inline snippets for one-liners and stdin or files for multiline work. Do not use `\n` to embed newlines in an inline code string — use heredoc or `--file` instead.
 - Prefer a final expression over `print(...)` when you want a compact return value.
 - Use `reload` after editing importable project modules instead of assuming live definitions updated automatically.
 - Use `runs` for exact execution lookup and background control.
-- Use `wait` for session readiness.
-- Use `--agent` or `--json` only when machine-readable output is useful.
+- Use `wait` for session readiness, not `status --wait-idle` (same semantics, shorter).
+- Use `--agent` or `--json` when consuming output programmatically. In default mode errors are split across stderr and stdout, which causes duplication in combined capture.
+- Use `vars` and `inspect` to check live state rather than `print()` — they produce bounded output regardless of object size.
 - Treat the kernel as project-scoped state. Stop it when the task is complete or stale state could confuse later work.

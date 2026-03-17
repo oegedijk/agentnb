@@ -132,6 +132,7 @@ class ExecutionService:
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
         event_sink: ExecutionSink | None = None,
+        skip_history: bool = False,
     ) -> RunSnapshot:
         return self._run_manager.follow_run(
             project_root=project_root,
@@ -139,6 +140,7 @@ class ExecutionService:
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,
             observer=event_sink,
+            skip_history=skip_history,
         )
 
     def cancel_run(

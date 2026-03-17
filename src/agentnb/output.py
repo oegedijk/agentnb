@@ -283,9 +283,15 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 else:
                     body = f"Cancel requested for run {data.get('execution_id')}."
             else:
-                body = f"Run {data.get('execution_id')} is already {data.get('status')}."
+                _terminal_labels = {"ok": "finished", "error": "failed", "cancelled": "cancelled"}
+                label = _terminal_labels.get(str(data.get("status")), str(data.get("status")))
+                body = f"Run {data.get('execution_id')} already {label}."
         else:
             body = json.dumps(data, ensure_ascii=True, indent=2)
+
+    switched = response.data.get("switched_session")
+    if switched:
+        body = f"{body}\n(now targeting session: {switched})"
 
     suggestions = response.suggestions if options.show_suggestions else []
     return _append_suggestions(body, suggestions)
@@ -310,6 +316,9 @@ def _render_exec_like(data: ExecPayload) -> str:
     if result is not None:
         lines.append(str(result))
     if not lines:
+        if data.get("background"):
+            execution_id = data.get("execution_id", "")
+            return f"Background execution started ({execution_id})."
         lines.append("Execution completed.")
     return "\n".join(lines)
 

@@ -169,6 +169,7 @@ class RunsWaitRequest(RunLookupRequest):
 @dataclass(slots=True, frozen=True, kw_only=True)
 class RunsFollowRequest(RunLookupRequest):
     timeout_s: float = 30.0
+    tail: bool = False
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -407,6 +408,7 @@ class AgentNBApp:
                 timeout_s=request.timeout_s,
                 event_sink=event_sink,
                 default_behavior="active",
+                skip_history=request.tail,
             ),
             response_session_id_resolver=_run_response_session_id,
         )
@@ -635,6 +637,7 @@ class AgentNBApp:
         timeout_s: float | None,
         event_sink: ExecutionSink | None,
         default_behavior: RunDefaultBehavior,
+        skip_history: bool = False,
     ) -> RunLookupPayload:
         execution_id = self.run_selectors.resolve_execution_id(
             project_root=project_root,
@@ -648,6 +651,7 @@ class AgentNBApp:
                 execution_id=execution_id,
                 timeout_s=30.0 if timeout_s is None else timeout_s,
                 event_sink=event_sink,
+                skip_history=skip_history,
             )
         elif timeout_s is not None:
             run = self.executions.wait_for_run(
@@ -735,12 +739,19 @@ class AgentNBApp:
                 require_live_session=require_live_session,
             )
             response_session_id = resolved_session_id
+            switched_session: str | None = None
             if requested_session_id is not None and command_name != "sessions-delete":
+                previous = self.runtime.current_session_id(project_root=project_root)
                 self.runtime.remember_current_session(
                     project_root=project_root,
                     session_id=resolved_session_id,
                 )
+                if previous != resolved_session_id:
+                    switched_session = resolved_session_id
             data = handler(resolved_session_id)
+            if switched_session is not None:
+                data = dict(data)
+                data["switched_session"] = switched_session
             if response_session_id_resolver is not None:
                 response_session_id = response_session_id_resolver(response_session_id, data)
             return success_response(
@@ -753,6 +764,7 @@ class AgentNBApp:
                         command_name=command_name,
                         response_status="ok",
                         data=data,
+                        session_id=resolved_session_id,
                     )
                 ),
             )
@@ -773,6 +785,9 @@ class AgentNBApp:
                         response_status="error",
                         data=exc.data,
                         error_code=exc.code,
+                        error_name=exc.ename,
+                        error_value=exc.evalue,
+                        session_id=response_session_id,
                     )
                 ),
             )
@@ -791,6 +806,9 @@ class AgentNBApp:
                         response_status="error",
                         data={},
                         error_code="INTERNAL_ERROR",
+                        error_name=type(exc).__name__,
+                        error_value=str(exc),
+                        session_id=response_session_id,
                     )
                 ),
             )

@@ -454,7 +454,15 @@ def test_render_human_runs_list_and_wait_error_shape() -> None:
         ),
         (
             {"execution_id": "run-1", "cancel_requested": False, "status": "ok"},
-            "Run run-1 is already ok.",
+            "Run run-1 already finished.",
+        ),
+        (
+            {"execution_id": "run-1", "cancel_requested": False, "status": "error"},
+            "Run run-1 already failed.",
+        ),
+        (
+            {"execution_id": "run-1", "cancel_requested": False, "status": "cancelled"},
+            "Run run-1 already cancelled.",
         ),
     ],
 )
@@ -542,3 +550,27 @@ def test_render_response_agent_uses_compact_projection() -> None:
         "session_id": "default",
         "data": {"alive": True, "pid": 123, "busy": False},
     }
+
+
+def test_render_human_exec_background_dispatch_message() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={"background": True, "execution_id": "run-42"},
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "Background execution started (run-42)."
+    )
+
+
+def test_render_human_session_switch_note() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="analysis",
+        data={"stdout": "2\n", "switched_session": "analysis"},
+    )
+
+    assert render_human(response, options=RenderOptions()) == "2\n(now targeting session: analysis)"

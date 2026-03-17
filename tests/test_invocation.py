@@ -238,3 +238,19 @@ def test_resolve_exec_source_rejects_missing_inputs(
 
     with pytest.raises(InvalidInputError, match=message):
         resolver.resolve_exec_source(code=None, filepath=filepath, stdin=stdin)
+
+
+def test_resolve_invocation_intent_session_prefix_position() -> None:
+    resolver = InvocationResolver()
+
+    intent = resolver.resolve_invocation_intent(
+        ["--session", "analysis", "history"],
+        known_commands=KNOWN_COMMANDS,
+        cwd=Path("/tmp/project"),
+        stdin=FakeStdin("", is_tty=True),
+    )
+
+    assert intent.kind == "command"
+    command_intent = cast(CommandIntent, intent)
+    assert command_intent.command_name == "history"
+    assert command_intent.argv == ("history", "--session", "analysis")

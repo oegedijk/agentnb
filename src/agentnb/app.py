@@ -12,6 +12,7 @@ from .compact import (
     compact_inspect_payload,
     compact_run_entry,
     compact_traceback,
+    full_history_entry,
 )
 from .contracts import (
     CommandResponse,
@@ -117,6 +118,7 @@ class HistoryRequest(SessionRequest):
     latest: bool = False
     last: int | None = None
     include_internal: bool = False
+    full: bool = False
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -471,7 +473,8 @@ class AgentNBApp:
             )
 
         payload = compact_execution_payload(
-            cast(CompactExecPayloadInput, managed.record.to_execution_payload())
+            cast(CompactExecPayloadInput, managed.record.to_execution_payload()),
+            no_truncate=invocation.no_truncate,
         )
         if invocation.is_background:
             payload["background"] = True
@@ -579,7 +582,8 @@ class AgentNBApp:
             ),
         )
         entries = selection.entries
-        entries = [compact_history_entry(entry) for entry in entries]
+        formatter = full_history_entry if request.full else compact_history_entry
+        entries = [formatter(entry) for entry in entries]
         return {"entries": entries}
 
     def _interrupt_payload(self, *, request: InterruptRequest, session_id: str) -> InterruptPayload:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json as _json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
@@ -64,6 +65,11 @@ class ResponseProjector:
                 value = data.get(key)
                 if isinstance(value, str) and value:
                     compacted[key] = value
+            result = compacted.get("result")
+            if isinstance(result, str):
+                parsed = _try_parse_result_json(result)
+                if parsed is not _SENTINEL:
+                    compacted["result_json"] = parsed
             return compacted
         if command_name in {"history", "runs-list", "sessions-list"}:
             return dict(data)
@@ -114,6 +120,28 @@ class ResponseProjector:
         if traceback:
             payload["traceback"] = traceback
         return payload
+
+
+_SENTINEL = object()
+
+
+def _try_parse_result_json(result: str) -> Any:
+    """Attempt to extract a JSON value from a Python repr result string.
+
+    Handles: plain JSON literals ("42", "true", "[1,2]", '{"a":1}'),
+    and Python repr of strings that contain JSON ("'{...}'" or '"[...]"').
+    """
+    try:
+        return _json.loads(result)
+    except (ValueError, _json.JSONDecodeError):
+        pass
+    if len(result) >= 2 and result[0] in ("'", '"') and result[-1] == result[0]:
+        inner = result[1:-1]
+        try:
+            return _json.loads(inner)
+        except (ValueError, _json.JSONDecodeError):
+            pass
+    return _SENTINEL
 
 
 def _subset(data: Mapping[str, object], *keys: str) -> dict[str, Any]:

@@ -26,6 +26,7 @@ _TRACEBACK_HEAD_LINES = 2
 _TRACEBACK_TAIL_LINES = 3
 _MEMBER_LIMIT = 20
 _HEAD_ROW_LIMIT = 3
+_HEAD_COLUMN_LIMIT = 10
 _PREVIEW_LIST_LIMIT = 3
 _PREVIEW_DICT_LIMIT = 5
 _RESULT_LIMIT = 240
@@ -46,7 +47,11 @@ def compact_traceback(lines: list[str] | None) -> list[str] | None:
     ]
 
 
-def compact_execution_payload(payload: CompactExecPayloadInput) -> ExecPayload:
+def compact_execution_payload(
+    payload: CompactExecPayloadInput,
+    *,
+    no_truncate: bool = False,
+) -> ExecPayload:
     compacted: ExecPayload = {"duration_ms": payload.get("duration_ms", 0)}
 
     status = payload.get("status")
@@ -63,25 +68,34 @@ def compact_execution_payload(payload: CompactExecPayloadInput) -> ExecPayload:
 
     stdout = payload.get("stdout")
     if isinstance(stdout, str) and stdout:
-        summary = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
-        if summary is not None:
-            if len(stdout) > _STDOUT_LIMIT:
-                summary = summary + f" [{len(stdout) - _STDOUT_LIMIT} chars truncated]"
-            compacted["stdout"] = summary
+        if no_truncate:
+            compacted["stdout"] = stdout
+        else:
+            summary = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
+            if summary is not None:
+                if len(stdout) > _STDOUT_LIMIT:
+                    summary = summary + f" [{len(stdout) - _STDOUT_LIMIT} chars truncated]"
+                compacted["stdout"] = summary
 
     stderr = payload.get("stderr")
     if isinstance(stderr, str) and stderr:
-        summary = summarize_history_text(stderr, limit=_STDOUT_LIMIT)
-        if summary is not None:
-            if len(stderr) > _STDOUT_LIMIT:
-                summary = summary + f" [{len(stderr) - _STDOUT_LIMIT} chars truncated]"
-            compacted["stderr"] = summary
+        if no_truncate:
+            compacted["stderr"] = stderr
+        else:
+            summary = summarize_history_text(stderr, limit=_STDOUT_LIMIT)
+            if summary is not None:
+                if len(stderr) > _STDOUT_LIMIT:
+                    summary = summary + f" [{len(stderr) - _STDOUT_LIMIT} chars truncated]"
+                compacted["stderr"] = summary
 
     result = payload.get("result")
     if isinstance(result, str) and result:
-        summary = summarize_history_text(result, limit=_RESULT_LIMIT)
-        if summary is not None:
-            compacted["result"] = summary
+        if no_truncate:
+            compacted["result"] = result
+        else:
+            summary = summarize_history_text(result, limit=_RESULT_LIMIT)
+            if summary is not None:
+                compacted["result"] = summary
 
     ename = payload.get("ename")
     if isinstance(ename, str):
@@ -140,7 +154,13 @@ def compact_dataframe_preview(preview: DataframePreview) -> DataframePreview:
 
     head = preview.get("head")
     if isinstance(head, list) and head:
-        compacted["head"] = head[:_HEAD_ROW_LIMIT]
+        truncated_rows = head[:_HEAD_ROW_LIMIT]
+        compacted["head"] = [
+            {k: v for i, (k, v) in enumerate(row.items()) if i < _HEAD_COLUMN_LIMIT}
+            if isinstance(row, dict) and len(row) > _HEAD_COLUMN_LIMIT
+            else row
+            for row in truncated_rows
+        ]
 
     return compacted
 
@@ -178,6 +198,25 @@ def compact_collection_preview(
     if isinstance(sample, list):
         compacted["sample"] = cast(list[JSONValue], _compact_jsonish(sample))
     return compacted
+
+
+def full_history_entry(entry: JournalEntry) -> HistoryEntryPayload:
+    payload: HistoryEntryPayload = {
+        "kind": entry.kind,
+        "ts": entry.ts,
+        "status": entry.status,
+        "duration_ms": entry.duration_ms,
+        "command_type": entry.command_type,
+        "label": entry.label,
+        "user_visible": entry.user_visible,
+    }
+    if entry.error_type is not None:
+        payload["error_type"] = entry.error_type
+    if entry.execution_id is not None:
+        payload["execution_id"] = entry.execution_id
+    if entry.code is not None:
+        payload["code"] = entry.code
+    return payload
 
 
 def compact_history_entry(entry: JournalEntry) -> HistoryEntryPayload:
@@ -308,8 +347,8 @@ def _compact_jsonish(value: Any, *, depth: int = 0) -> Any:
         return summarize_history_text(value, limit=80) or ""
 
     if depth >= 2:
-        text = summarize_history_text(repr(value), limit=80)
-        return text if text is not None else repr(value)
+        text = str(value)
+        return summarize_history_text(text, limit=80) or text[:80]
 
     if isinstance(value, list):
         return [_compact_jsonish(item, depth=depth + 1) for item in value[:_PREVIEW_LIST_LIMIT]]
@@ -325,5 +364,5 @@ def _compact_jsonish(value: Any, *, depth: int = 0) -> Any:
             compacted[str(key)] = _compact_jsonish(item, depth=depth + 1)
         return compacted
 
-    text = summarize_history_text(repr(value), limit=80)
-    return text if text is not None else repr(value)
+    text = str(value)
+    return summarize_history_text(text, limit=80) or text[:80]

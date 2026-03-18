@@ -229,6 +229,12 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 hint = check.get("fix_hint")
                 if hint:
                     lines.append(f"  fix: {hint}")
+            kernel_alive = doctor_data.get("kernel_alive")
+            if kernel_alive is True:
+                kernel_pid = doctor_data.get("kernel_pid")
+                lines.append(f"[OK] kernel: Kernel is running (pid {kernel_pid}).")
+            elif doctor_data.get("session_exists"):
+                lines.append("[WARN] kernel: Session exists but kernel is not running.")
             body = "\n".join(lines)
         elif command == "sessions-list":
             sessions = cast(SessionsListPayload, data).get("sessions", [])
@@ -245,8 +251,13 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     marker = f" ({', '.join(markers)})" if markers else ""
                     python = session.get("python")
                     python_text = f" using {python}" if python else ""
+                    activity = _staleness_hint(session.get("last_activity"))
+                    activity_text = f", last activity {activity}" if activity else ""
                     session_label = session.get("session_id")
-                    lines.append(f"{session_label}{marker}: pid {session.get('pid')}{python_text}")
+                    lines.append(
+                        f"{session_label}{marker}: pid {session.get('pid')}"
+                        f"{python_text}{activity_text}"
+                    )
                 body = "\n".join(lines)
         elif command == "sessions-delete":
             stopped = " and stopped its kernel" if data.get("stopped_running_kernel") else ""
@@ -295,7 +306,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             body = json.dumps(data, ensure_ascii=True, indent=2)
 
     switched = response.data.get("switched_session")
-    if switched:
+    if switched and not response.data.get("selected_output"):
         body = f"{body}\n(now targeting session: {switched})"
 
     suggestions = response.suggestions if options.show_suggestions else []
@@ -338,10 +349,21 @@ def _render_var_entry(item: VarDisplayEntry) -> str:
 
 
 def _render_error(response: CommandResponse) -> str:
-    if response.error is None:
-        return "Error: unknown error"
+    lines: list[str] = []
 
-    lines = [f"Error: {response.error.message}"]
+    stdout = response.data.get("stdout") if response.data else None
+    if isinstance(stdout, str) and stdout:
+        lines.append(stdout.rstrip("\n"))
+    stderr = response.data.get("stderr") if response.data else None
+    if isinstance(stderr, str) and stderr:
+        lines.append("[stderr]")
+        lines.append(stderr.rstrip("\n"))
+
+    if response.error is None:
+        lines.append("Error: unknown error")
+        return "\n".join(lines)
+
+    lines.append(f"Error: {response.error.message}")
     if response.error.ename:
         lines.append(f"Type: {response.error.ename}")
     if response.error.evalue:
@@ -357,6 +379,33 @@ def _append_suggestions(body: str, suggestions: list[str]) -> str:
     lines = [body, "", "Next:"]
     lines.extend(f"- {suggestion}" for suggestion in suggestions)
     return "\n".join(lines)
+
+
+def _staleness_hint(iso_timestamp: str | None) -> str | None:
+    if not isinstance(iso_timestamp, str) or not iso_timestamp:
+        return None
+    try:
+        from datetime import UTC, datetime
+
+        ts = datetime.fromisoformat(iso_timestamp)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        delta = datetime.now(UTC) - ts
+        seconds = int(delta.total_seconds())
+        if seconds < 0:
+            return None
+        if seconds < 60:
+            return "just now"
+        if seconds < 3600:
+            minutes = seconds // 60
+            return f"{minutes}m ago"
+        if seconds < 86400:
+            hours = seconds // 3600
+            return f"{hours}h ago"
+        days = seconds // 86400
+        return f"{days}d ago"
+    except Exception:
+        return None
 
 
 def _env_flag(env: Mapping[str, str], name: str) -> bool:

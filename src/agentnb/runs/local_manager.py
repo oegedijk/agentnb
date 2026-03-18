@@ -312,6 +312,7 @@ class LocalRunManager(RunManager):
     ) -> ExecutionRun:
         return ExecutionRun(
             store=self._store(project_root),
+            started_mono=time.monotonic(),
             recording=self._recording(command_type=command_type, code=code),
             record=ExecutionRecord(
                 execution_id=new_execution_id(),
@@ -367,12 +368,19 @@ class LocalRunManager(RunManager):
         project_root: Path,
         record: ExecutionRecord,
         session_outcome: str,
+        started_mono: float | None = None,
     ) -> CancelRunResult:
         if record.worker_pid is not None:
             _terminate_process(record.worker_pid)
+        duration_ms = record.duration_ms
+        if started_mono is not None and duration_ms == 0:
+            duration_ms = int((time.monotonic() - started_mono) * 1000)
+        elif duration_ms == 0:
+            duration_ms = _wall_clock_duration_ms(record.ts)
         updated = replace(
             record,
             status="error",
+            duration_ms=duration_ms,
             ename="CancelledError",
             evalue="Run was cancelled by user.",
             terminal_reason="cancelled",
@@ -471,9 +479,13 @@ class LocalRunManager(RunManager):
         if pid_exists(record.worker_pid):
             return record
 
+        duration_ms = record.duration_ms
+        if duration_ms == 0:
+            duration_ms = _wall_clock_duration_ms(record.ts)
         updated = replace(
             record,
             status="error",
+            duration_ms=duration_ms,
             ename="WorkerExitedError",
             evalue="Background worker exited before recording a result.",
             terminal_reason="cancelled" if record.cancel_requested else "worker_exited",
@@ -511,6 +523,20 @@ class LocalRunManager(RunManager):
             return record
         self._store(project_root).append(updated)
         return updated
+
+
+def _wall_clock_duration_ms(iso_ts: str) -> int:
+    """Compute elapsed milliseconds from an ISO timestamp to now."""
+    from datetime import UTC, datetime
+
+    try:
+        started = datetime.fromisoformat(iso_ts)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        elapsed = (datetime.now(UTC) - started).total_seconds()
+        return max(0, int(elapsed * 1000))
+    except Exception:
+        return 0
 
 
 def _terminate_process(pid: int) -> None:

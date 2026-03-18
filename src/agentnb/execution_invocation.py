@@ -15,6 +15,7 @@ class ExecInvocationPolicy:
     background: bool = False
     stream: bool = False
     output_selector: OutputSelector | None = None
+    no_truncate: bool = False
 
     @classmethod
     def from_cli(
@@ -24,12 +25,14 @@ class ExecInvocationPolicy:
         background: bool,
         stream: bool,
         output_selector: OutputSelector | None,
+        no_truncate: bool = False,
     ) -> ExecInvocationPolicy:
         return cls(
             startup_policy="default" if startup_policy is None else startup_policy,
             background=background,
             stream=stream,
             output_selector=output_selector,
+            no_truncate=no_truncate,
         )
 
     @property

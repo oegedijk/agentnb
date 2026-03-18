@@ -82,6 +82,20 @@ Use `--stream` to see execution output in real time:
 agentnb --stream "train_model(epochs=10)"
 ```
 
+Use `--fresh` to stop and restart the session before executing, ensuring a
+clean slate:
+
+```bash
+agentnb --fresh "from myapp import run; run()"
+```
+
+Use `--no-truncate` to get full stdout/stderr/result output in `--agent` mode
+instead of the default compact truncation:
+
+```bash
+agentnb --agent --no-truncate "print(large_output)"
+```
+
 ## Reading Results And Inspecting State
 
 `agentnb` follows normal IPython/Notebook behavior: a final expression becomes the
@@ -206,6 +220,7 @@ agentnb history --latest
 agentnb history @last-error
 agentnb history @last-success
 agentnb history --all
+agentnb history --full                # full un-truncated code and output
 ```
 
 The difference is:
@@ -289,7 +304,8 @@ Example:
     "duration_ms": 50,
     "ensured_started": true,
     "started_new_session": false,
-    "result": "2"
+    "result": "2",
+    "result_json": 2
   }
 }
 ```
@@ -385,6 +401,8 @@ agentnb --session analysis "1 + 1"
 agentnb start --session analysis
 agentnb sessions list        # bare `agentnb sessions` shows help, not the list
 agentnb sessions delete analysis
+agentnb sessions delete --stale      # delete sessions with dead kernels
+agentnb sessions delete --all        # delete all sessions
 ```
 
 When only one live session exists, kernel-bound commands can infer it. Once

@@ -67,6 +67,18 @@ agentnb --timeout 120 "train_model()"
 agentnb --stream "train_model(epochs=10)"
 ```
 
+Use `--fresh` to stop and restart the session before executing:
+
+```bash
+agentnb --fresh "from myapp import run; run()"
+```
+
+Use `--no-truncate` to get full output in `--agent` mode:
+
+```bash
+agentnb --agent --no-truncate "print(large_output)"
+```
+
 The session auto-starts for normal execution. Use strict startup failure only when needed:
 
 ```bash
@@ -153,6 +165,7 @@ agentnb history
 agentnb history --last 5
 agentnb history --errors
 agentnb history --latest
+agentnb history --full               # full un-truncated code and output
 agentnb history @last-error
 agentnb history @last-success
 ```
@@ -228,6 +241,8 @@ agentnb --session analysis "1 + 1"
 agentnb start --session analysis
 agentnb sessions list        # bare `agentnb sessions` shows help, not the list
 agentnb sessions delete analysis
+agentnb sessions delete --stale      # delete sessions with dead kernels
+agentnb sessions delete --all        # delete all sessions
 ```
 
 When only one live session exists, commands can infer it. Once multiple live sessions exist, pass `--session` explicitly.
@@ -240,6 +255,6 @@ When only one live session exists, commands can infer it. Once multiple live ses
 - Use `reload` after editing importable project modules instead of assuming live definitions updated automatically.
 - Use `runs` for exact execution lookup and background control.
 - Use `wait` for session readiness, not `status --wait-idle` (same semantics, shorter).
-- Use `--agent` or `--json` when consuming output programmatically for a stable, parseable single JSON object.
+- Use `--agent` or `--json` when consuming output programmatically for a stable, parseable single JSON object. The `result` field contains the Python `repr()` of the return value. When valid JSON can be extracted from the repr, a `result_json` field is also included with the parsed value. For structured data, prefer reading `result_json` when present; otherwise use `import json; json.dumps(obj)` inside the kernel and read `result_json` from the response.
 - Use `vars` and `inspect` to check live state rather than `print()` — they produce bounded output regardless of object size.
-- Treat the kernel as project-scoped state. Stop it when the task is complete or stale state could confuse later work.
+- Treat the kernel as project-scoped state. Stop it when the task is complete or stale state could confuse later work. Use `agentnb sessions list` to check for stale sessions and `agentnb sessions delete --stale` or `agentnb sessions delete --all` to clean them up.

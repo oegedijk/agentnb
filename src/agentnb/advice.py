@@ -74,9 +74,10 @@ class AdvicePolicy:
                         f"Run `{_run_command('cancel', execution_id)}` to stop the background run.",
                     ]
                 if _exec_output_is_empty(data):
+                    execution_id = _execution_id(data)
                     return [
                         "Run `agentnb vars --recent 5 --json` to inspect namespace changes.",
-                        "Run `agentnb history @latest --json` to review the last semantic step.",
+                        f"Run `agentnb history {execution_id} --json` to review this execution.",
                     ]
                 return []
             if context.error_code == "INVALID_INPUT":
@@ -85,7 +86,10 @@ class AdvicePolicy:
                 module = _extract_module_name(context.error_value)
                 if module:
                     return [
-                        f"Install the missing module: `pip install {module}` or `uv add {module}`.",
+                        (
+                            f"Install the missing module: run `uv add {module}` "
+                            "in your shell (not inside the session)."
+                        ),
                         "Then retry the execution.",
                     ]
             if context.error_name == "NameError" and context.session_id:
@@ -110,6 +114,12 @@ class AdvicePolicy:
             stale_names = data.get("stale_names")
             if stale_names:
                 return ["Run `agentnb reset --json` if stale objects are still causing issues."]
+            reloaded = data.get("reloaded_modules")
+            if isinstance(reloaded, list) and not reloaded:
+                return [
+                    "No project-local modules were found to reload.",
+                    "To reload a specific module, run `importlib.reload(module)` in the session.",
+                ]
             return []
         if command_name == "history":
             if not data.get("entries"):
@@ -126,8 +136,13 @@ class AdvicePolicy:
             return []
         if command_name == "doctor":
             if data.get("ready"):
-                if data.get("session_exists"):
+                if data.get("kernel_alive"):
                     return ["Kernel is already running."]
+                if data.get("session_exists"):
+                    return [
+                        "Session exists but kernel is not running.",
+                        "Run `agentnb start --json` to restart the kernel.",
+                    ]
                 return ["Run `agentnb start --json` to start the kernel."]
             return [
                 "Run `agentnb doctor --fix --json` to attempt automatic fixes.",

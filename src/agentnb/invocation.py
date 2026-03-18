@@ -61,6 +61,8 @@ INVOCATION_OPTION_SPECS = (
     InvocationOptionSpec(names=("--stdout-only",), kind="exec"),
     InvocationOptionSpec(names=("--stderr-only",), kind="exec"),
     InvocationOptionSpec(names=("--result-only",), kind="exec"),
+    InvocationOptionSpec(names=("--no-truncate",), kind="exec"),
+    InvocationOptionSpec(names=("--fresh",), kind="exec"),
 )
 
 

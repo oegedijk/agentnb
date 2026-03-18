@@ -368,6 +368,7 @@ class ExecutionRun:
     record: ExecutionRecord
     recording: CommandRecording | None = None
     started: bool = False
+    started_mono: float | None = None
 
     def start(self, sink: ExecutionSink | None = None) -> None:
         if self.started:
@@ -416,10 +417,19 @@ class ExecutionRun:
         return updated
 
     def error_record(self, error: Exception) -> ExecutionRecord:
+        from ..errors import ExecutionTimedOutError
+
         recording = self._recording()
         ename = type(error).__name__
         evalue = str(error)
         traceback = None
+        duration_ms = self.record.duration_ms
+        if isinstance(error, ExecutionTimedOutError) and error.duration_ms > 0:
+            duration_ms = error.duration_ms
+        elif self.started_mono is not None and duration_ms == 0:
+            import time
+
+            duration_ms = int((time.monotonic() - self.started_mono) * 1000)
         if isinstance(error, AgentNBException):
             ename = error.ename or ename
             evalue = error.evalue or error.message
@@ -427,6 +437,7 @@ class ExecutionRun:
         return replace(
             self.record,
             status="error",
+            duration_ms=duration_ms,
             ename=ename,
             evalue=evalue,
             traceback=traceback,
@@ -435,6 +446,7 @@ class ExecutionRun:
                 session_id=self.record.session_id,
                 execution_id=self.record.execution_id,
                 error=error,
+                duration_ms=duration_ms,
             ),
         )
 

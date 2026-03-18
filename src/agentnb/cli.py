@@ -171,8 +171,10 @@ def main(
     inline string; use heredoc instead.
 
     `--agent` returns compact JSON. `--json` returns the full stable envelope.
-    `--quiet` and `--no-suggestions` reduce noise. `history` and `runs list`
-    accept `--last N` and `--errors` to limit output.
+    The `result` field is the Python repr of the return value; when valid
+    JSON can be extracted, a `result_json` field is also included with the
+    parsed value. `--quiet` and `--no-suggestions` reduce noise. `history`
+    and `runs list` accept `--last N` and `--errors` to limit output.
     """
     ctx.obj = RenderOptions.resolve(
         root_as_json=root_as_json,
@@ -420,9 +422,19 @@ def start(
     is_flag=True,
     help="Stream execution events in real time and finish with the final result payload.",
 )
+@click.option(
+    "--fresh",
+    is_flag=True,
+    help="Stop and restart the target session before executing.",
+)
 @click.option("--stdout-only", "output_selector", flag_value="stdout", default=None)
 @click.option("--stderr-only", "output_selector", flag_value="stderr")
 @click.option("--result-only", "output_selector", flag_value="result")
+@click.option(
+    "--no-truncate",
+    is_flag=True,
+    help="Do not truncate stdout, stderr, or result in output.",
+)
 @project_option
 @session_option
 @json_option
@@ -433,7 +445,9 @@ def exec_cmd(
     startup_policy: StartupPolicy | None,
     background: bool,
     stream: bool,
+    fresh: bool,
     output_selector: OutputSelector | None,
+    no_truncate: bool,
     project: Path | None,
     session_id: str | None,
     as_json: bool,
@@ -457,6 +471,14 @@ def exec_cmd(
       df.head()
       PY
     """
+    if fresh:
+        import contextlib
+
+        project_root = resolve_project_root(cwd=Path.cwd(), override=project)
+        target_session = session_id or DEFAULT_SESSION_ID
+        with contextlib.suppress(Exception):
+            runtime.stop(project_root=project_root, session_id=target_session)
+
     try:
         source = invocations.resolve_exec_source(code=code, filepath=filepath, stdin=sys.stdin)
     except AgentNBException as exc:
@@ -497,6 +519,7 @@ def exec_cmd(
             background=background,
             stream=stream,
             output_selector=output_selector,
+            no_truncate=no_truncate,
         ),
     )
 
@@ -681,6 +704,7 @@ def wait(
 @click.option("--latest", is_flag=True, help="Show only the most recent history entry")
 @click.option("--last", type=click.IntRange(min=1), default=None, help="Show the last N entries")
 @click.option("--all", "include_internal", is_flag=True, help="Include internal kernel executions")
+@click.option("--full", is_flag=True, help="Show full un-truncated code and output for each entry")
 @project_option
 @session_option
 @json_option
@@ -690,6 +714,7 @@ def history(
     latest: bool,
     last: int | None,
     include_internal: bool,
+    full: bool,
     project: Path | None,
     session_id: str | None,
     as_json: bool,
@@ -698,7 +723,8 @@ def history(
 
     By default, this shows semantic user-visible steps such as exec, vars,
     inspect, reload, and reset. Pass --all to include internal helper
-    executions. History entries are compact summaries by default.
+    executions. History entries are compact summaries by default; use --full
+    to see complete code and output.
     """
 
     request = HistoryRequest(
@@ -709,6 +735,7 @@ def history(
         latest=latest,
         last=last,
         include_internal=include_internal,
+        full=full,
     )
     _emit(application.history(request), as_json=as_json)
 
@@ -809,17 +836,64 @@ def sessions_list(project: Path | None, as_json: bool) -> None:
 
 
 @sessions_group.command("delete")
-@click.argument("session_name", callback=_session_option_callback)
+@click.argument("session_name", required=False, callback=_session_option_callback)
+@click.option("--all", "delete_all", is_flag=True, help="Delete all sessions.")
+@click.option(
+    "--stale",
+    "delete_stale",
+    is_flag=True,
+    help="Delete sessions whose kernel is no longer running.",
+)
 @project_option
 @json_option
-def sessions_delete(session_name: str, project: Path | None, as_json: bool) -> None:
-    """Delete one named session and stop its kernel if it is still running."""
+def sessions_delete(
+    session_name: str | None,
+    delete_all: bool,
+    delete_stale: bool,
+    project: Path | None,
+    as_json: bool,
+) -> None:
+    """Delete one or more sessions and stop their kernels if still running.
 
-    request = SessionsDeleteRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
-        session_name=session_name,
-    )
-    _emit(application.sessions_delete(request), as_json=as_json)
+    Provide a SESSION_NAME to delete one session, or use --all to delete every
+    session, or --stale to delete only sessions whose kernel is dead.
+    """
+    project_root = resolve_project_root(cwd=Path.cwd(), override=project)
+
+    if sum([session_name is not None, delete_all, delete_stale]) != 1:
+        raise click.UsageError("Provide exactly one of: SESSION_NAME, --all, or --stale.")
+
+    if session_name is not None:
+        request = SessionsDeleteRequest(
+            project_root=project_root,
+            session_name=session_name,
+        )
+        _emit(application.sessions_delete(request), as_json=as_json)
+        return
+
+    sessions = runtime.list_sessions(project_root=project_root)
+    deleted: list[str] = []
+    for session in sessions:
+        sid = session.get("session_id")
+        if not isinstance(sid, str):
+            continue
+        if delete_stale and session.get("alive"):
+            continue
+        try:
+            runtime.delete_session(project_root=project_root, session_id=sid)
+            deleted.append(sid)
+        except Exception:
+            pass
+    options = _current_render_options(local_as_json=as_json)
+    if options.as_json:
+        import json as _json
+
+        click.echo(_json.dumps({"ok": True, "deleted": deleted, "count": len(deleted)}))
+    else:
+        if deleted:
+            click.echo(f"Deleted {len(deleted)} session(s): {', '.join(deleted)}")
+        else:
+            click.echo("No sessions to delete.")
 
 
 @main.group("runs")

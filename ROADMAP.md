@@ -85,6 +85,26 @@ v0.3.2 addressed friction points discovered by running all 17 smoke scenarios en
 - `--session`/`--project` prefix fix for plain subcommands: live testing confirmed the `InvocationResolver` else branch already handles all non-group subcommands correctly. The v0.3.1 group-command fix was the only gap; plain commands were never broken.
 - Route `--agent`/`--json` error output to stdout: confirmed already fixed. `_emit()` routes all JSON errors to stdout; the only remaining `err=True` is for human-mode streaming, which is correct terminal behavior.
 
+## v0.3.3 - Bugs And Ergonomic Friction From Second Smoke Run (shipped)
+
+v0.3.3 fixed bugs and friction discovered by running all 17 smoke scenarios end-to-end a second time, after v0.3.2 shipped.
+
+### Shipped
+
+- Fixed duration always `0ms` in timeout, cancel, and background progress paths: `_ExecutionProgressSink` now tracks elapsed time, `ExecutionTimedOutError` carries `duration_ms`, and cancel/worker-exit paths compute wall-clock duration as fallback. Journal entries from `error_record` now also receive the computed duration.
+- Fixed stdout swallowed on error in human mode: `_render_error()` now prepends stdout/stderr from `response.data` before the error block, matching the behavior of `--agent` and `--json` modes.
+- Added `result_json` field to `--agent` exec responses: when the `result` repr string (or its inner content after stripping surrounding quotes) is valid JSON, a `result_json` field is included with the parsed value. The `result` field still contains the Python repr for backward compatibility.
+- Fixed `--result-only` and `--stdout-only` leaking session targeting message: the `(now targeting session: ...)` notice is now suppressed when an output selector is active.
+- Added `--no-truncate` flag to `exec`: skips stdout/stderr/result truncation in `--agent` mode. Threaded through `ExecInvocationPolicy` → `compact_execution_payload`.
+- Improved `inspect` nested dict preview consistency: both kernel-side `_json_safe()` and client-side `_compact_jsonish()` now use `str()` instead of `repr()` for depth >= 2 leaves, and `_json_safe` checks depth before expanding nested mappings.
+- Added bulk session cleanup: `sessions delete --all` and `sessions delete --stale` flags. `--stale` skips sessions with alive kernels.
+- Added `--fresh` flag to `exec`: stops and restarts the target session before executing, ensuring a clean namespace.
+- Added `history --full` flag: shows complete un-truncated code for each history entry instead of the compact summary.
+
+### Deferred
+
+- Silent serialization / `waited_ms` field: the `SESSION_BUSY` error fires correctly, but the response has no `waited_ms` field to distinguish lock-wait time from computation time. Deferred because it requires a behavior decision (wait-then-run vs fail-fast) and a contract extension to `ExecPayload`.
+
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 
 ### Goals
@@ -111,6 +131,9 @@ v0.3.2 addressed friction points discovered by running all 17 smoke scenarios en
 - Recovery-oriented control-plane improvements:
   - health checks and structured diagnostics
   - improved cleanup for stale state
+  - selective reset (`reset --keep df,weather`): current `reset` is all-or-nothing. The friction is in the rebuild cost after reset, which is exactly this milestone's theme. Design questions (keep by name? by type? by pattern?) should not be rushed.
+- File execution improvements:
+  - partial file execution (`exec --lines 17-20 script.py`): run specific lines from a file without re-executing the whole script. The workaround (copy-paste lines as inline code) is functional but breaks the file-to-interactive workflow.
 
 ### API / Contract Notes
 
@@ -269,13 +292,8 @@ v0.3.2 addressed friction points discovered by running all 17 smoke scenarios en
 
 ## Near-Term Priority Queue
 
-1. Implicit exec plus implicit ensure-started on the hot path
-2. Compact `--agent` working mode distinct from full `--json`
-3. Background/run-control ergonomics that always surface `execution_id` and minimize list-then-show flows
-4. Sticky session defaults plus symbolic selectors such as `@latest`, `@active`, and `@last-error`
-5. Help, suggestions, and output shaping rewrite around agent token efficiency
-6. Recovery/debugging improvements that reduce session drops and extra probing
-7. Verification workflows
-8. Snapshots
-9. Replay
-10. Exports and artifacts
+1. Recovery/debugging improvements that reduce session drops and extra probing
+2. Verification workflows
+3. Snapshots
+4. Replay
+5. Exports and artifacts

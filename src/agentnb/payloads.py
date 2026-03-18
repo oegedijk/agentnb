@@ -234,6 +234,8 @@ class DoctorPayload(TypedDict, total=False):
     checks: list[DoctorCheckPayload]
     stale_session_cleaned: bool
     session_exists: bool
+    kernel_alive: bool
+    kernel_pid: int | None
 
 
 class SessionsListPayload(TypedDict):

@@ -409,7 +409,8 @@ class KernelRuntime:
     ) -> DoctorPayload:
         store = SessionStore(project_root=project_root, session_id=session_id)
         stale_cleaned = store.cleanup_stale()
-        session_exists = store.load_session() is not None
+        session = store.load_session()
+        session_exists = session is not None
         report = self._provisioner_factory(store.project_root).doctor(
             preferred_python=python_executable,
             auto_fix=auto_fix,
@@ -417,6 +418,15 @@ class KernelRuntime:
         payload = cast(DoctorPayload, report.to_dict())
         payload["stale_session_cleaned"] = stale_cleaned
         payload["session_exists"] = session_exists
+
+        if session is not None:
+            status = self._backend.status(session)
+            payload["kernel_alive"] = status.alive
+            payload["kernel_pid"] = status.pid
+        else:
+            payload["kernel_alive"] = False
+            payload["kernel_pid"] = None
+
         return payload
 
     def _require_session(

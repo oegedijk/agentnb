@@ -26,6 +26,7 @@ _TRACEBACK_HEAD_LINES = 2
 _TRACEBACK_TAIL_LINES = 3
 _MEMBER_LIMIT = 20
 _HEAD_ROW_LIMIT = 3
+_HEAD_COLUMN_LIMIT = 10
 _PREVIEW_LIST_LIMIT = 3
 _PREVIEW_DICT_LIMIT = 5
 _RESULT_LIMIT = 240
@@ -140,7 +141,13 @@ def compact_dataframe_preview(preview: DataframePreview) -> DataframePreview:
 
     head = preview.get("head")
     if isinstance(head, list) and head:
-        compacted["head"] = head[:_HEAD_ROW_LIMIT]
+        truncated_rows = head[:_HEAD_ROW_LIMIT]
+        compacted["head"] = [
+            {k: v for i, (k, v) in enumerate(row.items()) if i < _HEAD_COLUMN_LIMIT}
+            if isinstance(row, dict) and len(row) > _HEAD_COLUMN_LIMIT
+            else row
+            for row in truncated_rows
+        ]
 
     return compacted
 

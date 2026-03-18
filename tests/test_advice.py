@@ -125,7 +125,7 @@ def test_advice_policy_module_not_found_error_suggests_install() -> None:
     )
 
     assert suggestions == [
-        "Install the missing module: `pip install pandas` or `uv add pandas`.",
+        "Install the missing module: run `uv add pandas` in your shell (not inside the session).",
         "Then retry the execution.",
     ]
 
@@ -145,7 +145,7 @@ def test_advice_policy_module_not_found_extracts_top_level_package() -> None:
     )
 
     assert suggestions == [
-        "Install the missing module: `pip install sklearn` or `uv add sklearn`.",
+        "Install the missing module: run `uv add sklearn` in your shell (not inside the session).",
         "Then retry the execution.",
     ]
 
@@ -172,18 +172,35 @@ def test_advice_policy_name_error_with_session_suggests_vars() -> None:
     ]
 
 
-def test_advice_policy_doctor_ready_with_session_exists() -> None:
+def test_advice_policy_doctor_ready_with_kernel_alive() -> None:
     policy = AdvicePolicy()
 
     suggestions = policy.suggestions(
         AdviceContext(
             command_name="doctor",
             response_status="ok",
-            data={"ready": True, "session_exists": True},
+            data={"ready": True, "session_exists": True, "kernel_alive": True},
         )
     )
 
     assert suggestions == ["Kernel is already running."]
+
+
+def test_advice_policy_doctor_ready_session_exists_kernel_dead() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="doctor",
+            response_status="ok",
+            data={"ready": True, "session_exists": True, "kernel_alive": False},
+        )
+    )
+
+    assert suggestions == [
+        "Session exists but kernel is not running.",
+        "Run `agentnb start --json` to restart the kernel.",
+    ]
 
 
 def test_advice_policy_doctor_ready_without_session() -> None:

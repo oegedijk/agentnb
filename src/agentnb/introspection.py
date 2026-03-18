@@ -565,7 +565,7 @@ def _truncate_text(value, limit):
     return text
 
 
-def _safe_head_rows(value, limit):
+def _safe_head_rows(value, limit, max_columns=10):
     try:
         head_value = value.head(limit)
     except Exception:
@@ -574,6 +574,13 @@ def _safe_head_rows(value, limit):
     try:
         if hasattr(head_value, "reset_index"):
             head_value = head_value.reset_index()
+    except Exception:
+        pass
+
+    try:
+        cols = list(head_value.columns)
+        if len(cols) > max_columns:
+            head_value = head_value[cols[:max_columns]]
     except Exception:
         pass
 

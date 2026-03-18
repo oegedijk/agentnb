@@ -306,7 +306,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             body = json.dumps(data, ensure_ascii=True, indent=2)
 
     switched = response.data.get("switched_session")
-    if switched:
+    if switched and not response.data.get("selected_output"):
         body = f"{body}\n(now targeting session: {switched})"
 
     suggestions = response.suggestions if options.show_suggestions else []
@@ -349,10 +349,21 @@ def _render_var_entry(item: VarDisplayEntry) -> str:
 
 
 def _render_error(response: CommandResponse) -> str:
-    if response.error is None:
-        return "Error: unknown error"
+    lines: list[str] = []
 
-    lines = [f"Error: {response.error.message}"]
+    stdout = response.data.get("stdout") if response.data else None
+    if isinstance(stdout, str) and stdout:
+        lines.append(stdout.rstrip("\n"))
+    stderr = response.data.get("stderr") if response.data else None
+    if isinstance(stderr, str) and stderr:
+        lines.append("[stderr]")
+        lines.append(stderr.rstrip("\n"))
+
+    if response.error is None:
+        lines.append("Error: unknown error")
+        return "\n".join(lines)
+
+    lines.append(f"Error: {response.error.message}")
     if response.error.ename:
         lines.append(f"Type: {response.error.ename}")
     if response.error.evalue:

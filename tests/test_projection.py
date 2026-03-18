@@ -121,6 +121,7 @@ def test_response_projector_agent_compacts_exec_success_to_next_step_fields() ->
             "execution_id": "run-1",
             "duration_ms": 12,
             "result": "42",
+            "result_json": 42,
             "ensured_started": True,
             "started_new_session": False,
         },

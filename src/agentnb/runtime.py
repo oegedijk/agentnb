@@ -327,6 +327,7 @@ class KernelRuntime:
 
         error: Exception | None = None
         result: ExecutionResult | None = None
+        exec_started = time.monotonic()
         try:
             with store.acquire_command_lock() as lock_acquired:
                 if not lock_acquired:
@@ -342,7 +343,8 @@ class KernelRuntime:
                     )
                 except BackendExecutionTimeout as exc:
                     self._backend.interrupt(session)
-                    raise ExecutionTimedOutError(timeout_s) from exc
+                    elapsed_ms = int((time.monotonic() - exec_started) * 1000)
+                    raise ExecutionTimedOutError(timeout_s, duration_ms=elapsed_ms) from exc
 
             return result
         except Exception as exc:

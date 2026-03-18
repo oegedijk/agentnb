@@ -119,21 +119,28 @@ class LocalRunExecutor:
 
 class _ExecutionProgressSink(ExecutionSink):
     def __init__(self, run: ExecutionRun) -> None:
+        import time
+
         from ..execution_events import ExecutionResultAccumulator
 
         self._run = run
         self._accumulator = ExecutionResultAccumulator()
+        self._started = time.monotonic()
 
     def started(self, *, execution_id: str, session_id: str) -> None:
         del execution_id, session_id
 
     def accept(self, event: ExecutionEvent) -> None:
+        import time
+
         self._accumulator.accept(event)
-        snapshot = self._accumulator.build(duration_ms=0)
+        elapsed_ms = int((time.monotonic() - self._started) * 1000)
+        snapshot = self._accumulator.build(duration_ms=elapsed_ms)
         status = "error" if snapshot.status == "error" else "running"
 
         self._run.replace(
             status=status,
+            duration_ms=elapsed_ms,
             stdout=snapshot.stdout,
             stderr=snapshot.stderr,
             result=snapshot.result,

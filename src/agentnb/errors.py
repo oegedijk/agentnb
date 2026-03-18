@@ -94,7 +94,7 @@ class RunWaitTimedOutError(AgentNBException):
 
 
 class ExecutionTimedOutError(AgentNBException):
-    def __init__(self, timeout_s: float) -> None:
+    def __init__(self, timeout_s: float, *, duration_ms: int = 0) -> None:
         super().__init__(
             code="TIMEOUT",
             message=(
@@ -104,6 +104,7 @@ class ExecutionTimedOutError(AgentNBException):
             ename="TimeoutError",
             evalue=f"Execution exceeded timeout of {timeout_s:g}s",
         )
+        self.duration_ms = duration_ms
 
 
 class BackendOperationError(AgentNBException):

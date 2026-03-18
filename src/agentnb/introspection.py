@@ -559,7 +559,7 @@ import json
 from IPython import get_ipython
 
 def _truncate_text(value, limit):
-    text = repr(value)
+    text = str(value)
     if len(text) > limit:
         return text[: limit - 3] + "..."
     return text
@@ -676,6 +676,8 @@ def _json_safe(value, depth=0):
         return value
     if isinstance(value, str):
         return _simple_text(value, 80)
+    if depth >= 2:
+        return _truncate_text(value, 80)
     _mapping = _mapping_items(value)
     if _mapping is not None:
         _sample = {{}}
@@ -684,8 +686,6 @@ def _json_safe(value, depth=0):
                 break
             _sample[str(_key)] = _json_safe(_item, depth + 1)
         return _sample
-    if depth >= 2:
-        return _truncate_text(value, 80)
     if isinstance(value, dict):
         _sample = {{}}
         for _index, (_key, _item) in enumerate(value.items()):

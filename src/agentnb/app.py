@@ -759,13 +759,13 @@ class AgentNBApp:
             )
             response_session_id = resolved_session_id
             switched_session: str | None = None
-            if requested_session_id is not None and command_name != "sessions-delete":
-                previous = self.runtime.current_session_id(project_root=project_root)
+            if _should_remember_session_preference(command_name):
+                previous = _current_session_preference(self.runtime, project_root=project_root)
                 self.runtime.remember_current_session(
                     project_root=project_root,
                     session_id=resolved_session_id,
                 )
-                if previous != resolved_session_id:
+                if previous is not None and previous != resolved_session_id:
                     switched_session = resolved_session_id
             if project_starting_state:
                 state = self.runtime.runtime_state(
@@ -883,6 +883,22 @@ def _current_session_preference(runtime: KernelRuntime, *, project_root: Path) -
     if isinstance(session_id, str) and session_id:
         return session_id
     return None
+
+
+def _should_remember_session_preference(command_name: str) -> bool:
+    return command_name in {
+        "start",
+        "exec",
+        "status",
+        "wait",
+        "vars",
+        "inspect",
+        "reload",
+        "history",
+        "interrupt",
+        "reset",
+        "stop",
+    }
 
 
 def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:

@@ -841,7 +841,12 @@ def test_app_sessions_delete_routes_named_session_through_handle_command(project
 def test_app_status_remembers_explicit_session_selection(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
-    runtime.status.return_value = KernelStatus(alive=True, pid=123, busy=False)
+    runtime.current_session_id.return_value = "default"
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="ready",
+        session_id="analysis",
+        kernel_status=KernelStatus(alive=True, pid=123, busy=False),
+    )
     app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
 
     response = app.status(
@@ -856,3 +861,46 @@ def test_app_status_remembers_explicit_session_selection(project_dir) -> None:
         project_root=project_dir.resolve(),
         session_id="analysis",
     )
+    assert response.data["switched_session"] == "analysis"
+
+
+def test_app_status_remembers_implicit_session_selection(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.current_session_id.return_value = "default"
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="ready",
+        session_id="analysis",
+        kernel_status=KernelStatus(alive=True, pid=123, busy=False),
+    )
+    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
+
+    response = app.status(StatusRequest(project_root=project_dir))
+
+    assert response.status == "ok"
+    runtime.remember_current_session.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        session_id="analysis",
+    )
+    assert response.data["switched_session"] == "analysis"
+
+
+def test_app_runs_show_does_not_remember_session_preference(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "default"
+    runtime.current_session_id.return_value = "analysis"
+    executions = Mock(spec=ExecutionService)
+    executions.get_run.return_value = {
+        "execution_id": "run-1",
+        "session_id": "other",
+        "status": "ok",
+    }
+    app = AgentNBApp(runtime=runtime, executions=executions)
+
+    response = app.runs_show(
+        RunLookupRequest(project_root=project_dir, run_reference=parse_run_reference("run-1"))
+    )
+
+    assert response.status == "ok"
+    runtime.remember_current_session.assert_not_called()
+    assert "switched_session" not in response.data

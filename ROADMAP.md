@@ -14,9 +14,13 @@ The main optimization target is agent token efficiency:
 - how rarely it must call `--help`, `sessions list`, `runs list`, or `history` just to decide the next command
 - how little output it must parse to recover the one fact needed for the next step
 
-Human ergonomics matter too, but they follow this same direction: fewer steps, clearer defaults, quieter output, and better recovery guidance.
+The primary usability target is coding agents; human ergonomics matter insofar as they reinforce the same low-friction path.
+
+Human ergonomics still matter, but they follow this same direction: fewer steps, clearer defaults, quieter output, and better recovery guidance.
 
 ## Design Rules
+
+Deterministic targeting and machine-readable recovery take priority over permissive convenience behavior.
 
 1. Optimize the core interactive loop before adding reproducibility, export, or extensibility features.
 2. Keep full `--json` as the exact machine contract, but do not treat it as the default working mode.
@@ -133,9 +137,9 @@ These were plausible smoke findings at the time they were recorded, but represen
 
 - Partial file rerun remains valuable, but it is new file-execution surface area rather than consistency polish. Keep it with the broader file execution work already planned in v0.4.
 
-## v0.3.5 - Remaining Smoke-Run Frictions To Close
+## v0.3.5 - Agent Correctness And Machine-Contract Frictions
 
-v0.3.5 should close the friction points that still showed up when running all 17 smoke scenarios end-to-end after v0.3.4. These are not speculative improvements; each item below was hit during real agent use.
+v0.3.5 should close the remaining frictions that still cost agents extra probing, wrong-session risk, or response cleanup during real end-to-end use. The emphasis is deterministic targeting, predictable helper behavior, and machine-readable recovery.
 
 ### Frictions To Fix
 
@@ -187,6 +191,12 @@ v0.3.5 should close the friction points that still showed up when running all 17
     - while it is running, execute `uv run agentnb status --session stream11 --wait-idle`
     - observe: the final response does not explain whether it waited, for how long, or what state transition occurred
 
+- Bare `sessions` is still inconsistent with its documented shortcut behavior:
+  - friction: docs and help treat bare `agentnb sessions` as a listing shortcut, but the group form still rejects `--project` and `--json` in that position instead of behaving like `sessions list`.
+  - reproduce:
+    - `uv run agentnb sessions --project /tmp/agentnb-review-empty`
+    - observe: the command errors instead of behaving like `sessions list --project /tmp/agentnb-review-empty`
+
 - In-session dependency installation still has too many recovery branches:
   - friction: `doctor --fix` / `start --auto-install` cover missing `ipykernel`, but installing a missing third-party package from inside a fresh session can still fail because the selected interpreter lacks `pip`.
   - reproduce:
@@ -197,62 +207,65 @@ v0.3.5 should close the friction points that still showed up when running all 17
     - then try `uv run agentnb "import subprocess, sys; subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pyjokes'])" --project /tmp/agentnb-smoke17 --session dep17`
     - observe: the install path can fail with `No module named pip`
 
-- File-to-interactive iteration still lacks a first-class partial rerun path:
-  - friction: after running a script file into a session, changing only the tail logic still requires copy-pasting the changed tail inline instead of rerunning a selected portion of the file.
-  - reproduce:
-    - create `smoke_workflow.py` with dataframe setup plus a final `report = ...`
-    - `uv run agentnb smoke_workflow.py --session file8`
-    - edit only the final lines on disk to add a derived column
-    - observe: there is no direct CLI path to rerun just the changed tail from the file; the practical workaround is inline exec
-
 ### Planned Fixes
 
 - Make same-session read-only helpers cooperate better with active stateful workflows:
-  - allow safe snapshot-based `vars` / `inspect` reads during active or recently completed same-session work, or queue them behind the active command with explicit waited-state reporting
+  - queue `vars` / `inspect` / `reload` behind the active same-session command with explicit waited-state reporting
   - make the chosen behavior visible in both human and machine responses
 
 - Unify startup semantics for helper commands:
-  - either auto-start read-only commands when the intent is unambiguous, or return a more specific contract that clearly distinguishes `not started yet` from `dead` and `starting`
-  - keep recovery suggestions aligned with the chosen policy
+  - auto-start `vars` / `inspect` / `reload` only when session resolution is unambiguous
+  - keep recovery suggestions aligned with the chosen policy when startup remains ambiguous or blocked
 
-- Tighten multi-session ambiguity handling:
-  - add a stricter ambiguity policy for implicit exec when more than one plausible live session exists
-  - if current-session routing remains allowed, make the chosen target impossible to miss in both human and machine output
+- Make ambiguous multi-session exec a hard error:
+  - omitted-session `exec` and implicit top-level exec return `AMBIGUOUS_SESSION` when more than one live session exists
+  - this is an error, not a warning
+
+- Keep history selectors first-class:
+  - `history @latest`, `history @last-error`, and `history @last-success` remain supported shortcut syntax alongside flag forms
 
 - Add a compact large-value contract for output-shaped exec responses:
   - preserve the existing `result` field for compatibility
   - add an explicit bounded summary path for dataframe-like and container values so `--agent`, `--json`, and `--result-only` do not force repr parsing for large objects
 
 - Make JSON recovery surfaces actually structured:
-  - expose machine-readable suggestion actions instead of only prose strings
+  - expose machine-readable suggestion actions alongside prose suggestions
   - strip ANSI formatting from tracebacks in JSON output or provide a parallel plain-text traceback field
 
 - Improve wait-state visibility:
   - include whether `wait` / `status --wait-idle` actually waited, how long, and which state transition completed
   - keep the human output short, but give the agent enough information to reason about sequencing without extra probes
 
+- Make bare `sessions` fully equivalent to `sessions list` for `0.3.5`:
+  - accept the same option handling and output modes in that position
+  - keep the docs accurate until the command surface cleanup lands in `0.3.6`
+
 - Smooth the missing-dependency path inside fresh interpreters:
   - detect pip-less interpreters during dependency recovery and provide one exact supported path
   - consider a first-class helper for installing a missing import into the selected project interpreter without leaving the agent loop
 
-- Promote partial file rerun into shipped CLI surface:
-  - support rerunning selected lines or a named tail block from a file into the existing session
-  - keep this integrated with live-state workflows rather than treating it as a separate scripting mode
+### Acceptance Notes
+
+- Smoke scenario for ambiguous omitted-session exec with multiple live sessions.
+- Smoke scenario for helper auto-start on an unambiguous fresh session.
+- Smoke scenario for helper waiting behind active same-session work.
+- Smoke scenario for bounded large-value output in `--agent` and `--json`.
+- Contract tests for machine-readable suggestion actions and ANSI-free JSON tracebacks.
 
 ### Implementation Seams
 
-- Session ambiguity, current-session preference, wait-state reporting, and same-session busy policy:
+- Session ambiguity, wait-state reporting, and same-session busy policy:
   - start in `agentnb.runtime.KernelRuntime`
   - likely touch `resolve_session_id()`, `wait_for_ready()`, `wait_for_idle()`, `wait_for_usable()`, `execute()`, and `_session_busy_error()`
 
 - Helper-command startup consistency and read-only command handling:
   - start in `agentnb.app.AgentNBApp`
   - likely touch `_handle_command()` plus the `vars()` / `inspect()` / `reload()` call paths
-  - if helper commands gain auto-start or a different busy policy, keep that decision owned here rather than in the CLI layer
+  - keep helper startup and blocking policy owned here rather than in the CLI layer
 
 - `vars` / `inspect` / `reload` execution model:
   - start in `agentnb.introspection.KernelIntrospection` and `agentnb.ops.NotebookOps`
-  - `_run_json_helper()` is the narrowest place to decide whether helper reads should execute immediately, wait, or use a bounded snapshot path
+  - `_run_json_helper()` is the narrowest place to decide how helper reads wait and report their waited state
 
 - Large-value output shaping and machine-facing exec payloads:
   - start in `agentnb.compact` and `agentnb.projection.ResponseProjector`
@@ -261,19 +274,83 @@ v0.3.5 should close the friction points that still showed up when running all 17
 
 - Structured recovery guidance and JSON-friendly suggestion contracts:
   - start in `agentnb.advice.AdvicePolicy`, then extend the response contract shape if needed
-  - if suggestions become machine-readable actions, keep the transformation out of the CLI renderer
+  - keep machine-readable suggestion actions in the contract layer, not the CLI renderer
 
 - JSON traceback hygiene:
   - start in `agentnb.projection`, `agentnb.compact`, and the run-record projection path
   - if ANSI stripping should apply to full JSON as well as `--agent`, do it in projection/storage boundaries, not in terminal rendering code
 
+- `sessions` shortcut consistency and option handling:
+  - start in `agentnb.invocation.InvocationResolver` plus the `sessions` CLI group behavior
+  - add docs/help parity tests so the shortcut behavior cannot drift again
+
 - Interpreter and dependency-recovery workflow:
   - start in `agentnb.kernel.provisioner.KernelProvisioner`
   - `ensure_ipykernel()` already owns pip-vs-uv decisions; keep any broader missing-dependency install helper in the same provisioning boundary instead of scattering install logic across advice or CLI handlers
 
-- Partial file rerun:
-  - start in `agentnb.invocation.InvocationResolver` plus the exec-source path
-  - `resolve_exec_source()` currently only models whole-file / arg / stdin execution; partial file execution likely needs a richer source intent before it reaches `exec`
+## v0.3.6 - Command Surface Simplification And Footgun Removal
+
+v0.3.6 should remove the remaining agent-confusing behaviors without expanding major feature surface. The focus is a smaller public grammar, fewer hidden state changes, and clearer canonical command forms.
+
+### Planned Simplifications
+
+- Narrow current-session preference updates:
+  - only explicit `--session`, `start`, and successful `exec` mutate remembered current session
+  - implicitly resolved read/control commands no longer rewrite remembered session
+
+- Make `wait` the primary documented blocking readiness command:
+  - keep `status --wait` and `status --wait-idle` for compatibility in `0.3.x`
+  - demote those `status` wait modes in help and README so `wait` is the obvious primary path
+
+- Keep history selectors first-class and add `--successes`:
+  - `history @latest`, `@last-error`, and `@last-success` stay
+  - add `history --successes --latest` as the flag equivalent of `history @last-success`
+
+- Normalize equivalent history selector/flag combinations:
+  - accept redundant equivalent combinations and resolve them to the same query
+  - reject only contradictory combinations
+
+- Make `sessions list` the canonical documented form:
+  - change bare `sessions` back to help-only behavior for consistency with other groups
+  - keep `sessions list` as the one documented listing command
+
+- Document one canonical CLI grammar:
+  - `agentnb <command> [subcommand] [options]`
+  - keep root output flags globally placeable, but stop teaching command-local option shuffling as part of the public model
+
+- Reframe the Python import API:
+  - describe the import-level helpers as low-level wrappers around runtime operations
+  - do not present them as the primary ergonomic agent surface
+
+### API / Contract Notes
+
+- Read/control commands no longer rewrite remembered current session when they resolve implicitly.
+- `wait` is the primary blocking command, while `status --wait` and `status --wait-idle` remain compatibility surface.
+- `history @latest`, `@last-error`, and `@last-success` stay, and `--successes --latest` is the flag equivalent of `@last-success`.
+- Bare `sessions` returns to help-only behavior, and `sessions list` is the canonical form.
+
+### Acceptance Notes
+
+- Tests proving implicit read/control commands do not mutate current-session preference.
+- Tests for `history @last-success` parity with `history --successes --latest`.
+- Docs/help parity tests for `sessions`, `wait`, and canonical command shapes.
+
+### Implementation Seams
+
+- `StateRepository` + `KernelRuntime`:
+  - own current-session preference mutation policy and multi-session targeting rules that remain after `0.3.5`
+
+- `AgentNBApp`:
+  - own command-level blocking semantics and the demoted `status --wait*` documentation path
+
+- Selector resolvers and history query validation:
+  - own selector/flag equivalence, contradiction checks, and the `--successes` addition
+
+- `InvocationResolver` plus CLI help and docs:
+  - own canonical command grammar, root-flag placement guidance, and the return to help-only bare `sessions`
+
+- Docs/help parity tests:
+  - ensure README, `--help`, and agent skill examples stay aligned with the actual surface
 
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 
@@ -288,20 +365,21 @@ v0.3.5 should close the friction points that still showed up when running all 17
 - Better debugging:
   - traceback enrichment
   - frame and locals inspection commands
-  - optional profiling (`cProfile`) paths where useful
+
 - Safer, more compact inspection:
   - bounded previews for large values
   - structured previews for common containers (`list`, `dict`, `tuple`, dataframe-like objects)
   - side-effect-aware inspection paths that avoid arbitrary `repr(...)` when possible
+
 - Richer history metadata where it directly improves debugging:
   - execution mode
   - failure markers
   - replay and verify provenance once those features exist
   - optional tags if they add real value without bloating defaults
-- Recovery-oriented control-plane improvements:
-  - health checks and structured diagnostics
-  - improved cleanup for stale state
+
+- Selective recovery controls:
   - selective reset (`reset --keep df,weather`): current `reset` is all-or-nothing. The friction is in the rebuild cost after reset, which is exactly this milestone's theme. Design questions (keep by name? by type? by pattern?) should not be rushed.
+
 - File execution improvements:
   - partial file execution (`exec --lines 17-20 script.py`): run specific lines from a file without re-executing the whole script. The workaround (copy-paste lines as inline code) is functional but breaks the file-to-interactive workflow.
 
@@ -461,6 +539,8 @@ v0.3.5 should close the friction points that still showed up when running all 17
   - keep session preferences, retention rules, and future sharable-bundle rules inside `StateRepository`
 
 ## Near-Term Priority Queue
+
+Command-surface simplification is part of near-term recovery efficiency because agents pay for ambiguity with extra probing and wrong-session risk.
 
 1. Recovery/debugging improvements that reduce session drops and extra probing
 2. Verification workflows

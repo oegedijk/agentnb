@@ -109,6 +109,8 @@ v0.3.3 fixed bugs and friction discovered by running all 17 smoke scenarios end-
 
 v0.3.4 should focus on the concrete usability gaps found by running all smoke scenarios end-to-end again. The goal is not new surface area; it is making the existing surface behave consistently enough that an agent can stay in flow without guessing.
 
+Some items below originated from real smoke transcripts that exercised broader or colder invocation paths than the later focused checks in this branch. When a previously noted issue no longer reproduces on the current tree, keep it documented as validated historical scope rather than silently treating it as never-real.
+
 Two prep refactors are now in place and should be treated as the primary seams for the remaining work:
 
 - `RuntimeState` in `agentnb.runtime` centralizes lifecycle facts such as `missing`, `starting`, `ready`, `busy`, `dead`, and `stale`.
@@ -125,10 +127,12 @@ The remaining fixes below should extend those seams instead of reintroducing tim
 - Fixed `doctor --fix` install targeting for uv-managed projects: automatic ipykernel repair now runs from the target project root, and the `uv pip` fallback binds installation to the selected interpreter before re-checking module availability.
 - Completed startup-state handling for read-only helper commands: `vars`, `inspect`, and `reload` now return structured `KERNEL_NOT_READY` responses with `runtime_state=starting` while a same-session startup is still in flight, instead of collapsing into generic no-kernel behavior.
 - Tightened `runs show` snapshot semantics: active run snapshots now carry an explicit `snapshot_stale` flag in machine output, matching the existing human warning that persisted state may lag live follow output.
-- Clarified same-session foreground/background serialization: overlapping `exec` / `reset` attempts now fail fast against active persisted run records before startup checks run, `SESSION_BUSY` responses include the blocking `active_execution_id`, and recovery suggestions point directly at `runs wait/show` for that run.
+- Clarified same-session foreground/background serialization on the full CLI path: overlapping `exec` / `reset` attempts now fail fast against active persisted run records before startup checks run, implicit session resolution no longer blocks on backend status probes first, `SESSION_BUSY` responses include the blocking `active_execution_id`, and recovery suggestions point directly at `runs wait/show` for that run.
 - Improved current-session visibility in multi-session workflows: implicit session-bound commands now refresh the saved current-session preference and surface a switch notice when agentnb resolves to a different known session than the one previously targeted.
 
-### Validated And Removed From Scope
+### Validated Historical Scope
+
+These were plausible smoke findings at the time they were recorded, but representative current-path checks no longer reproduce them on the current tree.
 
 - Root-position `--project` / `--session` placement for representative command families is already working through `CommandShape` + `InvocationResolver`: live smoke confirmed `agentnb --project PATH history`, `agentnb --project PATH runs show`, `agentnb --project PATH runs wait`, and `agentnb --session NAME --project PATH history/vars` all resolve correctly.
 - Run-control help text and targeting are already aligned for execution-id based commands: `runs show/follow/wait/cancel --help` no longer advertises `--session`, and live smoke confirmed root-position `--project` works for those subcommands.

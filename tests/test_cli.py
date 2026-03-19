@@ -536,11 +536,17 @@ def test_cli_status_uses_only_live_session_when_implicit(
         {"session_id": "analysis"}
     ]
 
-    def status_stub(**kwargs: object) -> object:
+    def state_stub(**kwargs: object) -> object:
         status_calls.append(dict(kwargs))
-        return KernelStatus(alive=True, pid=123)
+        from agentnb.runtime import RuntimeState
 
-    cli.runtime.status = status_stub  # type: ignore[method-assign]
+        return RuntimeState(
+            kind="ready",
+            session_id="analysis",
+            kernel_status=KernelStatus(alive=True, pid=123, busy=False),
+        )
+
+    cli.runtime.runtime_state = state_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(main, ["status", "--project", str(project_dir), "--json"])
 
@@ -616,6 +622,7 @@ def test_cli_wait_uses_runtime_wait_for_usable(
             status=KernelStatus(alive=True, pid=321, busy=False),
             waited=False,
             waited_for=None,
+            runtime_state="ready",
         )
 
     cli.runtime.wait_for_usable = wait_stub  # type: ignore[method-assign]
@@ -815,7 +822,7 @@ def test_cli_agent_preset_enables_json_and_suppresses_suggestions(
         "ok": True,
         "command": "status",
         "session_id": "default",
-        "data": {"alive": False},
+        "data": {"alive": False, "runtime_state": "missing"},
     }
 
 
@@ -828,7 +835,7 @@ def test_cli_root_flags_work_after_subcommand(cli_runner: CliRunner, project_dir
         "ok": True,
         "command": "status",
         "session_id": "default",
-        "data": {"alive": False},
+        "data": {"alive": False, "runtime_state": "missing"},
     }
 
 
@@ -1812,7 +1819,13 @@ def test_cli_exec_returns_session_busy_when_lock_exists(
     import agentnb.cli as cli
 
     def raise_busy(**_: object) -> ExecutionResult:
-        raise SessionBusyError()
+        raise SessionBusyError(
+            wait_behavior="immediate",
+            waited_ms=0,
+            lock_pid=321,
+            lock_acquired_at="2026-03-19T12:00:00+00:00",
+            busy_for_ms=1500,
+        )
 
     cli.executions.execute_code = raise_busy  # type: ignore[method-assign]
     exec_res = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1 + 1"])
@@ -1822,6 +1835,11 @@ def test_cli_exec_returns_session_busy_when_lock_exists(
     error = _error(payload)
     assert error["code"] == "SESSION_BUSY"
     assert "Wait for the prior command to finish" in error["message"]
+    assert payload["data"]["wait_behavior"] == "immediate"
+    assert payload["data"]["waited_ms"] == 0
+    assert payload["data"]["lock_pid"] == 321
+    assert payload["data"]["lock_acquired_at"] == "2026-03-19T12:00:00+00:00"
+    assert payload["data"]["busy_for_ms"] == 1500
 
 
 def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Path) -> None:

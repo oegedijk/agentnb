@@ -10,6 +10,7 @@ from .contracts import ExecutionResult, ExecutionSink, KernelStatus
 from .errors import (
     AmbiguousSessionError,
     ExecutionTimedOutError,
+    KernelDiedError,
     KernelNotReadyError,
     KernelWaitTimedOutError,
     NoKernelRunningError,
@@ -27,7 +28,7 @@ from .kernel.backend import (
 from .kernel.provisioner import KernelProvisioner
 from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
 from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore, pid_exists
-from .state import StateRepository
+from .state import CommandLockInfo, StateRepository
 
 WaitedFor = Literal["ready", "idle"]
 RuntimeStateKind = Literal["missing", "starting", "ready", "busy", "dead", "stale"]
@@ -39,6 +40,7 @@ class KernelWaitResult:
     status: KernelStatus
     waited: bool
     waited_for: WaitedFor | None = None
+    runtime_state: RuntimeStateKind | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -47,6 +49,7 @@ class RuntimeState:
     session_id: str
     kernel_status: KernelStatus
     session: SessionInfo | None = None
+    command_lock: CommandLockInfo | None = None
     observed_session_record: bool = False
     has_connection_file: bool = False
     has_command_lock: bool = False
@@ -294,9 +297,11 @@ class KernelRuntime:
     ) -> KernelStatus:
         deadline = time.monotonic() + timeout_s
         while True:
-            status = self.status(project_root=project_root, session_id=session_id)
-            if status.alive:
-                return status
+            state = self.runtime_state(project_root=project_root, session_id=session_id)
+            if state.kind == "dead":
+                raise KernelDiedError()
+            if state.alive:
+                return state.to_kernel_status()
             if time.monotonic() >= deadline:
                 raise KernelWaitTimedOutError(timeout_s, waiting_for="ready")
             time.sleep(poll_interval_s)
@@ -311,7 +316,10 @@ class KernelRuntime:
     ) -> KernelStatus:
         deadline = time.monotonic() + timeout_s
         while True:
-            status = self.status(project_root=project_root, session_id=session_id)
+            state = self.runtime_state(project_root=project_root, session_id=session_id)
+            if state.kind == "dead":
+                raise KernelDiedError()
+            status = state.to_kernel_status()
             if status.alive and not status.busy:
                 return status
             if time.monotonic() >= deadline:
@@ -328,9 +336,11 @@ class KernelRuntime:
     ) -> KernelWaitResult:
         state = self.runtime_state(project_root=project_root, session_id=session_id)
         status = state.to_kernel_status()
+        if state.kind == "dead":
+            raise KernelDiedError()
         if state.alive:
             if not state.busy:
-                return KernelWaitResult(status=status, waited=False)
+                return KernelWaitResult(status=status, waited=False, runtime_state=state.kind)
             return KernelWaitResult(
                 status=self.wait_for_idle(
                     project_root=project_root,
@@ -340,6 +350,7 @@ class KernelRuntime:
                 ),
                 waited=True,
                 waited_for="idle",
+                runtime_state="ready",
             )
         return KernelWaitResult(
             status=self.wait_for_ready(
@@ -350,6 +361,7 @@ class KernelRuntime:
             ),
             waited=True,
             waited_for="ready",
+            runtime_state="ready",
         )
 
     def execute(
@@ -371,7 +383,7 @@ class KernelRuntime:
         try:
             with store.acquire_command_lock() as lock_acquired:
                 if not lock_acquired:
-                    raise SessionBusyError()
+                    raise self._session_busy_error(store)
                 try:
                     if before_backend is not None:
                         before_backend()
@@ -406,7 +418,7 @@ class KernelRuntime:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
         with store.acquire_command_lock() as lock_acquired:
             if not lock_acquired:
-                raise SessionBusyError()
+                raise self._session_busy_error(store)
             return self._backend.reset(session=session, timeout_s=timeout_s)
 
     def history(
@@ -475,8 +487,10 @@ class KernelRuntime:
         )
         if state.kind in {"ready", "busy"} and state.session is not None:
             return store, state.session
-        if state.kind in {"starting", "dead"}:
+        if state.kind == "starting":
             raise KernelNotReadyError()
+        if state.kind == "dead":
+            raise KernelDiedError()
         raise NoKernelRunningError()
 
     def _last_activity(self, project_root: Path, session_id: str) -> str | None:
@@ -525,7 +539,8 @@ class KernelRuntime:
 
         backend_status = self._backend.status(session)
         if backend_status.alive:
-            busy = store.has_active_command_lock()
+            command_lock = store.command_lock_info()
+            busy = command_lock is not None
             status = KernelStatus(
                 alive=True,
                 pid=backend_status.pid,
@@ -539,6 +554,7 @@ class KernelRuntime:
                 kind="busy" if busy else "ready",
                 session_id=session.session_id,
                 session=session,
+                command_lock=command_lock,
                 kernel_status=status,
                 observed_session_record=observed_session_record,
                 has_connection_file=True,
@@ -560,4 +576,14 @@ class KernelRuntime:
             ),
             observed_session_record=observed_session_record,
             has_connection_file=True,
+        )
+
+    def _session_busy_error(self, store: SessionStore) -> SessionBusyError:
+        command_lock = store.command_lock_info()
+        return SessionBusyError(
+            wait_behavior="immediate",
+            waited_ms=0,
+            lock_pid=command_lock.pid if command_lock is not None else None,
+            lock_acquired_at=command_lock.acquired_at if command_lock is not None else None,
+            busy_for_ms=command_lock.busy_for_ms() if command_lock is not None else None,
         )

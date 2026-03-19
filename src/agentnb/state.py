@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -68,10 +69,13 @@ class SessionStateFiles:
         _safe_unlink(self.log_file)
         _safe_unlink(self.command_lock_file)
 
-    def has_active_command_lock(self) -> bool:
+    def command_lock_info(self) -> CommandLockInfo | None:
         if not self.command_lock_file.exists():
-            return False
-        return not self._clear_stale_command_lock()
+            return None
+        return self._read_command_lock_info()
+
+    def has_active_command_lock(self) -> bool:
+        return self.command_lock_info() is not None
 
     @contextmanager
     def acquire_command_lock(self) -> Iterator[bool]:
@@ -93,28 +97,50 @@ class SessionStateFiles:
             return False
 
         try:
-            os.write(fd, str(os.getpid()).encode("utf-8"))
+            payload = {
+                "pid": os.getpid(),
+                "acquired_at": utc_now_iso(),
+            }
+            os.write(fd, json.dumps(payload, ensure_ascii=True).encode("utf-8"))
         finally:
             os.close(fd)
         return True
 
     def _clear_stale_command_lock(self) -> bool:
+        if not self.command_lock_file.exists():
+            return False
+        info = self._read_command_lock_info()
+        return info is None and not self.command_lock_file.exists()
+
+    def _read_command_lock_info(self) -> CommandLockInfo | None:
         try:
-            raw_pid = self.command_lock_file.read_text(encoding="utf-8").strip()
+            raw_payload = self.command_lock_file.read_text(encoding="utf-8")
         except OSError:
-            return False
+            return None
 
-        try:
-            lock_pid = int(raw_pid)
-        except ValueError:
+        lock_info = _parse_command_lock_payload(raw_payload)
+        if lock_info is None:
             _safe_unlink(self.command_lock_file)
-            return True
+            return None
 
-        if _pid_exists(lock_pid):
-            return False
+        if _pid_exists(lock_info.pid):
+            return lock_info
 
         _safe_unlink(self.command_lock_file)
-        return True
+        return None
+
+
+@dataclass(slots=True, frozen=True)
+class CommandLockInfo:
+    pid: int
+    acquired_at: str | None = None
+
+    def busy_for_ms(self) -> int | None:
+        acquired_at = _parse_iso_datetime(self.acquired_at)
+        if acquired_at is None:
+            return None
+        elapsed_ms = int((datetime.now(UTC) - acquired_at).total_seconds() * 1000)
+        return max(elapsed_ms, 0)
 
 
 @dataclass(slots=True, frozen=True)
@@ -1027,6 +1053,48 @@ def _require_literal(
     if value not in allowed:
         raise ValueError(f"Invalid {key}")
     return value
+
+
+def _parse_command_lock_payload(raw_payload: str) -> CommandLockInfo | None:
+    raw_payload = raw_payload.strip()
+    if not raw_payload:
+        return None
+
+    try:
+        pid = int(raw_payload)
+    except ValueError:
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        raw_pid = payload.get("pid")
+        try:
+            pid = int(raw_pid)
+        except (TypeError, ValueError):
+            return None
+        acquired_at = payload.get("acquired_at")
+        if not isinstance(acquired_at, str) or _parse_iso_datetime(acquired_at) is None:
+            acquired_at = None
+    else:
+        acquired_at = None
+
+    if pid <= 0:
+        return None
+    return CommandLockInfo(pid=pid, acquired_at=acquired_at)
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _safe_unlink(path: Path) -> None:

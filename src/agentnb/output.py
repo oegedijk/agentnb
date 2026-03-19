@@ -133,22 +133,59 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         elif command == "status":
             status_data = cast(StatusPayload, data)
             session_label = f"session: {response.session_id}, " if response.session_id else ""
+            session_name = f"session: {response.session_id}" if response.session_id else None
             if status_data.get("alive"):
                 if status_data.get("busy"):
-                    body = f"Kernel is running ({session_label}pid {status_data.get('pid')}, busy)."
+                    busy_for_ms = status_data.get("busy_for_ms")
+                    if isinstance(busy_for_ms, int):
+                        body = (
+                            "Kernel is running "
+                            f"({session_label}pid {status_data.get('pid')}, "
+                            f"busy for {_format_duration_ms(busy_for_ms)})."
+                        )
+                    else:
+                        body = (
+                            "Kernel is running "
+                            f"({session_label}pid {status_data.get('pid')}, busy)."
+                        )
                 else:
                     body = f"Kernel is running ({session_label}pid {status_data.get('pid')})."
+            elif status_data.get("runtime_state") == "starting":
+                body = (
+                    f"Kernel is starting ({session_name})."
+                    if session_name is not None
+                    else "Kernel is starting."
+                )
+            elif status_data.get("runtime_state") == "dead":
+                body = (
+                    f"Kernel is dead ({session_name})."
+                    if session_name is not None
+                    else "Kernel is dead."
+                )
             else:
                 body = "Kernel is not running."
         elif command == "wait":
             status_data = cast(StatusPayload, data)
             session_label = f"session: {response.session_id}, " if response.session_id else ""
+            session_name = f"session: {response.session_id}" if response.session_id else None
             if status_data.get("alive"):
                 waited_for = status_data.get("waited_for")
                 if waited_for == "ready":
                     body = f"Kernel is ready ({session_label}pid {status_data.get('pid')})."
                 else:
                     body = f"Kernel is idle ({session_label}pid {status_data.get('pid')})."
+            elif status_data.get("runtime_state") == "starting":
+                body = (
+                    f"Kernel is starting ({session_name})."
+                    if session_name is not None
+                    else "Kernel is starting."
+                )
+            elif status_data.get("runtime_state") == "dead":
+                body = (
+                    f"Kernel is dead ({session_name})."
+                    if session_name is not None
+                    else "Kernel is dead."
+                )
             else:
                 body = "Kernel is not running."
 
@@ -379,6 +416,15 @@ def _append_suggestions(body: str, suggestions: list[str]) -> str:
     lines = [body, "", "Next:"]
     lines.extend(f"- {suggestion}" for suggestion in suggestions)
     return "\n".join(lines)
+
+
+def _format_duration_ms(duration_ms: int) -> str:
+    if duration_ms < 1000:
+        return f"{duration_ms}ms"
+    seconds = duration_ms / 1000
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    return f"{int(seconds)}s"
 
 
 def _staleness_hint(iso_timestamp: str | None) -> str | None:

@@ -16,7 +16,7 @@ from ..execution_output import (
     execution_output_from_legacy_fields,
 )
 from ..history import HistoryRecord
-from ..payloads import ExecutionEventPayload, RunSnapshot, StoredRunSnapshot
+from ..payloads import ExecutionEventPayload, JSONValue, RunSnapshot, StoredRunSnapshot
 from ..recording import CommandRecorder, CommandRecording
 from ..state import StateRepository
 
@@ -63,6 +63,7 @@ class ExecutionRecord:
     recorded_ename: str | None = None
     recorded_evalue: str | None = None
     recorded_traceback: list[str] | None = None
+    error_data: dict[str, JSONValue] | None = None
 
     def __post_init__(self) -> None:
         if self.outputs:
@@ -148,6 +149,8 @@ class ExecutionRecord:
                 for event in self.events
             ],
         }
+        if self.error_data is not None:
+            payload["error_data"] = dict(self.error_data)
         return payload
 
     def to_storage_dict(self) -> StoredRunSnapshot:
@@ -226,10 +229,15 @@ class ExecutionRecord:
             recorded_ename=_optional_str(payload, "recorded_ename"),
             recorded_evalue=_optional_str(payload, "recorded_evalue"),
             recorded_traceback=_optional_str_list(payload, "recorded_traceback"),
+            error_data=_optional_json_object(payload, "error_data"),
         )
 
     def to_execution_payload(self) -> RunSnapshot:
-        return self.to_dict()
+        payload = self.to_dict()
+        error_data = payload.pop("error_data", None)
+        if isinstance(error_data, dict):
+            payload.update(error_data)
+        return payload
 
     def with_cancel_requested(
         self,
@@ -441,6 +449,7 @@ class ExecutionRun:
             ename=ename,
             evalue=evalue,
             traceback=traceback,
+            error_data=_error_data(error),
             journal_entries=recording.build_records(
                 ts=self.record.ts,
                 session_id=self.record.session_id,
@@ -532,6 +541,7 @@ def execution_record_from_exception(
         ename=ename,
         evalue=evalue,
         traceback=traceback,
+        error_data=_error_data(error),
     )
     return replace(
         record,
@@ -601,6 +611,15 @@ def _optional_bool(payload: dict[str, Any], key: str) -> bool | None:
     return value
 
 
+def _optional_json_object(payload: dict[str, Any], key: str) -> dict[str, JSONValue] | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"Invalid {key}")
+    return _json_object(cast(dict[str, object], value))
+
+
 def _optional_terminal_reason(payload: dict[str, Any], key: str) -> TerminalReason | None:
     value = payload.get(key)
     if value is None:
@@ -635,6 +654,39 @@ def _merge_records(previous: ExecutionRecord, current: ExecutionRecord) -> Execu
         changes["recorded_evalue"] = previous.recorded_evalue
     if current.recorded_traceback is None and previous.recorded_traceback is not None:
         changes["recorded_traceback"] = list(previous.recorded_traceback)
+    if current.error_data is None and previous.error_data is not None:
+        changes["error_data"] = dict(previous.error_data)
     if not changes:
         return current
     return replace(current, **changes)
+
+
+def _error_data(error: Exception) -> dict[str, JSONValue] | None:
+    if not isinstance(error, AgentNBException) or not error.data:
+        return None
+    return _json_object(error.data)
+
+
+def _json_object(payload: dict[str, object]) -> dict[str, JSONValue]:
+    normalized: dict[str, JSONValue] = {}
+    for key, value in payload.items():
+        normalized_value = _json_value(value)
+        if normalized_value is None and value is not None:
+            continue
+        normalized[key] = normalized_value
+    return normalized
+
+
+def _json_value(value: object) -> JSONValue:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict):
+        normalized: dict[str, JSONValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                key = str(key)
+            normalized[key] = _json_value(item)
+        return normalized
+    return str(value)

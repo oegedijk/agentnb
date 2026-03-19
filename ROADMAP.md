@@ -116,15 +116,19 @@ Two prep refactors are now in place and should be treated as the primary seams f
 
 The remaining fixes below should extend those seams instead of reintroducing timing inference in app/CLI code or token-shuffling heuristics in the parser.
 
+### Shipped So Far
+
+- Fixed dead-kernel detection on hard exits: when the kernel dies during an exec (`os._exit(1)`, crash, worker disappearance), the triggering command now fails quickly with `KERNEL_DEAD` instead of hanging until an external timeout or later `status` call reveals the problem.
+- Made runtime state visible in `status` / `wait`: machine payloads now expose `runtime_state` and `session_exists`, and human output distinguishes `starting` / `dead` instead of flattening them into "not running".
+- Added a structured "session busy" contract: command-lock files now persist acquisition metadata, `RuntimeState` carries current lock facts, `status` exposes `lock_pid` / `lock_acquired_at` / `busy_for_ms`, and `SESSION_BUSY` exec/reset failures include `wait_behavior`, `waited_ms`, and current lock metadata.
+
 ### Planned
 
-- Fix dead-kernel detection on hard exits: when the kernel dies during an exec (`os._exit(1)`, crash, worker disappearance), the triggering command should fail quickly with a clear dead-kernel error instead of hanging until an external `status` call reveals the problem. This should deepen `RuntimeState` / `KernelRuntime.execute`, not add another CLI-local timeout path.
-- Make auto-start state legible during startup races: `status`, `vars`, and other read-only commands should not report "Kernel is not running" or "No kernel running" while an auto-started exec for that same session is already in flight. Either they should block briefly for startup completion or return a distinct `starting` state projected from `RuntimeState`.
+- Complete auto-start state handling for the remaining read-only commands: `vars` and similar commands should not report "Kernel is not running" or "No kernel running" while an auto-started exec for that same session is already in flight. Either they should block briefly for startup completion or return a distinct `starting` state projected from `RuntimeState`.
 - Unify `--session` and `--project` option placement across commands: top-level and subcommand-position forms should both work consistently for `history`, `runs`, lifecycle commands, and any other command that advertises those options. Extend `CommandShape` metadata and canonicalization instead of adding parser exceptions.
 - Fix run-control command targeting docs and behavior: if `runs show/follow/wait/cancel` are intentionally session-independent once an `execution_id` is known, remove misleading help text that suggests `--session` works there; otherwise, make the grammar and declarations agree through `CommandShape` and `cli.py`.
 - Make `history @last-error` prefer the last execution error over incidental control-plane errors like `SessionBusyError`, or add a separate selector for "last execution error" so recovery commands point at the failure the user actually cares about.
 - Clarify foreground versus background serialization semantics: if a second command after `--background` is queued rather than rejected, document and surface that behavior explicitly; if fail-fast is intended, enforce it consistently.
-- Add a bounded "session busy" contract improvement: include whether the command failed immediately or after waiting, plus how long it waited, so the agent can distinguish contention from slow compute. Model the source facts in `RuntimeState` / session-state metadata first, then project them into payloads.
 - Improve current-session visibility in multi-session workflows: make implicit session targeting more obvious after commands complete, and reduce cases where an unqualified follow-up silently lands on a different live session than expected. The decision logic belongs in `AgentNBApp`; rendering belongs downstream.
 - Tighten `runs show` staleness semantics: a run snapshot labeled `[running]` should not look effectively complete without explaining that the snapshot may be stale relative to live follow output.
 - Add a first-class partial file rerun path: support rerunning only the changed tail of a file-backed workflow without manual copy-paste back into inline exec.

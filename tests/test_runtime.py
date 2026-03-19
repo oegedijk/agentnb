@@ -12,8 +12,10 @@ from agentnb.contracts import KernelStatus
 from agentnb.errors import (
     AmbiguousSessionError,
     ExecutionTimedOutError,
+    KernelDiedError,
     KernelNotReadyError,
     KernelWaitTimedOutError,
+    SessionBusyError,
     SessionNotFoundError,
 )
 from agentnb.execution import ExecutionRecord, ExecutionStore
@@ -138,7 +140,7 @@ def test_runtime_execute_reports_kernel_not_ready_when_connection_exists_without
         runtime.execute(project_root=project_dir, code="1 + 1", timeout_s=5)
 
 
-def test_runtime_execute_reports_kernel_not_ready_when_session_exists_but_status_is_not_alive(
+def test_runtime_execute_reports_dead_kernel_when_session_exists_but_status_is_not_alive(
     project_dir: Path,
 ) -> None:
     session = SessionInfo(
@@ -157,7 +159,7 @@ def test_runtime_execute_reports_kernel_not_ready_when_session_exists_but_status
     backend.status.return_value = KernelStatus(alive=False)
     runtime = KernelRuntime(backend=backend)
 
-    with pytest.raises(KernelNotReadyError):
+    with pytest.raises(KernelDiedError):
         runtime.execute(project_root=project_dir, code="1 + 1", timeout_s=5)
 
 
@@ -436,12 +438,25 @@ def test_runtime_wait_for_ready_returns_when_status_becomes_alive(
     backend = Mock()
     runtime = KernelRuntime(backend=backend)
 
-    status_calls = [
-        KernelStatus(alive=False),
-        KernelStatus(alive=False),
-        KernelStatus(alive=True, pid=123),
+    state_calls = [
+        RuntimeState(
+            kind="missing",
+            session_id="default",
+            kernel_status=KernelStatus(alive=False),
+        ),
+        RuntimeState(
+            kind="starting",
+            session_id="default",
+            kernel_status=KernelStatus(alive=False),
+            has_connection_file=True,
+        ),
+        RuntimeState(
+            kind="ready",
+            session_id="default",
+            kernel_status=KernelStatus(alive=True, pid=123, busy=False),
+        ),
     ]
-    mocker.patch.object(runtime, "status", side_effect=status_calls)
+    mocker.patch.object(runtime, "runtime_state", side_effect=state_calls)
 
     ready = runtime.wait_for_ready(
         project_root=project_dir,
@@ -457,7 +472,15 @@ def test_runtime_wait_for_ready_returns_when_status_becomes_alive(
 def test_runtime_wait_for_ready_times_out(project_dir: Path, mocker) -> None:
     backend = Mock()
     runtime = KernelRuntime(backend=backend)
-    mocker.patch.object(runtime, "status", return_value=KernelStatus(alive=False))
+    mocker.patch.object(
+        runtime,
+        "runtime_state",
+        return_value=RuntimeState(
+            kind="missing",
+            session_id="default",
+            kernel_status=KernelStatus(alive=False),
+        ),
+    )
 
     with pytest.raises(KernelWaitTimedOutError):
         runtime.wait_for_ready(
@@ -492,6 +515,41 @@ def test_runtime_status_reports_busy_when_command_lock_exists(project_dir: Path)
 
     assert status.alive is True
     assert status.busy is True
+
+
+def test_runtime_execute_session_busy_reports_lock_metadata(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="default")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="default",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+    acquired_at = "2026-03-19T12:00:00+00:00"
+    store.command_lock_file.write_text(
+        (f'{{"pid": {os.getpid()}, "acquired_at": "{acquired_at}"}}'),
+        encoding="utf-8",
+    )
+
+    backend = Mock()
+    backend.status.return_value = KernelStatus(alive=True, pid=os.getpid(), python="python")
+    runtime = KernelRuntime(backend=backend)
+
+    with pytest.raises(SessionBusyError) as exc_info:
+        runtime.execute(project_root=project_dir, code="1 + 1", timeout_s=5)
+
+    error_data = exc_info.value.data
+    assert error_data["wait_behavior"] == "immediate"
+    assert error_data["waited_ms"] == 0
+    assert error_data["lock_pid"] == os.getpid()
+    assert error_data["lock_acquired_at"] == acquired_at
+    assert isinstance(error_data["busy_for_ms"], int)
 
 
 def test_runtime_state_reports_starting_when_connection_exists_without_session(
@@ -545,10 +603,19 @@ def test_runtime_wait_for_idle_returns_when_status_becomes_not_busy(
     runtime = KernelRuntime(backend=Mock())
     mocker.patch.object(
         runtime,
-        "status",
+        "runtime_state",
         side_effect=[
-            KernelStatus(alive=True, busy=True),
-            KernelStatus(alive=True, busy=False),
+            RuntimeState(
+                kind="busy",
+                session_id="default",
+                kernel_status=KernelStatus(alive=True, busy=True),
+                has_command_lock=True,
+            ),
+            RuntimeState(
+                kind="ready",
+                session_id="default",
+                kernel_status=KernelStatus(alive=True, busy=False),
+            ),
         ],
     )
 
@@ -565,7 +632,16 @@ def test_runtime_wait_for_idle_returns_when_status_becomes_not_busy(
 
 def test_runtime_wait_for_idle_times_out(project_dir: Path, mocker) -> None:
     runtime = KernelRuntime(backend=Mock())
-    mocker.patch.object(runtime, "status", return_value=KernelStatus(alive=True, busy=True))
+    mocker.patch.object(
+        runtime,
+        "runtime_state",
+        return_value=RuntimeState(
+            kind="busy",
+            session_id="default",
+            kernel_status=KernelStatus(alive=True, busy=True),
+            has_command_lock=True,
+        ),
+    )
 
     with pytest.raises(KernelWaitTimedOutError):
         runtime.wait_for_idle(
@@ -664,9 +740,52 @@ def test_runtime_wait_for_usable_waits_for_idle_when_busy(project_dir: Path, moc
     assert result.status.alive is True
     assert result.waited is True
     assert result.waited_for == "idle"
+    assert result.runtime_state == "ready"
     wait_for_idle.assert_called_once_with(
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
         poll_interval_s=0.0,
     )
+
+
+def test_runtime_wait_for_ready_raises_when_session_is_dead(project_dir: Path, mocker) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    mocker.patch.object(
+        runtime,
+        "runtime_state",
+        return_value=RuntimeState(
+            kind="dead",
+            session_id="default",
+            kernel_status=KernelStatus(alive=False, pid=123),
+        ),
+    )
+
+    with pytest.raises(KernelDiedError):
+        runtime.wait_for_ready(
+            project_root=project_dir,
+            session_id="default",
+            timeout_s=1.0,
+            poll_interval_s=0.0,
+        )
+
+
+def test_runtime_wait_for_usable_raises_when_session_is_dead(project_dir: Path, mocker) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    mocker.patch.object(
+        runtime,
+        "runtime_state",
+        return_value=RuntimeState(
+            kind="dead",
+            session_id="default",
+            kernel_status=KernelStatus(alive=False, pid=123),
+        ),
+    )
+
+    with pytest.raises(KernelDiedError):
+        runtime.wait_for_usable(
+            project_root=project_dir,
+            session_id="default",
+            timeout_s=1.0,
+            poll_interval_s=0.0,
+        )

@@ -187,6 +187,55 @@ def test_render_human_status_busy_and_interrupt_stop() -> None:
     assert render_human(interrupt_response, options=RenderOptions()) == "Interrupt signal sent."
 
 
+def test_render_human_status_busy_includes_busy_duration() -> None:
+    response = success_response(
+        command="status",
+        project="/tmp/project",
+        session_id="default",
+        data={"alive": True, "pid": 321, "busy": True, "busy_for_ms": 1500},
+    )
+
+    assert (
+        render_human(response, options=RenderOptions())
+        == "Kernel is running (session: default, pid 321, busy for 1.5s)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "data", "expected"),
+    [
+        (
+            "status",
+            {"alive": False, "runtime_state": "starting"},
+            "Kernel is starting (session: default).",
+        ),
+        (
+            "status",
+            {"alive": False, "runtime_state": "dead"},
+            "Kernel is dead (session: default).",
+        ),
+        (
+            "wait",
+            {"alive": False, "runtime_state": "starting"},
+            "Kernel is starting (session: default).",
+        ),
+    ],
+)
+def test_render_human_projects_runtime_state(
+    command: str,
+    data: dict[str, object],
+    expected: str,
+) -> None:
+    response = success_response(
+        command=command,
+        project="/tmp/project",
+        session_id="default",
+        data=data,
+    )
+
+    assert render_human(response, options=RenderOptions()) == expected
+
+
 def test_render_human_wait_variants() -> None:
     idle_response = success_response(
         command="wait",

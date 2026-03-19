@@ -13,6 +13,7 @@ from agentnb.errors import (
     KernelNotReadyError,
     NoKernelRunningError,
     RunWaitTimedOutError,
+    SessionBusyError,
 )
 from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.kernel.backend import BackendCapabilities
@@ -248,6 +249,47 @@ def test_local_run_manager_submit_reset_persists_non_kernel_errors(project_dir: 
     assert stored[0].ename == "RuntimeError"
     assert exc_info.value.code == "EXECUTION_ERROR"
     assert exc_info.value.data["execution_id"] == stored[0].execution_id
+
+
+def test_local_run_manager_submit_exec_preserves_agent_error_metadata(project_dir: Path) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.execute.side_effect = SessionBusyError(
+        wait_behavior="immediate",
+        waited_ms=0,
+        lock_pid=321,
+        lock_acquired_at="2026-03-19T12:00:00+00:00",
+        busy_for_ms=1500,
+    )
+    manager = LocalRunManager(runtime)
+
+    with pytest.raises(AgentNBException) as exc_info:
+        manager.submit(
+            RunSpec(
+                project_root=project_dir,
+                session_id="default",
+                command_type="exec",
+                code="1 + 1",
+                mode="foreground",
+                timeout_s=6.0,
+            )
+        )
+
+    stored = ExecutionStore(project_dir).read(session_id="default")
+    assert len(stored) == 1
+    assert stored[0].status == "error"
+    assert stored[0].error_data == {
+        "wait_behavior": "immediate",
+        "waited_ms": 0,
+        "lock_pid": 321,
+        "lock_acquired_at": "2026-03-19T12:00:00+00:00",
+        "busy_for_ms": 1500,
+    }
+    assert exc_info.value.code == "SESSION_BUSY"
+    assert exc_info.value.data["execution_id"] == stored[0].execution_id
+    assert exc_info.value.data["wait_behavior"] == "immediate"
+    assert exc_info.value.data["waited_ms"] == 0
+    assert exc_info.value.data["lock_pid"] == 321
+    assert exc_info.value.data["busy_for_ms"] == 1500
 
 
 @pytest.mark.parametrize("error_type", [NoKernelRunningError, KernelNotReadyError])

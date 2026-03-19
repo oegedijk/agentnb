@@ -45,6 +45,10 @@ class ResponseProjector:
                 "alive",
                 "pid",
                 "busy",
+                "lock_pid",
+                "lock_acquired_at",
+                "busy_for_ms",
+                "runtime_state",
                 "started_new",
                 "waited",
                 "waited_for",
@@ -60,6 +64,11 @@ class ResponseProjector:
                 "background",
                 "ensured_started",
                 "started_new_session",
+                "wait_behavior",
+                "waited_ms",
+                "lock_pid",
+                "lock_acquired_at",
+                "busy_for_ms",
             )
             for key in ("result", "stdout", "stderr", "selected_output", "selected_text"):
                 value = data.get(key)

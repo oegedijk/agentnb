@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import InvalidInputError
-from .state import StateRepository
+from .state import CommandLockInfo, StateRepository
 
 DEFAULT_SESSION_ID = "default"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -123,6 +123,9 @@ class SessionStore:
 
     def has_active_command_lock(self) -> bool:
         return self.state.has_active_command_lock()
+
+    def command_lock_info(self) -> CommandLockInfo | None:
+        return self.state.command_lock_info()
 
     def cleanup_stale(self) -> bool:
         session = self.load_session()

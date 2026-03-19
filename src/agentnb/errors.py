@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 
 class AgentNBException(Exception):
     def __init__(
@@ -37,8 +39,34 @@ class KernelNotReadyError(AgentNBException):
         )
 
 
+class KernelDiedError(AgentNBException):
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(
+            code="KERNEL_DEAD",
+            message=message or "Kernel died. Restart the session with: agentnb start",
+        )
+
+
 class SessionBusyError(AgentNBException):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        wait_behavior: Literal["immediate", "after_wait"] = "immediate",
+        waited_ms: int = 0,
+        lock_pid: int | None = None,
+        lock_acquired_at: str | None = None,
+        busy_for_ms: int | None = None,
+    ) -> None:
+        data: dict[str, object] = {
+            "wait_behavior": wait_behavior,
+            "waited_ms": max(waited_ms, 0),
+        }
+        if lock_pid is not None:
+            data["lock_pid"] = lock_pid
+        if lock_acquired_at is not None:
+            data["lock_acquired_at"] = lock_acquired_at
+        if busy_for_ms is not None:
+            data["busy_for_ms"] = max(busy_for_ms, 0)
         super().__init__(
             code="SESSION_BUSY",
             message=(
@@ -46,6 +74,7 @@ class SessionBusyError(AgentNBException):
                 "Wait for the prior command to finish, then retry. "
                 "Use one command at a time per project session."
             ),
+            data=data,
         )
 
 

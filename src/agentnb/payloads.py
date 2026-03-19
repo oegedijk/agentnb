@@ -37,6 +37,7 @@ class RunSnapshot(TypedDict, total=False):
     recorded_ename: str | None
     recorded_evalue: str | None
     recorded_traceback: list[str] | None
+    error_data: dict[str, JSONValue]
 
 
 class StoredRunSnapshot(RunSnapshot, total=False):
@@ -141,6 +142,11 @@ class StatusPayload(TypedDict, total=False):
     uptime_s: float | None
     python: str | None
     busy: bool | None
+    lock_pid: int
+    lock_acquired_at: str
+    busy_for_ms: int
+    runtime_state: Literal["missing", "starting", "ready", "busy", "dead", "stale"]
+    session_exists: bool
     waited: bool
     waited_for: Literal["ready", "idle"]
 
@@ -163,6 +169,11 @@ class ExecPayload(TypedDict, total=False):
     background: bool
     ensured_started: bool
     started_new_session: bool
+    wait_behavior: str
+    waited_ms: int
+    lock_pid: int
+    lock_acquired_at: str
+    busy_for_ms: int
     selected_output: str
     selected_text: str
 
@@ -177,6 +188,11 @@ class CompactExecPayloadInput(TypedDict, total=False):
     result: str | None
     ename: str | None
     evalue: str | None
+    wait_behavior: str
+    waited_ms: int
+    lock_pid: int
+    lock_acquired_at: str
+    busy_for_ms: int
     selected_output: str
     selected_text: str
 

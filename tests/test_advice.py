@@ -234,7 +234,21 @@ def test_advice_policy_session_busy_suggests_wait() -> None:
     ]
 
 
-@pytest.mark.parametrize("error_code", ["NO_KERNEL", "BACKEND_ERROR"])
+def test_advice_policy_status_starting_suggests_wait() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="status",
+            response_status="ok",
+            data={"alive": False, "runtime_state": "starting"},
+        )
+    )
+
+    assert suggestions == ["Run `agentnb wait --json` to wait for startup to finish."]
+
+
+@pytest.mark.parametrize("error_code", ["NO_KERNEL", "BACKEND_ERROR", "KERNEL_DEAD"])
 def test_advice_policy_dead_kernel_suggests_start_and_doctor(error_code: str) -> None:
     policy = AdvicePolicy()
 

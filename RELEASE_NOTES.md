@@ -1,3 +1,58 @@
+# v0.3.4 — Smoke-Driven Consistency And Recovery Fixes
+
+## Bug fixes
+
+**Dead-kernel detection on hard exits** — When the kernel died during an
+`exec` (for example via `os._exit(1)` or a backend crash), the triggering
+command could hang until a later timeout or until a follow-up `status` call
+made the problem visible. The execution path now fails quickly with
+`KERNEL_DEAD`.
+
+**`history @last-error` favored incidental control-plane errors** — History
+selection could return an unrelated control-plane failure instead of the most
+recent kernel execution failure the agent actually needed to inspect. Journal
+selection now prefers real execution failures and only falls back to the
+latest control-plane error when no execution failure exists.
+
+**`doctor --fix` could repair the wrong environment** — In uv-managed
+projects, automatic ipykernel repair could run outside the target project or
+against the wrong interpreter. The provisioner now runs from the target
+project root and binds the `uv pip` fallback to the selected interpreter
+before re-checking availability.
+
+**Read-only helper commands during startup were ambiguous** — `vars`,
+`inspect`, and `reload` could collapse into generic no-kernel behavior while a
+same-session startup was still in flight. These commands now return structured
+`KERNEL_NOT_READY` responses with `runtime_state=starting`.
+
+**`runs show` active snapshots were underspecified** — Persisted active run
+snapshots could be mistaken for live state. Active machine payloads now carry
+an explicit `snapshot_stale` flag to match the human warning that persisted
+state may lag live follow output.
+
+**Same-session overlap handling was inconsistent on the full CLI path** —
+Sending a second `exec` or `reset` after a background run could still block on
+startup or session-resolution probes before surfacing a busy error. Overlaps
+now fail fast against active persisted run records before startup checks run,
+and implicit session resolution no longer blocks on backend status probes
+first.
+
+## Improvements
+
+**Visible runtime state in `status` and `wait`** — Machine payloads now expose
+`runtime_state` and `session_exists`, and human output distinguishes
+`starting` and `dead` states instead of flattening them into "not running".
+
+**Structured session-busy contract** — `SESSION_BUSY` payloads now include
+`wait_behavior`, `waited_ms`, and current lock metadata (`lock_pid`,
+`lock_acquired_at`, `busy_for_ms`). When a same-session overlap is rejected at
+the run layer, the payload also includes the blocking `active_execution_id`.
+
+**Current-session visibility in multi-session workflows** — Implicit
+session-bound commands now refresh the saved current-session preference and
+surface a switch notice when agentnb resolves to a different known session
+than the one previously targeted.
+
 # v0.3.3 — Bug Fixes And Ergonomic Improvements From Second Smoke Run
 
 ## Bug fixes

@@ -175,19 +175,39 @@ class KernelRuntime:
     ) -> tuple[KernelStatus, bool]:
         return self.start(project_root=project_root, session_id=session_id)
 
-    def list_sessions(self, project_root: Path) -> list[SessionSummary]:
+    def list_sessions(
+        self,
+        project_root: Path,
+        *,
+        probe_backend: bool = True,
+    ) -> list[SessionSummary]:
         current_session_id = self.current_session_id(project_root=project_root)
         entries: list[SessionSummary] = []
         for session in SessionStore.list_sessions(project_root):
-            store, state = self._resolve_runtime_state(
-                project_root=project_root,
-                session_id=session.session_id,
-            )
-            if state.kind not in {"ready", "busy"} or state.session is None:
-                store.delete_session()
-                continue
-            status = state.to_kernel_status()
-            current = state.session
+            store = SessionStore(project_root=project_root, session_id=session.session_id)
+            if not probe_backend:
+                if not pid_exists(session.pid) or not Path(session.connection_file).exists():
+                    continue
+                command_lock = store.command_lock_info()
+                status = KernelStatus(
+                    alive=True,
+                    pid=session.pid,
+                    connection_file=session.connection_file,
+                    started_at=session.started_at,
+                    python=session.python_executable,
+                    busy=command_lock is not None,
+                )
+                current = session
+            else:
+                store, state = self._resolve_runtime_state(
+                    project_root=project_root,
+                    session_id=session.session_id,
+                )
+                if state.kind not in {"ready", "busy"} or state.session is None:
+                    store.delete_session()
+                    continue
+                status = state.to_kernel_status()
+                current = state.session
             entries.append(
                 {
                     "session_id": current.session_id,
@@ -242,7 +262,8 @@ class KernelRuntime:
         if not require_live_session:
             return preferred_session_id or DEFAULT_SESSION_ID
 
-        live_session_ids = self._live_session_ids_for_resolution(project_root=project_root)
+        sessions = self.list_sessions(project_root=project_root, probe_backend=False)
+        live_session_ids = [str(session["session_id"]) for session in sessions]
         if preferred_session_id is not None:
             if not live_session_ids:
                 return preferred_session_id
@@ -257,7 +278,8 @@ class KernelRuntime:
     def _check_session_prefix_collision(
         self, *, project_root: Path, requested_session_id: str
     ) -> None:
-        live_ids = self._live_session_ids_for_resolution(project_root=project_root)
+        sessions = self.list_sessions(project_root=project_root, probe_backend=False)
+        live_ids = [str(session["session_id"]) for session in sessions]
         if not live_ids:
             return
         if requested_session_id in live_ids:
@@ -265,16 +287,6 @@ class KernelRuntime:
         prefix_matches = [sid for sid in live_ids if sid.startswith(requested_session_id)]
         if prefix_matches:
             raise AmbiguousSessionError(prefix_matches)
-
-    def _live_session_ids_for_resolution(self, *, project_root: Path) -> list[str]:
-        live_ids: list[str] = []
-        for session in SessionStore.list_sessions(project_root):
-            if not pid_exists(session.pid):
-                continue
-            if not Path(session.connection_file).exists():
-                continue
-            live_ids.append(session.session_id)
-        return live_ids
 
     def current_session_id(self, *, project_root: Path) -> str | None:
         return StateRepository(project_root).session_preferences().current_session_id

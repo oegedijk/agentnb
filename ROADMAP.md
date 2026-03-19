@@ -128,13 +128,15 @@ The remaining fixes below should extend those seams instead of reintroducing tim
 - Clarified same-session foreground/background serialization: overlapping `exec` / `reset` attempts now fail fast against active persisted run records before startup checks run, `SESSION_BUSY` responses include the blocking `active_execution_id`, and recovery suggestions point directly at `runs wait/show` for that run.
 - Improved current-session visibility in multi-session workflows: implicit session-bound commands now refresh the saved current-session preference and surface a switch notice when agentnb resolves to a different known session than the one previously targeted.
 
-### Planned
+### Validated And Removed From Scope
 
-- Unify `--session` and `--project` option placement across commands: top-level and subcommand-position forms should both work consistently for `history`, `runs`, lifecycle commands, and any other command that advertises those options. Extend `CommandShape` metadata and canonicalization instead of adding parser exceptions.
-- Fix run-control command targeting docs and behavior: if `runs show/follow/wait/cancel` are intentionally session-independent once an `execution_id` is known, remove misleading help text that suggests `--session` works there; otherwise, make the grammar and declarations agree through `CommandShape` and `cli.py`.
-- Add a first-class partial file rerun path: support rerunning only the changed tail of a file-backed workflow without manual copy-paste back into inline exec.
-- Improve in-session dependency recovery guidance: when a module import fails, suggestions should acknowledge uv-managed environments, pip-less venvs, and the difference between installing into the project environment versus the caller's environment.
-- Make cross-project driving uniform: `--project /other/path` should work the same way for `exec`, `vars`, `history`, `runs`, and lifecycle commands, with no command-specific flag placement surprises. This should be expressed through `CommandShape` plus matching Click declarations.
+- Root-position `--project` / `--session` placement for representative command families is already working through `CommandShape` + `InvocationResolver`: live smoke confirmed `agentnb --project PATH history`, `agentnb --project PATH runs show`, `agentnb --project PATH runs wait`, and `agentnb --session NAME --project PATH history/vars` all resolve correctly.
+- Run-control help text and targeting are already aligned for execution-id based commands: `runs show/follow/wait/cancel --help` no longer advertises `--session`, and live smoke confirmed root-position `--project` works for those subcommands.
+- Missing-module recovery guidance is already uv-aware: real CLI smoke confirmed `ModuleNotFoundError` suggestions now recommend `uv add PACKAGE` in the shell, not inside the live session.
+
+### Deferred To v0.4
+
+- Partial file rerun remains valuable, but it is new file-execution surface area rather than consistency polish. Keep it with the broader file execution work already planned in v0.4.
 
 ### Owning Seams
 

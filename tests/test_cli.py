@@ -16,6 +16,7 @@ from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink, Ke
 from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
 from agentnb.journal import JournalEntry, JournalQuery
+from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
@@ -501,6 +502,30 @@ def test_cli_returns_kernel_not_ready_error_when_connection_exists_without_sessi
     assert _error(payload)["code"] == "KERNEL_NOT_READY"
 
 
+def test_cli_vars_projects_starting_state_when_connection_exists_without_session(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    state_dir = project_dir / ".agentnb"
+    state_dir.mkdir()
+    (state_dir / "kernel-default.json").write_text("{}", encoding="utf-8")
+
+    result = cli_runner.invoke(
+        main,
+        ["vars", "--project", str(project_dir), "--json"],
+    )
+    assert result.exit_code == 1
+
+    payload = _payload(result.output)
+    assert payload["status"] == "error"
+    assert _error(payload)["code"] == "KERNEL_NOT_READY"
+    assert payload["data"]["runtime_state"] == "starting"
+    assert payload["data"]["session_exists"] is False
+    assert payload["suggestions"] == [
+        "Run `agentnb wait --json` to wait for startup to finish.",
+        "Run `agentnb status --json` to inspect the current session state.",
+    ]
+
+
 def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
     cli_runner: CliRunner, project_dir: Path
 ) -> None:
@@ -536,11 +561,17 @@ def test_cli_status_uses_only_live_session_when_implicit(
         {"session_id": "analysis"}
     ]
 
-    def status_stub(**kwargs: object) -> object:
+    def state_stub(**kwargs: object) -> object:
         status_calls.append(dict(kwargs))
-        return KernelStatus(alive=True, pid=123)
+        from agentnb.runtime import RuntimeState
 
-    cli.runtime.status = status_stub  # type: ignore[method-assign]
+        return RuntimeState(
+            kind="ready",
+            session_id="analysis",
+            kernel_status=KernelStatus(alive=True, pid=123, busy=False),
+        )
+
+    cli.runtime.runtime_state = state_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(main, ["status", "--project", str(project_dir), "--json"])
 
@@ -616,6 +647,7 @@ def test_cli_wait_uses_runtime_wait_for_usable(
             status=KernelStatus(alive=True, pid=321, busy=False),
             waited=False,
             waited_for=None,
+            runtime_state="ready",
         )
 
     cli.runtime.wait_for_usable = wait_stub  # type: ignore[method-assign]
@@ -815,7 +847,7 @@ def test_cli_agent_preset_enables_json_and_suppresses_suggestions(
         "ok": True,
         "command": "status",
         "session_id": "default",
-        "data": {"alive": False},
+        "data": {"alive": False, "runtime_state": "missing"},
     }
 
 
@@ -828,7 +860,7 @@ def test_cli_root_flags_work_after_subcommand(cli_runner: CliRunner, project_dir
         "ok": True,
         "command": "status",
         "session_id": "default",
-        "data": {"alive": False},
+        "data": {"alive": False, "runtime_state": "missing"},
     }
 
 
@@ -1300,6 +1332,7 @@ def test_cli_history_last_error_selector_uses_history_reference(
     assert payload["data"]["entries"][0]["label"] == "exec error ZeroDivisionError"
     assert queries[0].latest is True
     assert queries[0].errors_only is True
+    assert queries[0].prefer_execution_errors is True
 
 
 def test_cli_sessions_list_returns_runtime_entries(
@@ -1562,6 +1595,35 @@ def test_cli_runs_show_human_clarifies_snapshot_for_running_run(
     )
 
 
+def test_cli_runs_show_json_marks_running_snapshot_as_stale(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "ts": "2026-03-10T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "running",
+        "snapshot_stale": True,
+        "duration_ms": 12,
+        "stdout": "",
+        "stderr": "",
+        "result": None,
+        "events": [],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["run"]["snapshot_stale"] is True
+
+
 def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
@@ -1812,7 +1874,13 @@ def test_cli_exec_returns_session_busy_when_lock_exists(
     import agentnb.cli as cli
 
     def raise_busy(**_: object) -> ExecutionResult:
-        raise SessionBusyError()
+        raise SessionBusyError(
+            wait_behavior="immediate",
+            waited_ms=0,
+            lock_pid=321,
+            lock_acquired_at="2026-03-19T12:00:00+00:00",
+            busy_for_ms=1500,
+        )
 
     cli.executions.execute_code = raise_busy  # type: ignore[method-assign]
     exec_res = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1 + 1"])
@@ -1822,6 +1890,119 @@ def test_cli_exec_returns_session_busy_when_lock_exists(
     error = _error(payload)
     assert error["code"] == "SESSION_BUSY"
     assert "Wait for the prior command to finish" in error["message"]
+    assert payload["data"]["wait_behavior"] == "immediate"
+    assert payload["data"]["waited_ms"] == 0
+    assert payload["data"]["lock_pid"] == 321
+    assert payload["data"]["lock_acquired_at"] == "2026-03-19T12:00:00+00:00"
+    assert payload["data"]["busy_for_ms"] == 1500
+
+
+def test_cli_background_overlap_fails_fast_with_blocking_run_id(
+    cli_runner: CliRunner,
+    started_runtime: tuple[object, Path],
+) -> None:
+    _, project_dir = started_runtime
+
+    background = cli_runner.invoke(
+        main,
+        [
+            "--project",
+            str(project_dir),
+            "--json",
+            "--background",
+            "import time; time.sleep(1.5); 'done'",
+        ],
+    )
+    assert background.exit_code == 0
+    background_payload = _payload(background.output)
+    blocking_execution_id = background_payload["data"]["execution_id"]
+
+    result = cli_runner.invoke(main, ["--project", str(project_dir), "--json", "99"])
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert _error(payload)["code"] == "SESSION_BUSY"
+    assert payload["data"]["active_execution_id"] == blocking_execution_id
+    assert payload["suggestions"] == [
+        f"Run `agentnb runs wait {blocking_execution_id} --json` to wait for the blocking run.",
+        f"Run `agentnb runs show {blocking_execution_id} --json` to inspect the blocking run.",
+    ]
+
+    wait_result = cli_runner.invoke(
+        main,
+        ["runs", "wait", blocking_execution_id, "--project", str(project_dir), "--json"],
+    )
+    assert wait_result.exit_code == 0
+
+
+def test_cli_status_human_reports_implicit_session_switch(
+    cli_runner: CliRunner,
+    runtime,
+    project_dir: Path,
+) -> None:
+    runtime.start(project_dir, session_id="analysis")
+    runtime.remember_current_session(project_root=project_dir, session_id="default")
+
+    try:
+        result = cli_runner.invoke(main, ["status", "--project", str(project_dir)])
+    finally:
+        runtime.stop(project_dir, session_id="analysis")
+
+    assert result.exit_code == 0
+    assert "session: analysis" in result.output
+    assert "(now targeting session: analysis)" in result.output
+
+
+def test_cli_doctor_fix_uses_target_project_root(
+    cli_runner: CliRunner,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agentnb.cli as cli
+
+    calls: list[dict[str, object]] = []
+
+    class FakeProvisioner:
+        def __init__(self, project_root: Path) -> None:
+            self.project_root = project_root
+
+        def doctor(
+            self,
+            preferred_python: Path | None = None,
+            auto_fix: bool = False,
+        ) -> DoctorReport:
+            calls.append(
+                {
+                    "project_root": self.project_root,
+                    "preferred_python": preferred_python,
+                    "auto_fix": auto_fix,
+                }
+            )
+            return DoctorReport(
+                ready=True,
+                selected_python="/custom/python",
+                python_source="explicit",
+                checks=[DoctorCheck(name="python", status="ok", message="ok")],
+            )
+
+    monkeypatch.setattr(
+        cli.runtime,
+        "_provisioner_factory",
+        lambda project_root: FakeProvisioner(project_root),
+    )
+
+    result = cli_runner.invoke(main, ["doctor", "--project", str(project_dir), "--fix", "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["ready"] is True
+    assert calls == [
+        {
+            "project_root": project_dir.resolve(),
+            "preferred_python": None,
+            "auto_fix": True,
+        }
+    ]
 
 
 def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Path) -> None:

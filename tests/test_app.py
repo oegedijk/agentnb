@@ -8,6 +8,8 @@ from agentnb.app import (
     AgentNBApp,
     ExecRequest,
     HistoryRequest,
+    InspectRequest,
+    ReloadRequest,
     ResetRequest,
     RunLookupRequest,
     RunsFollowRequest,
@@ -16,6 +18,7 @@ from agentnb.app import (
     SessionsDeleteRequest,
     SessionsListRequest,
     StatusRequest,
+    VarsRequest,
     WaitRequest,
 )
 from agentnb.contracts import KernelStatus
@@ -23,8 +26,9 @@ from agentnb.errors import AmbiguousSessionError
 from agentnb.execution import ExecutionRecord, ExecutionService, ManagedExecution
 from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.journal import JournalEntry
-from agentnb.runtime import KernelRuntime
+from agentnb.runtime import KernelRuntime, RuntimeState
 from agentnb.selectors import parse_history_reference, parse_run_reference
+from agentnb.state import CommandLockInfo
 
 
 class DummySink:
@@ -312,6 +316,93 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
     runtime.status.assert_not_called()
 
 
+def test_app_status_projects_runtime_state_for_starting_session(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="starting",
+        session_id="analysis",
+        kernel_status=KernelStatus(alive=False),
+        has_connection_file=True,
+    )
+    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
+
+    response = app.status(StatusRequest(project_root=project_dir))
+
+    assert response.status == "ok"
+    assert response.session_id == "analysis"
+    assert response.data["alive"] is False
+    assert response.data["runtime_state"] == "starting"
+    assert response.data["session_exists"] is False
+    runtime.runtime_state.assert_called_once()
+    runtime.status.assert_not_called()
+
+
+def test_app_status_projects_busy_lock_metadata(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="busy",
+        session_id="analysis",
+        kernel_status=KernelStatus(alive=True, pid=123, busy=True),
+        command_lock=CommandLockInfo(
+            pid=987,
+            acquired_at="2026-03-19T12:00:00+00:00",
+        ),
+        has_command_lock=True,
+    )
+    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
+
+    response = app.status(StatusRequest(project_root=project_dir))
+
+    assert response.status == "ok"
+    assert response.data["busy"] is True
+    assert response.data["lock_pid"] == 987
+    assert response.data["lock_acquired_at"] == "2026-03-19T12:00:00+00:00"
+    assert isinstance(response.data["busy_for_ms"], int)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "request_factory"),
+    [
+        ("vars", lambda project_dir: VarsRequest(project_root=project_dir)),
+        ("inspect", lambda project_dir: InspectRequest(project_root=project_dir, name="value")),
+        ("reload", lambda project_dir: ReloadRequest(project_root=project_dir)),
+    ],
+)
+def test_app_read_commands_project_starting_state_without_running_helpers(
+    project_dir,
+    method_name: str,
+    request_factory,
+) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="starting",
+        session_id="analysis",
+        kernel_status=KernelStatus(alive=False),
+        has_connection_file=True,
+    )
+    ops = Mock()
+    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService), ops=ops)
+
+    response = getattr(app, method_name)(request_factory(project_dir))
+
+    assert response.status == "error"
+    assert response.session_id == "analysis"
+    assert response.error is not None
+    assert response.error.code == "KERNEL_NOT_READY"
+    assert response.data["runtime_state"] == "starting"
+    assert response.data["session_exists"] is False
+    runtime.runtime_state.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        session_id="analysis",
+    )
+    ops.list_vars.assert_not_called()
+    ops.inspect_var.assert_not_called()
+    ops.reload_module.assert_not_called()
+
+
 def test_app_wait_uses_runtime_wait_for_usable(project_dir, mocker) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
@@ -319,6 +410,7 @@ def test_app_wait_uses_runtime_wait_for_usable(project_dir, mocker) -> None:
         status=KernelStatus(alive=True, pid=123, busy=False),
         waited=True,
         waited_for="idle",
+        runtime_state="ready",
     )
     app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
 
@@ -335,6 +427,7 @@ def test_app_wait_uses_runtime_wait_for_usable(project_dir, mocker) -> None:
     assert response.data["alive"] is True
     assert response.data["waited"] is True
     assert response.data["waited_for"] == "idle"
+    assert response.data["runtime_state"] == "ready"
     runtime.wait_for_usable.assert_called_once()
     _assert_called_with_subset(
         runtime.wait_for_usable,
@@ -748,7 +841,12 @@ def test_app_sessions_delete_routes_named_session_through_handle_command(project
 def test_app_status_remembers_explicit_session_selection(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
-    runtime.status.return_value = KernelStatus(alive=True, pid=123, busy=False)
+    runtime.current_session_id.return_value = "default"
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="ready",
+        session_id="analysis",
+        kernel_status=KernelStatus(alive=True, pid=123, busy=False),
+    )
     app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
 
     response = app.status(
@@ -763,3 +861,46 @@ def test_app_status_remembers_explicit_session_selection(project_dir) -> None:
         project_root=project_dir.resolve(),
         session_id="analysis",
     )
+    assert response.data["switched_session"] == "analysis"
+
+
+def test_app_status_remembers_implicit_session_selection(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.current_session_id.return_value = "default"
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="ready",
+        session_id="analysis",
+        kernel_status=KernelStatus(alive=True, pid=123, busy=False),
+    )
+    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
+
+    response = app.status(StatusRequest(project_root=project_dir))
+
+    assert response.status == "ok"
+    runtime.remember_current_session.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        session_id="analysis",
+    )
+    assert response.data["switched_session"] == "analysis"
+
+
+def test_app_runs_show_does_not_remember_session_preference(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "default"
+    runtime.current_session_id.return_value = "analysis"
+    executions = Mock(spec=ExecutionService)
+    executions.get_run.return_value = {
+        "execution_id": "run-1",
+        "session_id": "other",
+        "status": "ok",
+    }
+    app = AgentNBApp(runtime=runtime, executions=executions)
+
+    response = app.runs_show(
+        RunLookupRequest(project_root=project_dir, run_reference=parse_run_reference("run-1"))
+    )
+
+    assert response.status == "ok"
+    runtime.remember_current_session.assert_not_called()
+    assert "switched_session" not in response.data

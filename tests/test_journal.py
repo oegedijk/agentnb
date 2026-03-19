@@ -175,6 +175,77 @@ def test_command_journal_select_applies_latest_and_last_queries(populated_journa
     assert [entry.label for entry in last_two.entries] == ["reset", "inspect thing"]
 
 
+def test_command_journal_latest_error_prefers_kernel_failure_over_control_error(
+    project_dir: Path,
+    journal_builder: dict[str, Any],
+) -> None:
+    journal_builder["execution"](
+        execution_id="run-kernel-error",
+        ts="2026-03-10T00:00:01+00:00",
+        session_id="default",
+        command_type="exec",
+        status="error",
+        duration_ms=12,
+        code="1 / 0",
+        ename="ZeroDivisionError",
+        failure_origin="kernel",
+    )
+    journal_builder["execution"](
+        execution_id="run-busy",
+        ts="2026-03-10T00:00:02+00:00",
+        session_id="default",
+        command_type="exec",
+        status="error",
+        duration_ms=0,
+        code="99",
+        ename="SessionBusyError",
+        failure_origin="control",
+    )
+
+    selection = CommandJournal().select(
+        project_root=project_dir,
+        query=JournalQuery(
+            session_id="default",
+            errors_only=True,
+            latest=True,
+            prefer_execution_errors=True,
+        ),
+    )
+
+    assert [entry.label for entry in selection.entries] == ["exec"]
+    assert selection.entries[0].execution_id == "run-kernel-error"
+
+
+def test_command_journal_latest_error_falls_back_to_control_error_when_needed(
+    project_dir: Path,
+    journal_builder: dict[str, Any],
+) -> None:
+    journal_builder["execution"](
+        execution_id="run-busy",
+        ts="2026-03-10T00:00:02+00:00",
+        session_id="default",
+        command_type="exec",
+        status="error",
+        duration_ms=0,
+        code="99",
+        ename="SessionBusyError",
+        failure_origin="control",
+    )
+
+    selection = CommandJournal().select(
+        project_root=project_dir,
+        query=JournalQuery(
+            session_id="default",
+            errors_only=True,
+            latest=True,
+            prefer_execution_errors=True,
+        ),
+    )
+
+    assert [entry.label for entry in selection.entries] == ["exec"]
+    assert selection.entries[0].execution_id == "run-busy"
+
+
 def test_command_journal_select_can_filter_by_execution_id(populated_journal: Path) -> None:
     selection = CommandJournal().select(
         project_root=populated_journal,

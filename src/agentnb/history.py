@@ -12,6 +12,7 @@ from .session import DEFAULT_SESSION_ID
 from .state import StateRepository
 
 HistoryKind = Literal["user_command", "kernel_execution"]
+FailureOrigin = Literal["kernel", "control"]
 
 _PREVIEW_LIMIT = 160
 
@@ -30,6 +31,7 @@ class HistoryRecordPayload(TypedDict, total=False):
     code: str
     origin: str
     error_type: str
+    failure_origin: FailureOrigin
     result_preview: str
     stdout_preview: str
 
@@ -49,6 +51,7 @@ class HistoryRecord:
     code: str | None = None
     origin: str | None = None
     error_type: str | None = None
+    failure_origin: FailureOrigin | None = None
     result_preview: str | None = None
     stdout_preview: str | None = None
 
@@ -73,6 +76,8 @@ class HistoryRecord:
             payload["origin"] = self.origin
         if self.error_type is not None:
             payload["error_type"] = self.error_type
+        if self.failure_origin is not None:
+            payload["failure_origin"] = self.failure_origin
         if self.result_preview is not None:
             payload["result_preview"] = self.result_preview
         if self.stdout_preview is not None:
@@ -98,6 +103,7 @@ class HistoryRecord:
             code=_optional_str(payload, "code"),
             origin=_optional_str(payload, "origin"),
             error_type=_optional_str(payload, "error_type"),
+            failure_origin=_optional_failure_origin(payload, "failure_origin"),
             result_preview=_optional_str(payload, "result_preview"),
             stdout_preview=_optional_str(payload, "stdout_preview"),
         )
@@ -164,6 +170,7 @@ def user_command_record(
     status: str | None = None,
     duration_ms: int | None = None,
     error_type: str | None = None,
+    failure_origin: FailureOrigin | None = None,
     stdout: str | None = None,
     result: str | None = None,
 ) -> HistoryRecord:
@@ -192,6 +199,12 @@ def user_command_record(
         origin=origin,
         user_visible=True,
         error_type=resolved_error_type,
+        failure_origin=_resolved_failure_origin(
+            execution=execution,
+            error=error,
+            status=resolved_status,
+            failure_origin=failure_origin,
+        ),
         result_preview=result_preview,
         stdout_preview=stdout_preview,
     )
@@ -211,6 +224,7 @@ def kernel_execution_record(
     status: str | None = None,
     duration_ms: int | None = None,
     error_type: str | None = None,
+    failure_origin: FailureOrigin | None = None,
     stdout: str | None = None,
     result: str | None = None,
 ) -> HistoryRecord:
@@ -238,6 +252,12 @@ def kernel_execution_record(
         origin=origin,
         user_visible=False,
         error_type=resolved_error_type,
+        failure_origin=_resolved_failure_origin(
+            execution=execution,
+            error=error,
+            status=resolved_status,
+            failure_origin=failure_origin,
+        ),
         result_preview=result_preview,
         stdout_preview=stdout_preview,
     )
@@ -345,3 +365,28 @@ def _require_bool(payload: Mapping[str, object], key: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"Invalid {key}")
     return value
+
+
+def _optional_failure_origin(payload: Mapping[str, object], key: str) -> FailureOrigin | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if value not in {"kernel", "control"}:
+        raise ValueError(f"Invalid {key}")
+    return cast(FailureOrigin, value)
+
+
+def _resolved_failure_origin(
+    *,
+    execution: ExecutionResult | None,
+    error: Exception | None,
+    status: str,
+    failure_origin: FailureOrigin | None,
+) -> FailureOrigin | None:
+    if failure_origin is not None:
+        return failure_origin
+    if status != "error":
+        return None
+    if execution is not None or error is not None:
+        return "kernel"
+    return None

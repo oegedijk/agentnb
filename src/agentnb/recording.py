@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .contracts import ExecutionResult
-from .history import HistoryRecord, HistoryStore, kernel_execution_record, user_command_record
+from .history import (
+    FailureOrigin,
+    HistoryRecord,
+    HistoryStore,
+    kernel_execution_record,
+    user_command_record,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -32,6 +38,7 @@ class CommandRecording:
         status: str | None = None,
         duration_ms: int | None = None,
         error_type: str | None = None,
+        failure_origin: FailureOrigin | None = None,
         stdout: str | None = None,
         result: str | None = None,
     ) -> list[HistoryRecord]:
@@ -48,6 +55,7 @@ class CommandRecording:
                     status=status,
                     duration_ms=duration_ms,
                     error_type=error_type,
+                    failure_origin=failure_origin,
                     stdout=stdout,
                     result=result,
                 )
@@ -63,6 +71,7 @@ class CommandRecording:
                 status=status,
                 duration_ms=duration_ms,
                 error_type=error_type,
+                failure_origin=failure_origin,
                 stdout=stdout,
                 result=result,
             )
@@ -80,6 +89,7 @@ class CommandRecording:
         status: str | None = None,
         duration_ms: int | None = None,
         error_type: str | None = None,
+        failure_origin: FailureOrigin | None = None,
         stdout: str | None = None,
         result: str | None = None,
     ) -> HistoryRecord:
@@ -93,6 +103,7 @@ class CommandRecording:
             status=status,
             duration_ms=duration_ms,
             error_type=error_type,
+            failure_origin=failure_origin,
             stdout=stdout,
             result=result,
         )
@@ -108,6 +119,7 @@ class CommandRecording:
         status: str | None = None,
         duration_ms: int | None = None,
         error_type: str | None = None,
+        failure_origin: FailureOrigin | None = None,
         stdout: str | None = None,
         result: str | None = None,
     ) -> HistoryRecord | None:
@@ -123,6 +135,7 @@ class CommandRecording:
             status=status,
             duration_ms=duration_ms,
             error_type=error_type,
+            failure_origin=failure_origin,
             stdout=stdout,
             result=result,
         )
@@ -139,6 +152,7 @@ class CommandRecording:
         status: str | None = None,
         duration_ms: int | None = None,
         error_type: str | None = None,
+        failure_origin: FailureOrigin | None = None,
         stdout: str | None = None,
         result: str | None = None,
     ) -> None:
@@ -151,6 +165,7 @@ class CommandRecording:
             status=status,
             duration_ms=duration_ms,
             error_type=error_type,
+            failure_origin=failure_origin,
             stdout=stdout,
             result=result,
         ):
@@ -168,6 +183,7 @@ class CommandRecording:
         status: str | None,
         duration_ms: int | None,
         error_type: str | None,
+        failure_origin: FailureOrigin | None,
         stdout: str | None,
         result: str | None,
     ) -> HistoryRecord:
@@ -186,6 +202,7 @@ class CommandRecording:
                 status=status,
                 duration_ms=duration_ms,
                 error_type=error_type,
+                failure_origin=failure_origin,
                 stdout=stdout,
                 result=result,
             )
@@ -202,6 +219,7 @@ class CommandRecording:
             status=status,
             duration_ms=duration_ms,
             error_type=error_type,
+            failure_origin=failure_origin,
             stdout=stdout,
             result=result,
         )

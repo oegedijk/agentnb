@@ -10,7 +10,7 @@ import pytest
 from pytest import MonkeyPatch
 from pytest_mock import MockerFixture
 
-from agentnb.errors import BackendOperationError
+from agentnb.errors import BackendOperationError, KernelDiedError
 from agentnb.kernel.backend import LocalIPythonBackend, _tail_log, _uptime_seconds
 from agentnb.kernel.provisioner import _python_supports_module
 from agentnb.session import SessionInfo
@@ -132,6 +132,59 @@ def test_execute_raises_when_connection_file_is_missing(tmp_path: Path) -> None:
     )
 
     with pytest.raises(BackendOperationError, match="connection file is missing"):
+        backend.execute(session, "1 + 1", timeout_s=1.0)
+
+
+def test_execute_raises_dead_kernel_when_process_exits_mid_execution(
+    tmp_path: Path,
+    mocker: MockerFixture,
+) -> None:
+    backend = LocalIPythonBackend()
+    connection_file = tmp_path / "kernel-default.json"
+    connection_file.write_text("{}", encoding="utf-8")
+    session = SessionInfo(
+        session_id="default",
+        pid=1234,
+        connection_file=str(connection_file),
+        python_executable="python",
+        project_root=str(tmp_path),
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+    client = Mock()
+    client.execute.return_value = "msg-1"
+    client.get_iopub_msg.side_effect = Empty()
+    mocker.patch.object(backend, "_create_client", return_value=client)
+    mocker.patch("agentnb.kernel.backend._process_is_running", return_value=False)
+    mocker.patch("agentnb.kernel.backend.time.monotonic", side_effect=[0.0, 0.0, 0.0])
+
+    with pytest.raises(KernelDiedError, match="Kernel process exited during execution"):
+        backend.execute(session, "1 + 1", timeout_s=1.0)
+
+
+def test_execute_raises_dead_kernel_when_status_probe_detects_dead_kernel(
+    tmp_path: Path,
+    mocker: MockerFixture,
+) -> None:
+    backend = LocalIPythonBackend()
+    connection_file = tmp_path / "kernel-default.json"
+    connection_file.write_text("{}", encoding="utf-8")
+    session = SessionInfo(
+        session_id="default",
+        pid=1234,
+        connection_file=str(connection_file),
+        python_executable="python",
+        project_root=str(tmp_path),
+        started_at="2026-01-01T00:00:00+00:00",
+    )
+    client = Mock()
+    client.execute.return_value = "msg-1"
+    client.get_iopub_msg.side_effect = Empty()
+    mocker.patch.object(backend, "_create_client", return_value=client)
+    mocker.patch("agentnb.kernel.backend._process_is_running", return_value=True)
+    mocker.patch.object(backend, "_probe_kernel_alive", return_value=False)
+    mocker.patch("agentnb.kernel.backend.time.monotonic", side_effect=[0.0, 0.0, 0.0])
+
+    with pytest.raises(KernelDiedError, match="Kernel stopped responding during execution"):
         backend.execute(session, "1 + 1", timeout_s=1.0)
 
 

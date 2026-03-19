@@ -44,7 +44,7 @@ from .payloads import (
     VarDisplayEntry,
     VarsPayload,
 )
-from .runtime import KernelRuntime
+from .runtime import KernelRuntime, RuntimeState, RuntimeStateKind
 from .selectors import (
     HistoryReference,
     HistorySelectorResolver,
@@ -53,6 +53,7 @@ from .selectors import (
     RunSelectorResolver,
 )
 from .session import DEFAULT_SESSION_ID
+from .state import CommandLockInfo
 
 StatusWaitFor = Literal["ready", "idle"]
 
@@ -253,6 +254,7 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=request.session_id,
             require_live_session=True,
+            project_starting_state=True,
             handler=lambda session_id: self._vars_payload(request=request, session_id=session_id),
         )
 
@@ -262,6 +264,7 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=request.session_id,
             require_live_session=True,
+            project_starting_state=True,
             handler=lambda session_id: self._inspect_payload(
                 request=request,
                 session_id=session_id,
@@ -274,6 +277,7 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=request.session_id,
             require_live_session=True,
+            project_starting_state=True,
             handler=lambda session_id: self._reload_payload(request=request, session_id=session_id),
         )
 
@@ -498,29 +502,35 @@ class AgentNBApp:
 
     def _status_payload(self, *, request: StatusRequest, session_id: str) -> StatusPayload:
         if request.wait_for == "idle":
+            status = self.runtime.wait_for_idle(
+                project_root=request.project_root,
+                session_id=session_id,
+                timeout_s=request.timeout_s,
+            )
             payload = _kernel_status_payload(
-                self.runtime.wait_for_idle(
-                    project_root=request.project_root,
-                    session_id=session_id,
-                    timeout_s=request.timeout_s,
-                )
+                status,
+                runtime_state="ready",
+                session_exists=True,
             )
             payload["waited"] = True
             payload["waited_for"] = "idle"
             return payload
         if request.wait_for == "ready":
+            status = self.runtime.wait_for_ready(
+                project_root=request.project_root,
+                session_id=session_id,
+                timeout_s=request.timeout_s,
+            )
             payload = _kernel_status_payload(
-                self.runtime.wait_for_ready(
-                    project_root=request.project_root,
-                    session_id=session_id,
-                    timeout_s=request.timeout_s,
-                )
+                status,
+                runtime_state=_runtime_state_from_status(status),
+                session_exists=True,
             )
             payload["waited"] = True
             payload["waited_for"] = "ready"
             return payload
-        return _kernel_status_payload(
-            self.runtime.status(
+        return _status_payload_from_runtime_state(
+            self.runtime.runtime_state(
                 project_root=request.project_root,
                 session_id=session_id,
             )
@@ -532,7 +542,11 @@ class AgentNBApp:
             session_id=session_id,
             timeout_s=request.timeout_s,
         )
-        payload = _kernel_status_payload(wait_result.status)
+        payload = _kernel_status_payload(
+            wait_result.status,
+            runtime_state=wait_result.runtime_state,
+            session_exists=wait_result.status.alive,
+        )
         payload["waited"] = wait_result.waited
         if wait_result.waited_for is not None:
             payload["waited_for"] = wait_result.waited_for
@@ -732,6 +746,7 @@ class AgentNBApp:
         requested_session_id: str | None,
         require_live_session: bool,
         handler: Callable[[str], Mapping[str, object]],
+        project_starting_state: bool = False,
         response_session_id_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
     ) -> CommandResponse:
         response_session_id = requested_session_id or DEFAULT_SESSION_ID
@@ -744,14 +759,49 @@ class AgentNBApp:
             )
             response_session_id = resolved_session_id
             switched_session: str | None = None
-            if requested_session_id is not None and command_name != "sessions-delete":
-                previous = self.runtime.current_session_id(project_root=project_root)
+            if _should_remember_session_preference(command_name):
+                previous = _current_session_preference(self.runtime, project_root=project_root)
                 self.runtime.remember_current_session(
                     project_root=project_root,
                     session_id=resolved_session_id,
                 )
-                if previous != resolved_session_id:
+                if previous is not None and previous != resolved_session_id:
                     switched_session = resolved_session_id
+            if project_starting_state:
+                state = self.runtime.runtime_state(
+                    project_root=project_root,
+                    session_id=resolved_session_id,
+                )
+                if state.kind == "starting":
+                    error = AgentNBException(
+                        code="KERNEL_NOT_READY",
+                        message=(
+                            "Kernel startup is still in progress or not yet ready. Wait and retry."
+                        ),
+                        data=dict(_status_payload_from_runtime_state(state)),
+                    )
+                    return error_response(
+                        command=command_name,
+                        project=str(project_root),
+                        session_id=response_session_id,
+                        code=error.code,
+                        message=error.message,
+                        ename=error.ename,
+                        evalue=error.evalue,
+                        traceback=compact_traceback(error.traceback),
+                        data=error.data,
+                        suggestions=self.advisor.suggestions(
+                            AdviceContext(
+                                command_name=command_name,
+                                response_status="error",
+                                data=error.data,
+                                error_code=error.code,
+                                error_name=error.ename,
+                                error_value=error.evalue,
+                                session_id=response_session_id,
+                            )
+                        ),
+                    )
             data = handler(resolved_session_id)
             if switched_session is not None:
                 data = dict(data)
@@ -835,6 +885,22 @@ def _current_session_preference(runtime: KernelRuntime, *, project_root: Path) -
     return None
 
 
+def _should_remember_session_preference(command_name: str) -> bool:
+    return command_name in {
+        "start",
+        "exec",
+        "status",
+        "wait",
+        "vars",
+        "inspect",
+        "reload",
+        "history",
+        "interrupt",
+        "reset",
+        "stop",
+    }
+
+
 def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:
     if selector == "result":
         result = payload.get("result")
@@ -843,8 +909,23 @@ def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) 
     return "" if value is None else str(value)
 
 
-def _kernel_status_payload(status: KernelStatus) -> StatusPayload:
-    return {
+def _status_payload_from_runtime_state(state: RuntimeState) -> StatusPayload:
+    return _kernel_status_payload(
+        state.to_kernel_status(),
+        runtime_state=state.kind,
+        session_exists=state.session_exists,
+        command_lock=state.command_lock,
+    )
+
+
+def _kernel_status_payload(
+    status: KernelStatus,
+    *,
+    runtime_state: RuntimeStateKind | None = None,
+    session_exists: bool | None = None,
+    command_lock: CommandLockInfo | None = None,
+) -> StatusPayload:
+    payload: StatusPayload = {
         "alive": status.alive,
         "pid": status.pid,
         "connection_file": status.connection_file,
@@ -853,6 +934,26 @@ def _kernel_status_payload(status: KernelStatus) -> StatusPayload:
         "python": status.python,
         "busy": status.busy,
     }
+    if runtime_state is not None:
+        payload["runtime_state"] = runtime_state
+    if session_exists is not None:
+        payload["session_exists"] = session_exists
+    if command_lock is not None:
+        payload["lock_pid"] = command_lock.pid
+        if command_lock.acquired_at is not None:
+            payload["lock_acquired_at"] = command_lock.acquired_at
+        busy_for_ms = command_lock.busy_for_ms()
+        if busy_for_ms is not None:
+            payload["busy_for_ms"] = busy_for_ms
+    return payload
+
+
+def _runtime_state_from_status(status: KernelStatus) -> RuntimeStateKind:
+    if not status.alive:
+        return "missing"
+    if status.busy:
+        return "busy"
+    return "ready"
 
 
 def _sessions_list_payload(sessions: list[SessionSummary]) -> SessionsListPayload:

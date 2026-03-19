@@ -10,6 +10,7 @@ from .contracts import ExecutionResult, ExecutionSink, KernelStatus
 from .errors import (
     AmbiguousSessionError,
     ExecutionTimedOutError,
+    KernelDiedError,
     KernelNotReadyError,
     KernelWaitTimedOutError,
     NoKernelRunningError,
@@ -26,10 +27,12 @@ from .kernel.backend import (
 )
 from .kernel.provisioner import KernelProvisioner
 from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
-from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore
-from .state import StateRepository
+from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore, pid_exists
+from .state import CommandLockInfo, StateRepository
 
 WaitedFor = Literal["ready", "idle"]
+RuntimeStateKind = Literal["missing", "starting", "ready", "busy", "dead", "stale"]
+RuntimeStaleReason = Literal["missing_process", "missing_connection_file"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -37,6 +40,47 @@ class KernelWaitResult:
     status: KernelStatus
     waited: bool
     waited_for: WaitedFor | None = None
+    runtime_state: RuntimeStateKind | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class RuntimeState:
+    kind: RuntimeStateKind
+    session_id: str
+    kernel_status: KernelStatus
+    session: SessionInfo | None = None
+    command_lock: CommandLockInfo | None = None
+    observed_session_record: bool = False
+    has_connection_file: bool = False
+    has_command_lock: bool = False
+    stale_reason: RuntimeStaleReason | None = None
+
+    @property
+    def alive(self) -> bool:
+        return self.kernel_status.alive
+
+    @property
+    def busy(self) -> bool:
+        return bool(self.kernel_status.busy)
+
+    @property
+    def usable(self) -> bool:
+        return self.kind == "ready"
+
+    @property
+    def session_exists(self) -> bool:
+        return self.kind in {"ready", "busy", "dead"}
+
+    def to_kernel_status(self) -> KernelStatus:
+        return KernelStatus(
+            alive=self.kernel_status.alive,
+            pid=self.kernel_status.pid,
+            connection_file=self.kernel_status.connection_file,
+            started_at=self.kernel_status.started_at,
+            uptime_s=self.kernel_status.uptime_s,
+            python=self.kernel_status.python,
+            busy=self.kernel_status.busy,
+        )
 
 
 class KernelRuntime:
@@ -57,6 +101,17 @@ class KernelRuntime:
     def capabilities(self) -> BackendCapabilities:
         return self._backend.capabilities
 
+    def runtime_state(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+    ) -> RuntimeState:
+        _, state = self._resolve_runtime_state(
+            project_root=project_root,
+            session_id=session_id,
+        )
+        return state
+
     def start(
         self,
         project_root: Path,
@@ -64,14 +119,13 @@ class KernelRuntime:
         python_executable: Path | None = None,
         auto_install: bool = False,
     ) -> tuple[KernelStatus, bool]:
-        store = SessionStore(project_root=project_root, session_id=session_id)
-        store.cleanup_stale()
-
-        existing = store.load_session()
-        if existing is not None:
-            existing_status = self._backend.status(existing)
-            if existing_status.alive:
-                return existing_status, False
+        store, state = self._resolve_runtime_state(
+            project_root=project_root,
+            session_id=session_id,
+        )
+        if state.kind in {"ready", "busy"}:
+            return state.to_kernel_status(), False
+        if state.session is not None:
             store.clear_session()
 
         provisioner = self._provisioner_factory(store.project_root)
@@ -91,25 +145,13 @@ class KernelRuntime:
         return status, True
 
     def status(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> KernelStatus:
-        store = SessionStore(project_root=project_root, session_id=session_id)
-        store.cleanup_stale()
-        session = store.load_session()
-        if session is None:
-            return KernelStatus(alive=False)
-
-        status = self._backend.status(session)
-        status = KernelStatus(
-            alive=status.alive,
-            pid=status.pid,
-            connection_file=status.connection_file,
-            started_at=status.started_at,
-            uptime_s=status.uptime_s,
-            python=status.python,
-            busy=store.has_active_command_lock() if status.alive else False,
+        store, state = self._resolve_runtime_state(
+            project_root=project_root,
+            session_id=session_id,
         )
-        if not status.alive:
+        if state.kind == "dead":
             store.clear_session()
-        return status
+        return state.to_kernel_status()
 
     def stop(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
@@ -133,19 +175,39 @@ class KernelRuntime:
     ) -> tuple[KernelStatus, bool]:
         return self.start(project_root=project_root, session_id=session_id)
 
-    def list_sessions(self, project_root: Path) -> list[SessionSummary]:
+    def list_sessions(
+        self,
+        project_root: Path,
+        *,
+        probe_backend: bool = True,
+    ) -> list[SessionSummary]:
         current_session_id = self.current_session_id(project_root=project_root)
         entries: list[SessionSummary] = []
         for session in SessionStore.list_sessions(project_root):
             store = SessionStore(project_root=project_root, session_id=session.session_id)
-            store.cleanup_stale()
-            current = store.load_session()
-            if current is None:
-                continue
-            status = self._backend.status(current)
-            if not status.alive:
-                store.delete_session()
-                continue
+            if not probe_backend:
+                if not pid_exists(session.pid) or not Path(session.connection_file).exists():
+                    continue
+                command_lock = store.command_lock_info()
+                status = KernelStatus(
+                    alive=True,
+                    pid=session.pid,
+                    connection_file=session.connection_file,
+                    started_at=session.started_at,
+                    python=session.python_executable,
+                    busy=command_lock is not None,
+                )
+                current = session
+            else:
+                store, state = self._resolve_runtime_state(
+                    project_root=project_root,
+                    session_id=session.session_id,
+                )
+                if state.kind not in {"ready", "busy"} or state.session is None:
+                    store.delete_session()
+                    continue
+                status = state.to_kernel_status()
+                current = state.session
             entries.append(
                 {
                     "session_id": current.session_id,
@@ -200,26 +262,26 @@ class KernelRuntime:
         if not require_live_session:
             return preferred_session_id or DEFAULT_SESSION_ID
 
-        sessions = self.list_sessions(project_root=project_root)
+        sessions = self.list_sessions(project_root=project_root, probe_backend=False)
+        live_session_ids = [str(session["session_id"]) for session in sessions]
         if preferred_session_id is not None:
-            live_session_ids = {str(session["session_id"]) for session in sessions}
             if not live_session_ids:
                 return preferred_session_id
             if preferred_session_id in live_session_ids:
                 return preferred_session_id
-        if not sessions:
+        if not live_session_ids:
             return DEFAULT_SESSION_ID
-        if len(sessions) == 1:
-            return str(sessions[0]["session_id"])
-        raise AmbiguousSessionError([str(session["session_id"]) for session in sessions])
+        if len(live_session_ids) == 1:
+            return live_session_ids[0]
+        raise AmbiguousSessionError(list(live_session_ids))
 
     def _check_session_prefix_collision(
         self, *, project_root: Path, requested_session_id: str
     ) -> None:
-        sessions = self.list_sessions(project_root=project_root)
-        if not sessions:
+        sessions = self.list_sessions(project_root=project_root, probe_backend=False)
+        live_ids = [str(session["session_id"]) for session in sessions]
+        if not live_ids:
             return
-        live_ids = [str(s["session_id"]) for s in sessions]
         if requested_session_id in live_ids:
             return
         prefix_matches = [sid for sid in live_ids if sid.startswith(requested_session_id)]
@@ -255,9 +317,11 @@ class KernelRuntime:
     ) -> KernelStatus:
         deadline = time.monotonic() + timeout_s
         while True:
-            status = self.status(project_root=project_root, session_id=session_id)
-            if status.alive:
-                return status
+            state = self.runtime_state(project_root=project_root, session_id=session_id)
+            if state.kind == "dead":
+                raise KernelDiedError()
+            if state.alive:
+                return state.to_kernel_status()
             if time.monotonic() >= deadline:
                 raise KernelWaitTimedOutError(timeout_s, waiting_for="ready")
             time.sleep(poll_interval_s)
@@ -272,7 +336,10 @@ class KernelRuntime:
     ) -> KernelStatus:
         deadline = time.monotonic() + timeout_s
         while True:
-            status = self.status(project_root=project_root, session_id=session_id)
+            state = self.runtime_state(project_root=project_root, session_id=session_id)
+            if state.kind == "dead":
+                raise KernelDiedError()
+            status = state.to_kernel_status()
             if status.alive and not status.busy:
                 return status
             if time.monotonic() >= deadline:
@@ -287,10 +354,13 @@ class KernelRuntime:
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
     ) -> KernelWaitResult:
-        status = self.status(project_root=project_root, session_id=session_id)
-        if status.alive:
-            if not status.busy:
-                return KernelWaitResult(status=status, waited=False)
+        state = self.runtime_state(project_root=project_root, session_id=session_id)
+        status = state.to_kernel_status()
+        if state.kind == "dead":
+            raise KernelDiedError()
+        if state.alive:
+            if not state.busy:
+                return KernelWaitResult(status=status, waited=False, runtime_state=state.kind)
             return KernelWaitResult(
                 status=self.wait_for_idle(
                     project_root=project_root,
@@ -300,6 +370,7 @@ class KernelRuntime:
                 ),
                 waited=True,
                 waited_for="idle",
+                runtime_state="ready",
             )
         return KernelWaitResult(
             status=self.wait_for_ready(
@@ -310,6 +381,7 @@ class KernelRuntime:
             ),
             waited=True,
             waited_for="ready",
+            runtime_state="ready",
         )
 
     def execute(
@@ -331,7 +403,7 @@ class KernelRuntime:
         try:
             with store.acquire_command_lock() as lock_acquired:
                 if not lock_acquired:
-                    raise SessionBusyError()
+                    raise self._session_busy_error(store)
                 try:
                     if before_backend is not None:
                         before_backend()
@@ -366,7 +438,7 @@ class KernelRuntime:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
         with store.acquire_command_lock() as lock_acquired:
             if not lock_acquired:
-                raise SessionBusyError()
+                raise self._session_busy_error(store)
             return self._backend.reset(session=session, timeout_s=timeout_s)
 
     def history(
@@ -409,47 +481,129 @@ class KernelRuntime:
         python_executable: Path | None = None,
         auto_fix: bool = False,
     ) -> DoctorPayload:
-        store = SessionStore(project_root=project_root, session_id=session_id)
-        stale_cleaned = store.cleanup_stale()
-        session = store.load_session()
-        session_exists = session is not None
+        store, state = self._resolve_runtime_state(
+            project_root=project_root,
+            session_id=session_id,
+        )
         report = self._provisioner_factory(store.project_root).doctor(
             preferred_python=python_executable,
             auto_fix=auto_fix,
         )
         payload = cast(DoctorPayload, report.to_dict())
-        payload["stale_session_cleaned"] = stale_cleaned
-        payload["session_exists"] = session_exists
-
-        if session is not None:
-            status = self._backend.status(session)
-            payload["kernel_alive"] = status.alive
-            payload["kernel_pid"] = status.pid
-        else:
-            payload["kernel_alive"] = False
-            payload["kernel_pid"] = None
+        status = state.to_kernel_status()
+        payload["stale_session_cleaned"] = state.kind == "stale"
+        payload["session_exists"] = state.session_exists
+        payload["kernel_alive"] = status.alive
+        payload["kernel_pid"] = status.pid
 
         return payload
 
     def _require_session(
         self, project_root: Path, session_id: str
     ) -> tuple[SessionStore, SessionInfo]:
-        store = SessionStore(project_root=project_root, session_id=session_id)
-        store.cleanup_stale()
-        session = store.load_session()
-        if session is None:
-            if store.has_connection_file():
-                raise KernelNotReadyError()
-            raise NoKernelRunningError()
-
-        status = self._backend.status(session)
-        if not status.alive:
-            if store.has_connection_file():
-                raise KernelNotReadyError()
-            store.clear_session()
-            raise NoKernelRunningError()
-
-        return store, session
+        store, state = self._resolve_runtime_state(
+            project_root=project_root,
+            session_id=session_id,
+        )
+        if state.kind in {"ready", "busy"} and state.session is not None:
+            return store, state.session
+        if state.kind == "starting":
+            raise KernelNotReadyError()
+        if state.kind == "dead":
+            raise KernelDiedError()
+        raise NoKernelRunningError()
 
     def _last_activity(self, project_root: Path, session_id: str) -> str | None:
         return self._journal.last_activity(project_root=project_root, session_id=session_id)
+
+    def _resolve_runtime_state(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+    ) -> tuple[SessionStore, RuntimeState]:
+        store = SessionStore(project_root=project_root, session_id=session_id)
+        session = store.load_session()
+        observed_session_record = session is not None
+        has_connection_file = store.has_connection_file()
+
+        if session is None:
+            if has_connection_file:
+                return store, RuntimeState(
+                    kind="starting",
+                    session_id=store.session_id,
+                    kernel_status=KernelStatus(alive=False),
+                    observed_session_record=False,
+                    has_connection_file=True,
+                )
+            return store, RuntimeState(
+                kind="missing",
+                session_id=store.session_id,
+                kernel_status=KernelStatus(alive=False),
+            )
+
+        if not pid_exists(session.pid) or not Path(session.connection_file).exists():
+            stale_reason: RuntimeStaleReason = (
+                "missing_process" if not pid_exists(session.pid) else "missing_connection_file"
+            )
+            store.cleanup_stale()
+            return store, RuntimeState(
+                kind="stale",
+                session_id=session.session_id,
+                session=session,
+                kernel_status=KernelStatus(alive=False),
+                observed_session_record=observed_session_record,
+                has_connection_file=False,
+                stale_reason=stale_reason,
+            )
+
+        backend_status = self._backend.status(session)
+        if backend_status.alive:
+            command_lock = store.command_lock_info()
+            busy = command_lock is not None
+            status = KernelStatus(
+                alive=True,
+                pid=backend_status.pid,
+                connection_file=backend_status.connection_file,
+                started_at=backend_status.started_at,
+                uptime_s=backend_status.uptime_s,
+                python=backend_status.python,
+                busy=busy,
+            )
+            return store, RuntimeState(
+                kind="busy" if busy else "ready",
+                session_id=session.session_id,
+                session=session,
+                command_lock=command_lock,
+                kernel_status=status,
+                observed_session_record=observed_session_record,
+                has_connection_file=True,
+                has_command_lock=busy,
+            )
+
+        return store, RuntimeState(
+            kind="dead",
+            session_id=session.session_id,
+            session=session,
+            kernel_status=KernelStatus(
+                alive=False,
+                pid=backend_status.pid,
+                connection_file=backend_status.connection_file,
+                started_at=backend_status.started_at,
+                uptime_s=backend_status.uptime_s,
+                python=backend_status.python,
+                busy=False,
+            ),
+            observed_session_record=observed_session_record,
+            has_connection_file=True,
+        )
+
+    def _session_busy_error(self, store: SessionStore) -> SessionBusyError:
+        command_lock = store.command_lock_info()
+        return SessionBusyError(
+            wait_behavior="immediate",
+            waited_ms=0,
+            lock_pid=command_lock.pid if command_lock is not None else None,
+            lock_acquired_at=command_lock.acquired_at if command_lock is not None else None,
+            busy_for_ms=command_lock.busy_for_ms() if command_lock is not None else None,
+        )

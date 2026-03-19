@@ -92,6 +92,44 @@ def test_response_projector_agent_compacts_error_shape() -> None:
     }
 
 
+def test_response_projector_agent_keeps_busy_metadata_for_exec_errors() -> None:
+    response = error_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        code="SESSION_BUSY",
+        message="Session is busy.",
+        data={
+            "wait_behavior": "immediate",
+            "waited_ms": 0,
+            "lock_pid": 321,
+            "lock_acquired_at": "2026-03-19T12:00:00+00:00",
+            "busy_for_ms": 1500,
+            "active_execution_id": "run-7",
+        },
+    )
+
+    projected = ResponseProjector().project(response, profile="agent")
+
+    assert projected == {
+        "ok": False,
+        "command": "exec",
+        "session_id": "default",
+        "data": {
+            "wait_behavior": "immediate",
+            "waited_ms": 0,
+            "lock_pid": 321,
+            "lock_acquired_at": "2026-03-19T12:00:00+00:00",
+            "busy_for_ms": 1500,
+            "active_execution_id": "run-7",
+        },
+        "error": {
+            "code": "SESSION_BUSY",
+            "message": "Session is busy.",
+        },
+    }
+
+
 def test_response_projector_agent_compacts_exec_success_to_next_step_fields() -> None:
     response = success_response(
         command="exec",

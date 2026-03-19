@@ -20,7 +20,7 @@ from ..contracts import (
     KernelStatus,
     utc_now_iso,
 )
-from ..errors import BackendOperationError
+from ..errors import BackendOperationError, KernelDiedError
 from ..execution_events import ExecutionResultAccumulator, dispatch_output_item
 from ..execution_output import output_item_from_iopub_message
 from ..session import SessionInfo, pid_exists
@@ -232,14 +232,18 @@ class LocalIPythonBackend:
             idle_received = False
 
             while not idle_received:
+                self._raise_if_kernel_died(session)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise BackendExecutionTimeout
 
                 try:
-                    msg = client.get_iopub_msg(timeout=remaining)
+                    msg = client.get_iopub_msg(timeout=min(remaining, 0.2))
                 except Empty as exc:
-                    raise BackendExecutionTimeout from exc
+                    self._raise_if_kernel_died(session, probe_status=True)
+                    if time.monotonic() >= deadline:
+                        raise BackendExecutionTimeout from exc
+                    continue
 
                 parsed_message = parse_iopub_message(_message_mapping(msg))
                 if parsed_message is None or parsed_message.parent_id != msg_id:
@@ -380,6 +384,40 @@ _ip.run_line_magic("reset", "-f")
             if parsed_message is not None and parsed_message.parent_id == msg_id:
                 return parsed_message
 
+    def _raise_if_kernel_died(self, session: SessionInfo, *, probe_status: bool = False) -> None:
+        if not _process_is_running(session.pid):
+            raise KernelDiedError("Kernel process exited during execution.")
+        if not Path(session.connection_file).exists():
+            raise KernelDiedError("Kernel connection file disappeared during execution.")
+        if probe_status and not self._probe_kernel_alive(session, timeout_s=0.1):
+            raise KernelDiedError("Kernel stopped responding during execution.")
+
+    def _probe_kernel_alive(self, session: SessionInfo, timeout_s: float) -> bool:
+        if not _process_is_running(session.pid):
+            return False
+
+        connection_file = Path(session.connection_file)
+        if not connection_file.exists():
+            return False
+
+        client = self._create_client(connection_file)
+        try:
+            client.start_channels(shell=True, iopub=False, stdin=False, hb=True, control=False)
+            msg_id = client.kernel_info()
+            deadline = time.monotonic() + timeout_s
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return bool(client.is_alive()) and _process_is_running(session.pid)
+                msg = client.get_shell_msg(timeout=remaining)
+                if message_parent_id(_message_mapping(msg)) != msg_id:
+                    continue
+                return message_type(_message_mapping(msg)) == "kernel_info_reply"
+        except Exception:
+            return bool(client.is_alive()) and _process_is_running(session.pid)
+        finally:
+            _close_client(client)
+
 
 def _uptime_seconds(started_at: str) -> float | None:
     try:
@@ -415,3 +453,33 @@ def _message_mapping(value: object) -> Mapping[str, object]:
 
 def _hard_kill_signal() -> int:
     return getattr(signal, "SIGKILL", signal.SIGTERM)
+
+
+def _process_is_running(pid: int) -> bool:
+    if not pid_exists(pid):
+        return False
+    return not _process_is_zombie(pid)
+
+
+def _process_is_zombie(pid: int) -> bool:
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        try:
+            fields = proc_stat.read_text(encoding="utf-8").split()
+        except OSError:
+            return False
+        return len(fields) > 2 and fields[2] == "Z"
+
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=0.2,
+        )
+    except Exception:
+        return False
+    if result.returncode != 0:
+        return False
+    return result.stdout.lstrip().startswith("Z")

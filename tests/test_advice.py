@@ -234,7 +234,57 @@ def test_advice_policy_session_busy_suggests_wait() -> None:
     ]
 
 
-@pytest.mark.parametrize("error_code", ["NO_KERNEL", "BACKEND_ERROR"])
+def test_advice_policy_session_busy_with_active_run_suggests_run_controls() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={"active_execution_id": "run-7"},
+            error_code="SESSION_BUSY",
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb runs wait run-7 --json` to wait for the blocking run.",
+        "Run `agentnb runs show run-7 --json` to inspect the blocking run.",
+    ]
+
+
+def test_advice_policy_status_starting_suggests_wait() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="status",
+            response_status="ok",
+            data={"alive": False, "runtime_state": "starting"},
+        )
+    )
+
+    assert suggestions == ["Run `agentnb wait --json` to wait for startup to finish."]
+
+
+def test_advice_policy_kernel_not_ready_suggests_wait_and_status() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="vars",
+            response_status="error",
+            data={"runtime_state": "starting"},
+            error_code="KERNEL_NOT_READY",
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb wait --json` to wait for startup to finish.",
+        "Run `agentnb status --json` to inspect the current session state.",
+    ]
+
+
+@pytest.mark.parametrize("error_code", ["NO_KERNEL", "BACKEND_ERROR", "KERNEL_DEAD"])
 def test_advice_policy_dead_kernel_suggests_start_and_doctor(error_code: str) -> None:
     policy = AdvicePolicy()
 

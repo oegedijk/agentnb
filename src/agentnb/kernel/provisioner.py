@@ -129,11 +129,12 @@ class KernelProvisioner:
             capture_output=True,
             text=True,
             timeout=180,
+            cwd=self.project_root,
         )
         if result.returncode != 0:
             stderr_text = result.stderr or ""
             if "No module named pip" in stderr_text:
-                uv_cmd = self._uv_install_cmd_text()
+                uv_cmd = self._uv_install_cmd_text(selected.executable)
                 raise ProvisioningError(f"pip is not available in this environment. Try: {uv_cmd}")
             detail = _tail_text(stderr_text or result.stdout)
             raise ProvisioningError(
@@ -153,15 +154,15 @@ class KernelProvisioner:
     def _ipykernel_install_cmd(self, executable: str) -> list[str]:
         if _python_supports_module(Path(executable), "pip"):
             return [executable, "-m", "pip", "install", IPYKERNEL_REQUIREMENT]
-        return list(self._uv_install_cmd())
+        return list(self._uv_install_cmd(executable))
 
-    def _uv_install_cmd(self) -> tuple[str, ...]:
+    def _uv_install_cmd(self, executable: str) -> tuple[str, ...]:
         if (self.project_root / "uv.lock").exists():
             return ("uv", "add", "ipykernel")
-        return ("uv", "pip", "install", IPYKERNEL_REQUIREMENT)
+        return ("uv", "pip", "install", "--python", executable, IPYKERNEL_REQUIREMENT)
 
-    def _uv_install_cmd_text(self) -> str:
-        return " ".join(self._uv_install_cmd())
+    def _uv_install_cmd_text(self, executable: str) -> str:
+        return " ".join(self._uv_install_cmd(executable))
 
     def doctor(self, preferred_python: Path | None = None, auto_fix: bool = False) -> DoctorReport:
         checks: list[DoctorCheck] = []

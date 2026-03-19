@@ -151,6 +151,7 @@ def journal_builder(project_dir: Path):
         code: str | None = None,
         result: str | None = None,
         ename: str | None = None,
+        failure_origin: Literal["kernel", "control"] | None = None,
     ) -> None:
         ExecutionStore(project_dir).append(
             ExecutionRecord(
@@ -163,6 +164,7 @@ def journal_builder(project_dir: Path):
                 code=code,
                 result=result,
                 ename=ename,
+                failure_origin=failure_origin,
             )
         )
 

@@ -35,8 +35,19 @@ class AdvicePolicy:
                 "Retry with `agentnb runs show EXECUTION_ID --json` to target one explicitly.",
             ]
         if context.error_code == "SESSION_BUSY":
+            execution_id = data.get("active_execution_id")
+            if isinstance(execution_id, str) and execution_id:
+                return [
+                    f"Run `{_run_command('wait', execution_id)}` to wait for the blocking run.",
+                    f"Run `{_run_command('show', execution_id)}` to inspect the blocking run.",
+                ]
             return ["Run `agentnb wait --json` to block until the session is idle, then retry."]
-        if context.error_code in {"NO_KERNEL", "BACKEND_ERROR"}:
+        if context.error_code == "KERNEL_NOT_READY":
+            return [
+                "Run `agentnb wait --json` to wait for startup to finish.",
+                "Run `agentnb status --json` to inspect the current session state.",
+            ]
+        if context.error_code in {"NO_KERNEL", "BACKEND_ERROR", "KERNEL_DEAD"}:
             return [
                 "Run `agentnb start --json` to start the kernel.",
                 "Run `agentnb doctor --json` if startup has been failing.",
@@ -44,6 +55,9 @@ class AdvicePolicy:
         if command_name == "start":
             return []
         if command_name == "status":
+            runtime_state = data.get("runtime_state")
+            if runtime_state == "starting":
+                return ["Run `agentnb wait --json` to wait for startup to finish."]
             if data.get("alive"):
                 if data.get("busy"):
                     return [

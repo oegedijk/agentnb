@@ -76,6 +76,7 @@ Intent:
 - build meaningful live state
 - trigger an execution failure or timeout in the middle of the workflow
 - use history, inspection, status, or other CLI surfaces to understand what failed
+- compare the normal history view with `history --all` or `history --full` when that helps explain helper activity or truncated context
 - recover in the same session
 - continue the workflow from the existing in-memory state instead of rebuilding it
 
@@ -100,12 +101,13 @@ Good signs:
 Intent:
 - build up a session with enough state that restarting would be annoying
 - decide partway through that the namespace is messy or misleading
-- determine whether to reset, continue, or open a second session
+- use `vars --recent`, `vars --match`, or `vars --no-types` once the namespace gets noisy
+- determine whether to reset, continue, use `exec --fresh`, or open a second session
 - verify that the chosen path is less painful than rebuilding from scratch
 
 Good signs:
 - the tool makes the tradeoff between reset and continuity legible
-- reset is useful without being confused with stop
+- reset and `--fresh` are useful without being confused with `stop`
 
 ## Scenario 8: File-to-Interactive Workflow
 
@@ -125,6 +127,7 @@ Good signs:
 Intent:
 - perform a real iterative workflow that produces mixed stdout, stderr, and result values
 - decide when full output is useful and when a narrowed output channel is better
+- compare normal human output with `--quiet`, `--no-suggestions`, and, if useful, `AGENTNB_FORMAT=agent`
 - use low-noise output modes in a way that helps the workflow rather than as an isolated feature demo
 
 Good signs:
@@ -136,6 +139,7 @@ Good signs:
 Intent:
 - start from one of the scenarios above without preselecting commands in advance
 - rely on CLI help, suggestions, and command behavior to discover the path
+- include at least one startup-policy fork such as default exec auto-start versus `exec --no-ensure-started`
 - note where the agent guesses wrong, hesitates, or reaches for an implementation detail
 
 Good signs:
@@ -194,6 +198,7 @@ Intent:
 - use `execution_id`, `session_id`, and `status` fields from the envelope to make decisions
 - hit at least one error and parse the error envelope to decide recovery
 - exercise `runs show` and `history` in JSON mode
+- cover at least one selector such as `@latest`, `@active`, `@last-error`, or `@last-success` in JSON mode
 
 Good signs:
 - JSON output is always valid, single-object-per-command, and parseable without heuristics
@@ -241,3 +246,32 @@ Good signs:
 - the error message for missing ipykernel gives the exact install command
 - `--auto-install` and `doctor --fix` work without manual steps
 - installing a module inside the session and importing it does not require a restart
+
+## Scenario 18: Session Cleanup And Stale Reconciliation
+
+Intent:
+- create multiple named sessions and leave them in different states
+- make at least one session stale or otherwise no longer backed by a live kernel
+- inspect the live session list before cleanup
+- use `sessions delete --stale` to remove only dead sessions
+- use targeted delete or `sessions delete --all` to clean up the remaining sessions
+- verify that cleanup updates the recorded session state without touching unrelated live work
+
+Good signs:
+- stale-session cleanup is legible without manual filesystem surgery
+- `sessions delete --stale` and `sessions delete --all` behave predictably
+- session lifecycle cleanup feels like part of the normal workflow, not emergency repair
+
+## Scenario 19: Invocation Shape And Input Source Resolution
+
+Intent:
+- drive the same basic workflow through multiple invocation shapes
+- use inline exec, heredoc/stdin, and `exec --file` or top-level file execution
+- include code with braces, quotes, or shell-sensitive characters
+- use root-position options such as `--session` or `--project` on representative commands
+- note where the CLI shape is obvious versus where the agent has to guess
+
+Good signs:
+- the hot-path inference feels reliable across inline, stdin, and file execution
+- root-position options behave consistently enough that the agent does not need memorized exceptions
+- the agent can discover the right input form for awkward code without falling back to implementation details

@@ -133,6 +133,148 @@ These were plausible smoke findings at the time they were recorded, but represen
 
 - Partial file rerun remains valuable, but it is new file-execution surface area rather than consistency polish. Keep it with the broader file execution work already planned in v0.4.
 
+## v0.3.5 - Remaining Smoke-Run Frictions To Close
+
+v0.3.5 should close the friction points that still showed up when running all 17 smoke scenarios end-to-end after v0.3.4. These are not speculative improvements; each item below was hit during real agent use.
+
+### Frictions To Fix
+
+- Read-only commands still fail too often under same-session contention:
+  - friction: quick `vars`, `inspect`, mode-comparison, and follow-up checks still trip `SESSION_BUSY` when another same-session command is in flight, even when the agent is only trying to inspect state.
+  - reproduce:
+    - `uv run agentnb "import pandas as pd; big = pd.DataFrame({'i': range(200)})" --session large13`
+    - `uv run agentnb vars --session large13`
+    - immediately run `uv run agentnb inspect big --session large13`
+    - observe: one of the read-only commands fails with `Another agentnb command is already using this session.`
+
+- Session startup behavior is still inconsistent across command families:
+  - friction: `exec` auto-starts a missing session, but `vars` / `inspect` on a fresh named session still fail with `No kernel running`, so the top-level mental model remains inconsistent.
+  - reproduce:
+    - `uv run agentnb vars --session disc10`
+    - observe: `No kernel running. Start one with: agentnb start`
+    - compare with `uv run agentnb "1 + 1" --session disc10`
+    - observe: the exec path auto-starts and succeeds
+
+- Implicit current-session routing remains too risky in multi-session workflows:
+  - friction: once many sessions exist, an unqualified exec can silently run in the current session instead of forcing disambiguation or making the chosen target unmistakable.
+  - reproduce:
+    - start or reuse two sessions with distinct state:
+      - `uv run agentnb "raw = {'name': 'a'}" --session compare6a`
+      - `uv run agentnb "raw = {'name': 'b'}" --session compare6b`
+    - make `compare6b` current by targeting it last
+    - run `uv run agentnb "raw"`
+    - observe: the command executes against the current session instead of erroring on ambiguity
+
+- Output shaping still returns bulky repr strings for large values:
+  - friction: `--agent`, `--json`, and `--result-only` still surface a flattened repr for large dataframes instead of steering the agent toward a bounded preview contract.
+  - reproduce:
+    - `uv run agentnb "import pandas as pd; big = pd.DataFrame({'i': range(200), 'text': ['x'*40 for _ in range(200)]}); big" --session large13`
+    - `uv run agentnb exec --result-only "big" --session large13`
+    - `uv run agentnb --agent "big" --session large13`
+    - observe: large repr payloads are still emitted instead of a compact structured summary
+
+- JSON mode is parseable but not fully machine-shaped:
+  - friction: `suggestions` are still prose strings, and `runs show --json` can include ANSI-colored traceback fragments that require cleanup before downstream parsing.
+  - reproduce:
+    - `uv run agentnb --json "vals = [1, 2, 3]; vals[10]" --session json14`
+    - `uv run agentnb runs show @latest --json`
+    - observe: human prose in `suggestions` and ANSI escape sequences in traceback content
+
+- `status --wait-idle` output remains too coarse:
+  - friction: the command is operationally useful, but the human response still collapses to `Kernel is running` / `Kernel is idle` without exposing enough of the gating reason or elapsed wait to help an agent decide what just changed.
+  - reproduce:
+    - `uv run agentnb exec --stream "import time; [print(i, flush=True) or time.sleep(1) for i in range(5)]" --session stream11`
+    - while it is running, execute `uv run agentnb status --session stream11 --wait-idle`
+    - observe: the final response does not explain whether it waited, for how long, or what state transition occurred
+
+- In-session dependency installation still has too many recovery branches:
+  - friction: `doctor --fix` / `start --auto-install` cover missing `ipykernel`, but installing a missing third-party package from inside a fresh session can still fail because the selected interpreter lacks `pip`.
+  - reproduce:
+    - create a fresh venv-backed project without pip-installed extras
+    - `uv run agentnb start --project /tmp/agentnb-smoke17 --session dep17 --auto-install`
+    - add a local module that imports an uninstalled dependency such as `pyjokes`
+    - run `uv run agentnb "import needs_pyjokes; needs_pyjokes.tell()" --project /tmp/agentnb-smoke17 --session dep17`
+    - then try `uv run agentnb "import subprocess, sys; subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'pyjokes'])" --project /tmp/agentnb-smoke17 --session dep17`
+    - observe: the install path can fail with `No module named pip`
+
+- File-to-interactive iteration still lacks a first-class partial rerun path:
+  - friction: after running a script file into a session, changing only the tail logic still requires copy-pasting the changed tail inline instead of rerunning a selected portion of the file.
+  - reproduce:
+    - create `smoke_workflow.py` with dataframe setup plus a final `report = ...`
+    - `uv run agentnb smoke_workflow.py --session file8`
+    - edit only the final lines on disk to add a derived column
+    - observe: there is no direct CLI path to rerun just the changed tail from the file; the practical workaround is inline exec
+
+### Planned Fixes
+
+- Make same-session read-only helpers cooperate better with active stateful workflows:
+  - allow safe snapshot-based `vars` / `inspect` reads during active or recently completed same-session work, or queue them behind the active command with explicit waited-state reporting
+  - make the chosen behavior visible in both human and machine responses
+
+- Unify startup semantics for helper commands:
+  - either auto-start read-only commands when the intent is unambiguous, or return a more specific contract that clearly distinguishes `not started yet` from `dead` and `starting`
+  - keep recovery suggestions aligned with the chosen policy
+
+- Tighten multi-session ambiguity handling:
+  - add a stricter ambiguity policy for implicit exec when more than one plausible live session exists
+  - if current-session routing remains allowed, make the chosen target impossible to miss in both human and machine output
+
+- Add a compact large-value contract for output-shaped exec responses:
+  - preserve the existing `result` field for compatibility
+  - add an explicit bounded summary path for dataframe-like and container values so `--agent`, `--json`, and `--result-only` do not force repr parsing for large objects
+
+- Make JSON recovery surfaces actually structured:
+  - expose machine-readable suggestion actions instead of only prose strings
+  - strip ANSI formatting from tracebacks in JSON output or provide a parallel plain-text traceback field
+
+- Improve wait-state visibility:
+  - include whether `wait` / `status --wait-idle` actually waited, how long, and which state transition completed
+  - keep the human output short, but give the agent enough information to reason about sequencing without extra probes
+
+- Smooth the missing-dependency path inside fresh interpreters:
+  - detect pip-less interpreters during dependency recovery and provide one exact supported path
+  - consider a first-class helper for installing a missing import into the selected project interpreter without leaving the agent loop
+
+- Promote partial file rerun into shipped CLI surface:
+  - support rerunning selected lines or a named tail block from a file into the existing session
+  - keep this integrated with live-state workflows rather than treating it as a separate scripting mode
+
+### Implementation Seams
+
+- Session ambiguity, current-session preference, wait-state reporting, and same-session busy policy:
+  - start in `agentnb.runtime.KernelRuntime`
+  - likely touch `resolve_session_id()`, `wait_for_ready()`, `wait_for_idle()`, `wait_for_usable()`, `execute()`, and `_session_busy_error()`
+
+- Helper-command startup consistency and read-only command handling:
+  - start in `agentnb.app.AgentNBApp`
+  - likely touch `_handle_command()` plus the `vars()` / `inspect()` / `reload()` call paths
+  - if helper commands gain auto-start or a different busy policy, keep that decision owned here rather than in the CLI layer
+
+- `vars` / `inspect` / `reload` execution model:
+  - start in `agentnb.introspection.KernelIntrospection` and `agentnb.ops.NotebookOps`
+  - `_run_json_helper()` is the narrowest place to decide whether helper reads should execute immediately, wait, or use a bounded snapshot path
+
+- Large-value output shaping and machine-facing exec payloads:
+  - start in `agentnb.compact` and `agentnb.projection.ResponseProjector`
+  - likely touch `compact_execution_payload()` and `_project_agent_data()`
+  - `inspect` already has structured preview compaction; prefer deepening that pattern over inventing CLI-local truncation rules
+
+- Structured recovery guidance and JSON-friendly suggestion contracts:
+  - start in `agentnb.advice.AdvicePolicy`, then extend the response contract shape if needed
+  - if suggestions become machine-readable actions, keep the transformation out of the CLI renderer
+
+- JSON traceback hygiene:
+  - start in `agentnb.projection`, `agentnb.compact`, and the run-record projection path
+  - if ANSI stripping should apply to full JSON as well as `--agent`, do it in projection/storage boundaries, not in terminal rendering code
+
+- Interpreter and dependency-recovery workflow:
+  - start in `agentnb.kernel.provisioner.KernelProvisioner`
+  - `ensure_ipykernel()` already owns pip-vs-uv decisions; keep any broader missing-dependency install helper in the same provisioning boundary instead of scattering install logic across advice or CLI handlers
+
+- Partial file rerun:
+  - start in `agentnb.invocation.InvocationResolver` plus the exec-source path
+  - `resolve_exec_source()` currently only models whole-file / arg / stdin execution; partial file execution likely needs a richer source intent before it reaches `exec`
+
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 
 ### Goals

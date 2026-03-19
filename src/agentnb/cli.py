@@ -161,14 +161,18 @@ def main(
       agentnb --result-only "1+1"   agentnb --stdout-only "print('hi')"
       agentnb --agent "1+1"         agentnb --json "1+1"
 
-    The session auto-starts for normal execution. Drive one session serially;
-    use `agentnb wait` between commands when needed.
+    `exec` auto-starts the target session by default. Read-only commands such
+    as `vars`, `inspect`, and `reload` require an existing usable session.
+    Drive one session serially: only one command at a time can use a session,
+    including quick reads such as `vars` and `inspect`. If a session is busy,
+    use `agentnb wait`, `agentnb status --wait-idle`, or `agentnb runs
+    wait/show` before retrying.
 
     `--session NAME` and `--background` work in prefix position for inline
-    exec and for most subcommands. Putting them after the subcommand name
-    always works. When code contains braces or quotes, prefer heredoc or
-    --file over inline strings. Do not use `\\n` to embed newlines in an
-    inline string; use heredoc instead.
+    exec and for most subcommands. Putting them after the subcommand name is
+    the safest form and always works. When code contains braces or quotes,
+    prefer heredoc or --file over inline strings. Do not use `\\n` to embed
+    newlines in an inline string; use heredoc instead.
 
     `--agent` returns compact JSON. `--json` returns the full stable envelope.
     The `result` field is the Python repr of the return value; when valid
@@ -455,9 +459,12 @@ def exec_cmd(
     """Execute code in the live kernel.
 
     Provide code as an argument, with --file, or through stdin. The target
-    session starts automatically unless you pass --no-ensure-started. Like a
-    notebook cell, the final expression is returned as the execution result,
-    while `print(...)` writes to stdout.
+    session starts automatically unless you pass --no-ensure-started, which
+    makes missing-session startup fail fast instead. Like a notebook cell, the
+    final expression is returned as the execution result, while `print(...)`
+    writes to stdout. `--fresh` restarts the whole session process before
+    executing; use `reset` when you only want to clear user state in the
+    existing process.
 
     Examples:
 
@@ -566,7 +573,8 @@ def vars_cmd(
     Type information is included by default. Pass --no-types to hide it.
     Imported helper routines and classes are omitted, and common dataframe or
     container values are summarized compactly. Use --recent or --match when
-    the namespace gets noisy.
+    the namespace gets noisy. This command expects an existing usable session;
+    it does not auto-start a missing one.
     """
 
     request = VarsRequest(
@@ -588,7 +596,9 @@ def inspect_cmd(name: str, project: Path | None, session_id: str | None, as_json
     """Inspect one variable in the kernel namespace.
 
     Dataframe-like values get a compact tabular preview. Lists, tuples, sets,
-    and dicts get a compact structural preview instead of a generic repr.
+    and dicts get a compact structural preview instead of a generic repr. This
+    command expects an existing usable session; it does not auto-start a
+    missing one.
     """
 
     request = InspectRequest(
@@ -611,7 +621,10 @@ def reload_cmd(
 
     Pass a module name to reload one imported project-local module. Omit the
     module to reload all currently imported project-local modules. The reload
-    report includes rebound names and possible stale objects.
+    report includes rebound names and possible stale objects. Only imported
+    project-local modules are eligible. Installing a new package does not
+    require `reload`, but editing a local module does. This command expects an
+    existing usable session; it does not auto-start a missing one.
     """
 
     request = ReloadRequest(
@@ -626,7 +639,7 @@ def reload_cmd(
 @click.option(
     "--wait",
     is_flag=True,
-    help="Wait until the target session is ready instead of returning immediately.",
+    help="Wait until the target session is alive and ready to answer status checks.",
 )
 @click.option(
     "--wait-idle",
@@ -651,7 +664,12 @@ def status(
     session_id: str | None,
     as_json: bool,
 ) -> None:
-    """Check whether the project's kernel is currently running."""
+    """Check whether the project's kernel is currently running.
+
+    Use --wait when you want to block until a starting session becomes alive.
+    Use --wait-idle when you want to block until the session is alive and free
+    for the next command.
+    """
 
     if wait and wait_idle:
         raise click.UsageError("Use either --wait or --wait-idle, not both.")
@@ -687,7 +705,9 @@ def wait(
 
     If the session is starting, wait until it is ready. If it is busy, wait
     until it is idle. If it is already usable, return immediately with the
-    current status payload.
+    current status payload. Use this when the question is simply "can I send
+    the next command yet?"; use `status --wait-idle` when you also want an
+    explicit status check surface.
     """
 
     request = WaitRequest(
@@ -723,8 +743,9 @@ def history(
 
     By default, this shows semantic user-visible steps such as exec, vars,
     inspect, reload, and reset. Pass --all to include internal helper
-    executions. History entries are compact summaries by default; use --full
-    to see complete code and output.
+    executions such as the helper calls behind `vars`, `inspect`, and
+    `reload`. History entries are compact summaries by default; use --full to
+    see complete stored code and output.
     """
 
     request = HistoryRequest(
@@ -800,7 +821,8 @@ def doctor(
     """Check interpreter and kernel prerequisites for startup.
 
     Use this when start fails, the wrong interpreter is selected, or ipykernel
-    is missing. Pass --fix to attempt automatic remediation when supported.
+    is missing. Pass --fix to attempt automatic remediation when supported,
+    such as installing missing ipykernel into the selected interpreter.
     """
 
     request = DoctorRequest(
@@ -856,7 +878,8 @@ def sessions_delete(
     """Delete one or more sessions and stop their kernels if still running.
 
     Provide a SESSION_NAME to delete one session, or use --all to delete every
-    session, or --stale to delete only sessions whose kernel is dead.
+    session, or --stale to delete only sessions whose kernel is dead. `--all`
+    stops live kernels before deleting their session records.
     """
     project_root = resolve_project_root(cwd=Path.cwd(), override=project)
 
@@ -936,7 +959,9 @@ def runs_show(run_reference: RunReference | None, project: Path | None, as_json:
     """Show a persisted snapshot of one exec/reset run.
 
     Omit RUN_REFERENCE to inspect the latest relevant run. Selectors such as
-    @latest, @last-error, @last-success, and @active are also supported.
+    @latest, @last-error, @last-success, and @active are also supported. When
+    omitted, the default prefers the current session's latest relevant run,
+    then falls back to the project latest.
     """
 
     request = RunLookupRequest(

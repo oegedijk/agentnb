@@ -47,6 +47,14 @@ class InvocationOptionSpec:
     takes_value: bool = False
 
 
+@dataclass(slots=True, frozen=True)
+class CommandShape:
+    name: str
+    kind: Literal["leaf", "group"]
+    prefix_exec_position: Literal["after_command", "after_subcommand"] = "after_command"
+    subcommands: tuple[str, ...] = ()
+
+
 INVOCATION_OPTION_SPECS = (
     *(InvocationOptionSpec(names=(spec.flag,), kind="root") for spec in ROOT_OPTION_SPECS),
     InvocationOptionSpec(names=("--help", "-h"), kind="help"),
@@ -63,6 +71,34 @@ INVOCATION_OPTION_SPECS = (
     InvocationOptionSpec(names=("--result-only",), kind="exec"),
     InvocationOptionSpec(names=("--no-truncate",), kind="exec"),
     InvocationOptionSpec(names=("--fresh",), kind="exec"),
+)
+
+
+COMMAND_SHAPES = (
+    CommandShape(name="start", kind="leaf"),
+    CommandShape(name="exec", kind="leaf"),
+    CommandShape(name="vars", kind="leaf"),
+    CommandShape(name="inspect", kind="leaf"),
+    CommandShape(name="reload", kind="leaf"),
+    CommandShape(name="status", kind="leaf"),
+    CommandShape(name="wait", kind="leaf"),
+    CommandShape(name="history", kind="leaf"),
+    CommandShape(name="interrupt", kind="leaf"),
+    CommandShape(name="reset", kind="leaf"),
+    CommandShape(name="stop", kind="leaf"),
+    CommandShape(name="doctor", kind="leaf"),
+    CommandShape(
+        name="runs",
+        kind="group",
+        prefix_exec_position="after_subcommand",
+        subcommands=("list", "show", "wait", "follow", "cancel", "help"),
+    ),
+    CommandShape(
+        name="sessions",
+        kind="group",
+        prefix_exec_position="after_subcommand",
+        subcommands=("list", "delete", "help"),
+    ),
 )
 
 
@@ -120,24 +156,11 @@ class _ScannedArgs:
     tail_root_flags: tuple[str, ...]
     tail_tokens_without_root: tuple[str, ...]
     tail_positionals: tuple[str, ...]
+    tail_positional_indexes: tuple[int, ...]
     suffix: tuple[str, ...]
     saw_help: bool
     saw_unknown_option: bool
     file_option_path: Path | None
-
-
-_SUBCOMMAND_WORDS: frozenset[str] = frozenset(
-    {
-        "list",
-        "show",
-        "follow",
-        "cancel",
-        "delete",
-        "help",
-    }
-)
-
-_GROUP_COMMANDS: frozenset[str] = frozenset({"runs", "sessions"})
 
 
 class InvocationResolver:
@@ -146,6 +169,7 @@ class InvocationResolver:
         *,
         root_options: Sequence[RootOptionSpec] = ROOT_OPTION_SPECS,
         option_specs: Sequence[InvocationOptionSpec] = INVOCATION_OPTION_SPECS,
+        command_shapes: Sequence[CommandShape] = COMMAND_SHAPES,
     ) -> None:
         self._root_flag_names = frozenset(spec.flag for spec in root_options)
         option_map: dict[str, InvocationOptionSpec] = {}
@@ -153,6 +177,10 @@ class InvocationResolver:
             for name in spec.names:
                 option_map[name] = spec
         self._option_specs = option_map
+        self._command_shapes = {shape.name: shape for shape in command_shapes}
+        self._subcommand_words = frozenset(
+            subcommand for shape in command_shapes for subcommand in shape.subcommands
+        )
 
     def resolve_invocation_intent(
         self,
@@ -174,37 +202,8 @@ class InvocationResolver:
                     argv=tuple(raw_args),
                     command_name=command_name,
                 )
-            if (
-                command_name in _GROUP_COMMANDS
-                and scanned.prefix_exec_tokens
-                and scanned.tail_positionals
-            ):
-                # For group commands (runs, sessions), prefix exec tokens like --session / --project
-                # must appear after the subcommand name, not between the group and its subcommand.
-                first_pos = scanned.tail_positionals[0]
-                split = scanned.tail_tokens_without_root.index(first_pos) + 1
-                tail_before = scanned.tail_tokens_without_root[:split]
-                tail_after = scanned.tail_tokens_without_root[split:]
-                argv: tuple[str, ...] = (
-                    *scanned.prefix_root_flags,
-                    *scanned.tail_root_flags,
-                    command_name,
-                    *tail_before,
-                    *scanned.prefix_exec_tokens,
-                    *tail_after,
-                    *scanned.suffix,
-                )
-            else:
-                argv = (
-                    *scanned.prefix_root_flags,
-                    *scanned.tail_root_flags,
-                    command_name,
-                    *scanned.prefix_exec_tokens,
-                    *scanned.tail_tokens_without_root,
-                    *scanned.suffix,
-                )
             return CommandIntent(
-                argv=argv,
+                argv=self._canonical_command_argv(command_name=command_name, scanned=scanned),
                 command_name=command_name,
                 root_flags=tuple(root_flags),
             )
@@ -255,6 +254,7 @@ class InvocationResolver:
         tail_root_flags: list[str] = []
         tail_tokens_without_root: list[str] = []
         tail_positionals: list[str] = []
+        tail_positional_indexes: list[int] = []
         saw_help = False
         saw_unknown_option = False
         file_option_path: Path | None = None
@@ -305,6 +305,7 @@ class InvocationResolver:
                 continue
             tail_tokens_without_root.append(token)
             tail_positionals.append(token)
+            tail_positional_indexes.append(len(tail_tokens_without_root) - 1)
             index += 1
 
         return _ScannedArgs(
@@ -314,6 +315,7 @@ class InvocationResolver:
             tail_root_flags=tuple(tail_root_flags),
             tail_tokens_without_root=tuple(tail_tokens_without_root),
             tail_positionals=tuple(tail_positionals),
+            tail_positional_indexes=tuple(tail_positional_indexes),
             suffix=tuple(args[boundary:]),
             saw_help=saw_help,
             saw_unknown_option=saw_unknown_option,
@@ -368,10 +370,47 @@ class InvocationResolver:
         ):
             return False
         if scanned.command_candidate is not None:
-            return scanned.command_candidate not in _SUBCOMMAND_WORDS
+            return scanned.command_candidate not in self._subcommand_words
         if scanned.file_option_path is not None:
             return True
         return self._stdin_has_data(stdin)
+
+    def _canonical_command_argv(
+        self,
+        *,
+        command_name: str,
+        scanned: _ScannedArgs,
+    ) -> tuple[str, ...]:
+        shape = self._command_shapes.get(command_name)
+        insertion_index = self._prefix_exec_insertion_index(shape=shape, scanned=scanned)
+        tail_tokens = list(scanned.tail_tokens_without_root)
+        if scanned.prefix_exec_tokens:
+            tail_tokens = [
+                *tail_tokens[:insertion_index],
+                *scanned.prefix_exec_tokens,
+                *tail_tokens[insertion_index:],
+            ]
+        return (
+            *scanned.prefix_root_flags,
+            *scanned.tail_root_flags,
+            command_name,
+            *tail_tokens,
+            *scanned.suffix,
+        )
+
+    def _prefix_exec_insertion_index(
+        self,
+        *,
+        shape: CommandShape | None,
+        scanned: _ScannedArgs,
+    ) -> int:
+        if not scanned.prefix_exec_tokens:
+            return 0
+        if shape is None or shape.prefix_exec_position != "after_subcommand":
+            return 0
+        if not scanned.tail_positional_indexes:
+            return 0
+        return scanned.tail_positional_indexes[0] + 1
 
     def _implicit_exec_intent(
         self,

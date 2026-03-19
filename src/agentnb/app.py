@@ -254,6 +254,7 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=request.session_id,
             require_live_session=True,
+            project_starting_state=True,
             handler=lambda session_id: self._vars_payload(request=request, session_id=session_id),
         )
 
@@ -263,6 +264,7 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=request.session_id,
             require_live_session=True,
+            project_starting_state=True,
             handler=lambda session_id: self._inspect_payload(
                 request=request,
                 session_id=session_id,
@@ -275,6 +277,7 @@ class AgentNBApp:
             project_root=request.project_root,
             requested_session_id=request.session_id,
             require_live_session=True,
+            project_starting_state=True,
             handler=lambda session_id: self._reload_payload(request=request, session_id=session_id),
         )
 
@@ -743,6 +746,7 @@ class AgentNBApp:
         requested_session_id: str | None,
         require_live_session: bool,
         handler: Callable[[str], Mapping[str, object]],
+        project_starting_state: bool = False,
         response_session_id_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
     ) -> CommandResponse:
         response_session_id = requested_session_id or DEFAULT_SESSION_ID
@@ -763,6 +767,41 @@ class AgentNBApp:
                 )
                 if previous != resolved_session_id:
                     switched_session = resolved_session_id
+            if project_starting_state:
+                state = self.runtime.runtime_state(
+                    project_root=project_root,
+                    session_id=resolved_session_id,
+                )
+                if state.kind == "starting":
+                    error = AgentNBException(
+                        code="KERNEL_NOT_READY",
+                        message=(
+                            "Kernel startup is still in progress or not yet ready. Wait and retry."
+                        ),
+                        data=dict(_status_payload_from_runtime_state(state)),
+                    )
+                    return error_response(
+                        command=command_name,
+                        project=str(project_root),
+                        session_id=response_session_id,
+                        code=error.code,
+                        message=error.message,
+                        ename=error.ename,
+                        evalue=error.evalue,
+                        traceback=compact_traceback(error.traceback),
+                        data=error.data,
+                        suggestions=self.advisor.suggestions(
+                            AdviceContext(
+                                command_name=command_name,
+                                response_status="error",
+                                data=error.data,
+                                error_code=error.code,
+                                error_name=error.ename,
+                                error_value=error.evalue,
+                                session_id=response_session_id,
+                            )
+                        ),
+                    )
             data = handler(resolved_session_id)
             if switched_session is not None:
                 data = dict(data)

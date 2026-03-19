@@ -141,6 +141,7 @@ def test_local_run_manager_get_run_preserves_starting_background_record(project_
 
     assert run["status"] == "starting"
     assert run["worker_pid"] is None
+    assert run["snapshot_stale"] is True
 
 
 def test_local_run_manager_submit_background_persists_spawn_failure(

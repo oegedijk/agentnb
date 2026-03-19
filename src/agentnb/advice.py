@@ -36,6 +36,11 @@ class AdvicePolicy:
             ]
         if context.error_code == "SESSION_BUSY":
             return ["Run `agentnb wait --json` to block until the session is idle, then retry."]
+        if context.error_code == "KERNEL_NOT_READY":
+            return [
+                "Run `agentnb wait --json` to wait for startup to finish.",
+                "Run `agentnb status --json` to inspect the current session state.",
+            ]
         if context.error_code in {"NO_KERNEL", "BACKEND_ERROR", "KERNEL_DEAD"}:
             return [
                 "Run `agentnb start --json` to start the kernel.",

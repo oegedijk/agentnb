@@ -501,6 +501,30 @@ def test_cli_returns_kernel_not_ready_error_when_connection_exists_without_sessi
     assert _error(payload)["code"] == "KERNEL_NOT_READY"
 
 
+def test_cli_vars_projects_starting_state_when_connection_exists_without_session(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    state_dir = project_dir / ".agentnb"
+    state_dir.mkdir()
+    (state_dir / "kernel-default.json").write_text("{}", encoding="utf-8")
+
+    result = cli_runner.invoke(
+        main,
+        ["vars", "--project", str(project_dir), "--json"],
+    )
+    assert result.exit_code == 1
+
+    payload = _payload(result.output)
+    assert payload["status"] == "error"
+    assert _error(payload)["code"] == "KERNEL_NOT_READY"
+    assert payload["data"]["runtime_state"] == "starting"
+    assert payload["data"]["session_exists"] is False
+    assert payload["suggestions"] == [
+        "Run `agentnb wait --json` to wait for startup to finish.",
+        "Run `agentnb status --json` to inspect the current session state.",
+    ]
+
+
 def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
     cli_runner: CliRunner, project_dir: Path
 ) -> None:
@@ -1568,6 +1592,35 @@ def test_cli_runs_show_human_clarifies_snapshot_for_running_run(
     assert (
         "snapshot: persisted state only; use `agentnb runs follow` for live events" in result.output
     )
+
+
+def test_cli_runs_show_json_marks_running_snapshot_as_stale(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "ts": "2026-03-10T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "running",
+        "snapshot_stale": True,
+        "duration_ms": 12,
+        "stdout": "",
+        "stderr": "",
+        "result": None,
+        "events": [],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["run"]["snapshot_stale"] is True
 
 
 def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir: Path) -> None:

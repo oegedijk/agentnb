@@ -18,6 +18,7 @@ class RunSnapshot(TypedDict, total=False):
     session_id: str
     command_type: str
     status: str
+    snapshot_stale: bool
     duration_ms: int
     code: str | None
     worker_pid: int | None

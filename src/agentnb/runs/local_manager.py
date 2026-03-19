@@ -71,7 +71,9 @@ class LocalRunManager(RunManager):
                 code="EXECUTION_NOT_FOUND",
                 message=f"Execution not found: {execution_id}",
             )
-        return record.to_dict()
+        payload = record.to_dict()
+        payload["snapshot_stale"] = record.status in _ACTIVE_RUN_STATUSES
+        return payload
 
     def wait_for_run(
         self,

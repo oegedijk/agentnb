@@ -8,6 +8,8 @@ from agentnb.app import (
     AgentNBApp,
     ExecRequest,
     HistoryRequest,
+    InspectRequest,
+    ReloadRequest,
     ResetRequest,
     RunLookupRequest,
     RunsFollowRequest,
@@ -16,6 +18,7 @@ from agentnb.app import (
     SessionsDeleteRequest,
     SessionsListRequest,
     StatusRequest,
+    VarsRequest,
     WaitRequest,
 )
 from agentnb.contracts import KernelStatus
@@ -357,6 +360,47 @@ def test_app_status_projects_busy_lock_metadata(project_dir) -> None:
     assert response.data["lock_pid"] == 987
     assert response.data["lock_acquired_at"] == "2026-03-19T12:00:00+00:00"
     assert isinstance(response.data["busy_for_ms"], int)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "request_factory"),
+    [
+        ("vars", lambda project_dir: VarsRequest(project_root=project_dir)),
+        ("inspect", lambda project_dir: InspectRequest(project_root=project_dir, name="value")),
+        ("reload", lambda project_dir: ReloadRequest(project_root=project_dir)),
+    ],
+)
+def test_app_read_commands_project_starting_state_without_running_helpers(
+    project_dir,
+    method_name: str,
+    request_factory,
+) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="starting",
+        session_id="analysis",
+        kernel_status=KernelStatus(alive=False),
+        has_connection_file=True,
+    )
+    ops = Mock()
+    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService), ops=ops)
+
+    response = getattr(app, method_name)(request_factory(project_dir))
+
+    assert response.status == "error"
+    assert response.session_id == "analysis"
+    assert response.error is not None
+    assert response.error.code == "KERNEL_NOT_READY"
+    assert response.data["runtime_state"] == "starting"
+    assert response.data["session_exists"] is False
+    runtime.runtime_state.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        session_id="analysis",
+    )
+    ops.list_vars.assert_not_called()
+    ops.inspect_var.assert_not_called()
+    ops.reload_module.assert_not_called()
 
 
 def test_app_wait_uses_runtime_wait_for_usable(project_dir, mocker) -> None:

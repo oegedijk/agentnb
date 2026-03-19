@@ -16,6 +16,7 @@ from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink, Ke
 from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
 from agentnb.journal import JournalEntry, JournalQuery
+from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
@@ -1894,6 +1895,114 @@ def test_cli_exec_returns_session_busy_when_lock_exists(
     assert payload["data"]["lock_pid"] == 321
     assert payload["data"]["lock_acquired_at"] == "2026-03-19T12:00:00+00:00"
     assert payload["data"]["busy_for_ms"] == 1500
+
+
+def test_cli_background_overlap_fails_fast_with_blocking_run_id(
+    cli_runner: CliRunner,
+    started_runtime: tuple[object, Path],
+) -> None:
+    _, project_dir = started_runtime
+
+    background = cli_runner.invoke(
+        main,
+        [
+            "--project",
+            str(project_dir),
+            "--json",
+            "--background",
+            "import time; time.sleep(1.5); 'done'",
+        ],
+    )
+    assert background.exit_code == 0
+    background_payload = _payload(background.output)
+    blocking_execution_id = background_payload["data"]["execution_id"]
+
+    result = cli_runner.invoke(main, ["--project", str(project_dir), "--json", "99"])
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert _error(payload)["code"] == "SESSION_BUSY"
+    assert payload["data"]["active_execution_id"] == blocking_execution_id
+    assert payload["suggestions"] == [
+        f"Run `agentnb runs wait {blocking_execution_id} --json` to wait for the blocking run.",
+        f"Run `agentnb runs show {blocking_execution_id} --json` to inspect the blocking run.",
+    ]
+
+    wait_result = cli_runner.invoke(
+        main,
+        ["runs", "wait", blocking_execution_id, "--project", str(project_dir), "--json"],
+    )
+    assert wait_result.exit_code == 0
+
+
+def test_cli_status_human_reports_implicit_session_switch(
+    cli_runner: CliRunner,
+    runtime,
+    project_dir: Path,
+) -> None:
+    runtime.start(project_dir, session_id="analysis")
+    runtime.remember_current_session(project_root=project_dir, session_id="default")
+
+    try:
+        result = cli_runner.invoke(main, ["status", "--project", str(project_dir)])
+    finally:
+        runtime.stop(project_dir, session_id="analysis")
+
+    assert result.exit_code == 0
+    assert "session: analysis" in result.output
+    assert "(now targeting session: analysis)" in result.output
+
+
+def test_cli_doctor_fix_uses_target_project_root(
+    cli_runner: CliRunner,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agentnb.cli as cli
+
+    calls: list[dict[str, object]] = []
+
+    class FakeProvisioner:
+        def __init__(self, project_root: Path) -> None:
+            self.project_root = project_root
+
+        def doctor(
+            self,
+            preferred_python: Path | None = None,
+            auto_fix: bool = False,
+        ) -> DoctorReport:
+            calls.append(
+                {
+                    "project_root": self.project_root,
+                    "preferred_python": preferred_python,
+                    "auto_fix": auto_fix,
+                }
+            )
+            return DoctorReport(
+                ready=True,
+                selected_python="/custom/python",
+                python_source="explicit",
+                checks=[DoctorCheck(name="python", status="ok", message="ok")],
+            )
+
+    monkeypatch.setattr(
+        cli.runtime,
+        "_provisioner_factory",
+        lambda project_root: FakeProvisioner(project_root),
+    )
+
+    result = cli_runner.invoke(main, ["doctor", "--project", str(project_dir), "--fix", "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["ready"] is True
+    assert calls == [
+        {
+            "project_root": project_dir.resolve(),
+            "preferred_python": None,
+            "auto_fix": True,
+        }
+    ]
 
 
 def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Path) -> None:

@@ -240,6 +240,7 @@ def test_history_selector_resolver_uses_plain_query_without_reference() -> None:
                 include_internal=False,
                 errors_only=True,
                 latest=True,
+                prefer_execution_errors=True,
             ),
         ),
         (

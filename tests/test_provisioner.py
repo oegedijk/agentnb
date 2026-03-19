@@ -110,6 +110,7 @@ def test_ensure_ipykernel_auto_install_flow(project_dir: Path, mocker: MockerFix
 
     assert installed is True
     run_mock.assert_called_once()
+    assert run_mock.call_args.kwargs["cwd"] == project_dir
     assert supports_mock.call_count == 2
 
 
@@ -240,6 +241,15 @@ def test_ensure_ipykernel_uses_uv_when_pip_unavailable(
     assert installed is True
     call_args = run_mock.call_args[0][0]
     assert call_args[0] == "uv"
+    assert call_args == [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        str(Path(sys.executable).absolute()),
+        "ipykernel>=6.0",
+    ]
+    assert run_mock.call_args.kwargs["cwd"] == project_dir
 
 
 def test_ensure_ipykernel_uses_uv_add_when_uv_lock_present(
@@ -263,6 +273,7 @@ def test_ensure_ipykernel_uses_uv_add_when_uv_lock_present(
 
     call_args = run_mock.call_args[0][0]
     assert call_args == ["uv", "add", "ipykernel"]
+    assert run_mock.call_args.kwargs["cwd"] == project_dir
 
 
 def test_ensure_ipykernel_no_pip_error_message_suggests_uv(

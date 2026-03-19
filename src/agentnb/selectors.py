@@ -247,6 +247,7 @@ class HistorySelectorResolver:
                 include_internal=include_internal,
                 errors_only=True,
                 latest=True,
+                prefer_execution_errors=True,
             )
         return JournalQuery(
             session_id=session_id,

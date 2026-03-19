@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .execution import ExecutionRecord, ExecutionStore
-from .history import HistoryRecord, HistoryStore, kernel_execution_record, user_command_record
+from .history import (
+    FailureOrigin,
+    HistoryRecord,
+    HistoryStore,
+    kernel_execution_record,
+    user_command_record,
+)
 from .session import DEFAULT_SESSION_ID
 
 JournalClassification = Literal["replayable", "inspection", "control", "internal"]
@@ -31,6 +37,7 @@ class JournalQuery:
     last: int | None = None
     replayable_only: bool = False
     execution_id: str | None = None
+    prefer_execution_errors: bool = False
 
     def __post_init__(self) -> None:
         if self.errors_only and self.success_only:
@@ -59,6 +66,7 @@ class JournalEntry:
     code: str | None = None
     origin: str | None = None
     error_type: str | None = None
+    failure_origin: FailureOrigin | None = None
     result_preview: str | None = None
     stdout_preview: str | None = None
 
@@ -81,6 +89,7 @@ class JournalEntry:
             **({"code": self.code} if self.code is not None else {}),
             **({"origin": self.origin} if self.origin is not None else {}),
             **({"error_type": self.error_type} if self.error_type is not None else {}),
+            **({"failure_origin": self.failure_origin} if self.failure_origin is not None else {}),
             **({"result_preview": self.result_preview} if self.result_preview is not None else {}),
             **({"stdout_preview": self.stdout_preview} if self.stdout_preview is not None else {}),
         }
@@ -110,6 +119,7 @@ class JournalEntry:
             code=record.code,
             origin=record.origin,
             error_type=record.error_type,
+            failure_origin=record.failure_origin,
             result_preview=record.result_preview,
             stdout_preview=record.stdout_preview,
         )
@@ -254,6 +264,7 @@ class CommandJournal:
                     status=record.status,
                     duration_ms=record.duration_ms,
                     error_type=record.ename,
+                    failure_origin=_failure_origin_for_record(record),
                     stdout=record.stdout,
                     result=record.result,
                 ),
@@ -273,6 +284,7 @@ class CommandJournal:
                     status=record.status,
                     duration_ms=record.duration_ms,
                     error_type=record.ename,
+                    failure_origin=_failure_origin_for_record(record),
                     stdout=record.stdout,
                     result=record.result,
                 ),
@@ -295,6 +307,10 @@ class CommandJournal:
             selected = [entry for entry in selected if entry.replayable]
         if query.success_only:
             selected = [entry for entry in selected if entry.status == "ok"]
+        if query.prefer_execution_errors and query.errors_only:
+            execution_errors = [entry for entry in selected if entry.failure_origin == "kernel"]
+            if execution_errors:
+                selected = execution_errors
         if query.latest:
             return selected[-1:]
         if query.last is not None:
@@ -318,3 +334,13 @@ def _execution_provenance_detail(record: HistoryRecord) -> JournalProvenanceDeta
     if record.kind == "kernel_execution":
         return "projected_kernel_execution"
     return "projected_user_command"
+
+
+def _failure_origin_for_record(record: ExecutionRecord) -> FailureOrigin | None:
+    if record.failure_origin is not None:
+        return record.failure_origin
+    if record.status != "error":
+        return None
+    if record.ename == "SessionBusyError":
+        return "control"
+    return "kernel"

@@ -37,6 +37,7 @@ class RunSnapshot(TypedDict, total=False):
     recorded_ename: str | None
     recorded_evalue: str | None
     recorded_traceback: list[str] | None
+    failure_origin: str | None
     error_data: dict[str, JSONValue]
 
 

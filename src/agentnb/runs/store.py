@@ -22,6 +22,7 @@ from ..state import StateRepository
 
 RunStatus = Literal["starting", "running", "ok", "error"]
 TerminalReason = Literal["completed", "failed", "cancelled", "worker_exited"]
+FailureOrigin = Literal["kernel", "control"]
 
 _ACTIVE_RUN_STATUSES = frozenset({"starting", "running"})
 _CANCELLED_ERROR_TYPE = "CancelledError"
@@ -63,6 +64,7 @@ class ExecutionRecord:
     recorded_ename: str | None = None
     recorded_evalue: str | None = None
     recorded_traceback: list[str] | None = None
+    failure_origin: FailureOrigin | None = None
     error_data: dict[str, JSONValue] | None = None
 
     def __post_init__(self) -> None:
@@ -140,6 +142,7 @@ class ExecutionRecord:
             "recorded_ename": self.recorded_ename,
             "recorded_evalue": self.recorded_evalue,
             "recorded_traceback": self.recorded_traceback,
+            "failure_origin": self.failure_origin,
             "events": [
                 ExecutionEventPayload(
                     kind=event.kind,
@@ -229,6 +232,7 @@ class ExecutionRecord:
             recorded_ename=_optional_str(payload, "recorded_ename"),
             recorded_evalue=_optional_str(payload, "recorded_evalue"),
             recorded_traceback=_optional_str_list(payload, "recorded_traceback"),
+            failure_origin=_optional_failure_origin(payload, "failure_origin"),
             error_data=_optional_json_object(payload, "error_data"),
         )
 
@@ -449,6 +453,7 @@ class ExecutionRun:
             ename=ename,
             evalue=evalue,
             traceback=traceback,
+            failure_origin=_failure_origin(error),
             error_data=_error_data(error),
             journal_entries=recording.build_records(
                 ts=self.record.ts,
@@ -456,6 +461,7 @@ class ExecutionRun:
                 execution_id=self.record.execution_id,
                 error=error,
                 duration_ms=duration_ms,
+                failure_origin=_failure_origin(error),
             ),
         )
 
@@ -511,6 +517,7 @@ def execution_record_from_result(
             session_id=session_id,
             execution_id=record.execution_id,
             execution=execution,
+            failure_origin="kernel" if execution.status == "error" else None,
         ),
     )
 
@@ -541,6 +548,7 @@ def execution_record_from_exception(
         ename=ename,
         evalue=evalue,
         traceback=traceback,
+        failure_origin=_failure_origin(error),
         error_data=_error_data(error),
     )
     return replace(
@@ -550,6 +558,7 @@ def execution_record_from_exception(
             session_id=session_id,
             execution_id=record.execution_id,
             error=error,
+            failure_origin=_failure_origin(error),
         ),
     )
 
@@ -629,6 +638,15 @@ def _optional_terminal_reason(payload: dict[str, Any], key: str) -> TerminalReas
     return cast(TerminalReason, value)
 
 
+def _optional_failure_origin(payload: dict[str, Any], key: str) -> FailureOrigin | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if value not in {"kernel", "control"}:
+        raise ValueError(f"Invalid {key}")
+    return cast(FailureOrigin, value)
+
+
 def _merge_records(previous: ExecutionRecord, current: ExecutionRecord) -> ExecutionRecord:
     changes: dict[str, object] = {}
     merged_cancel_requested = current.cancel_requested or previous.cancel_requested
@@ -654,6 +672,8 @@ def _merge_records(previous: ExecutionRecord, current: ExecutionRecord) -> Execu
         changes["recorded_evalue"] = previous.recorded_evalue
     if current.recorded_traceback is None and previous.recorded_traceback is not None:
         changes["recorded_traceback"] = list(previous.recorded_traceback)
+    if current.failure_origin is None and previous.failure_origin is not None:
+        changes["failure_origin"] = previous.failure_origin
     if current.error_data is None and previous.error_data is not None:
         changes["error_data"] = dict(previous.error_data)
     if not changes:
@@ -665,6 +685,18 @@ def _error_data(error: Exception) -> dict[str, JSONValue] | None:
     if not isinstance(error, AgentNBException) or not error.data:
         return None
     return _json_object(error.data)
+
+
+def _failure_origin(error: Exception) -> FailureOrigin:
+    if isinstance(error, AgentNBException) and error.code in {
+        "SESSION_BUSY",
+        "NO_KERNEL",
+        "KERNEL_NOT_READY",
+        "SESSION_NOT_FOUND",
+        "AMBIGUOUS_SESSION",
+    }:
+        return "control"
+    return "kernel"
 
 
 def _json_object(payload: dict[str, object]) -> dict[str, JSONValue]:

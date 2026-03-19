@@ -1307,6 +1307,7 @@ def test_cli_history_last_error_selector_uses_history_reference(
     assert payload["data"]["entries"][0]["label"] == "exec error ZeroDivisionError"
     assert queries[0].latest is True
     assert queries[0].errors_only is True
+    assert queries[0].prefer_execution_errors is True
 
 
 def test_cli_sessions_list_returns_runtime_entries(

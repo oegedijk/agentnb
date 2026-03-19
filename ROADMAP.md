@@ -125,13 +125,13 @@ The remaining fixes below should extend those seams instead of reintroducing tim
 - Fixed `doctor --fix` install targeting for uv-managed projects: automatic ipykernel repair now runs from the target project root, and the `uv pip` fallback binds installation to the selected interpreter before re-checking module availability.
 - Completed startup-state handling for read-only helper commands: `vars`, `inspect`, and `reload` now return structured `KERNEL_NOT_READY` responses with `runtime_state=starting` while a same-session startup is still in flight, instead of collapsing into generic no-kernel behavior.
 - Tightened `runs show` snapshot semantics: active run snapshots now carry an explicit `snapshot_stale` flag in machine output, matching the existing human warning that persisted state may lag live follow output.
+- Clarified same-session foreground/background serialization: overlapping `exec` / `reset` attempts now fail fast against active persisted run records before startup checks run, `SESSION_BUSY` responses include the blocking `active_execution_id`, and recovery suggestions point directly at `runs wait/show` for that run.
 - Improved current-session visibility in multi-session workflows: implicit session-bound commands now refresh the saved current-session preference and surface a switch notice when agentnb resolves to a different known session than the one previously targeted.
 
 ### Planned
 
 - Unify `--session` and `--project` option placement across commands: top-level and subcommand-position forms should both work consistently for `history`, `runs`, lifecycle commands, and any other command that advertises those options. Extend `CommandShape` metadata and canonicalization instead of adding parser exceptions.
 - Fix run-control command targeting docs and behavior: if `runs show/follow/wait/cancel` are intentionally session-independent once an `execution_id` is known, remove misleading help text that suggests `--session` works there; otherwise, make the grammar and declarations agree through `CommandShape` and `cli.py`.
-- Clarify foreground versus background serialization semantics: if a second command after `--background` is queued rather than rejected, document and surface that behavior explicitly; if fail-fast is intended, enforce it consistently.
 - Add a first-class partial file rerun path: support rerunning only the changed tail of a file-backed workflow without manual copy-paste back into inline exec.
 - Improve in-session dependency recovery guidance: when a module import fails, suggestions should acknowledge uv-managed environments, pip-less venvs, and the difference between installing into the project environment versus the caller's environment.
 - Make cross-project driving uniform: `--project /other/path` should work the same way for `exec`, `vars`, `history`, `runs`, and lifecycle commands, with no command-specific flag placement surprises. This should be expressed through `CommandShape` plus matching Click declarations.
@@ -144,7 +144,7 @@ The smoke failures cluster into a small number of existing modules. v0.3.4 shoul
 - `AgentNBApp` in `agentnb.app` owns command-level session resolution and response shaping. Startup-race behavior for read-only commands, multi-session current-session visibility, and any "wait briefly vs fail fast" policy should be decided here and then delegated downward.
 - `RuntimeState` + `KernelRuntime` in `agentnb.runtime` own kernel liveness, startup, busy/idle waiting, interrupt, and doctor integration. Hard-exit detection, `starting` versus `missing`, and the distinction between dead kernel, stale session record, and active startup all belong here.
 - `SessionStateFiles` / `StateRepository` in `agentnb.state` own lock files and persisted runtime markers. If v0.3.4 needs richer startup or contention metadata than the current `RuntimeState` can infer, that metadata should be modeled here rather than inferred ad hoc from CLI timing.
-- `LocalRunManager`, `ExecutionStore`, and `RunSelectorResolver` in `agentnb.runs` and `agentnb.selectors` own background-run semantics, follow/show/wait/cancel behavior, selector resolution, and snapshot freshness. The `runs show` staleness fix and any queued-versus-rejected same-session command policy should be implemented in this layer.
+- `LocalRunManager`, `ExecutionStore`, and `RunSelectorResolver` in `agentnb.runs` and `agentnb.selectors` own background-run semantics, follow/show/wait/cancel behavior, selector resolution, and snapshot freshness. The `runs show` staleness fix and same-session fail-fast serialization policy belong in this layer.
 - `CommandJournal` / `HistorySelectorResolver` in `agentnb.journal` and `agentnb.selectors` own how history is selected and filtered. The `@last-error` ambiguity between execution failures and incidental control-plane failures should be resolved here, not in the renderer.
 - `KernelProvisioner` in `agentnb.kernel.provisioner` owns interpreter choice, ipykernel installation, and doctor/fix behavior. The broken `doctor --fix` path and uv/pip-less environment handling belong entirely inside this seam.
 - `AdvicePolicy` in `agentnb.advice` owns next-step recovery guidance. Missing-module suggestions, uv-aware install hints, and clearer post-error recovery advice should be fixed here after the runtime/provisioner behavior is corrected.
@@ -192,7 +192,7 @@ Use it next for:
 - Startup race clarity:
   `RuntimeState`, `KernelRuntime.status`, `wait_for_usable`, and `AgentNBApp._handle_command` need a shared notion of `session is starting` rather than treating missing session state and in-flight startup as the same condition.
 - Busy/serialization clarity:
-  `RuntimeState`, `SessionBusyError`, `ExecPayload`/error payload contracts, and the command-lock path in `KernelRuntime.execute` / `reset` are the right places to add waited-versus-fail-fast metadata.
+  `RuntimeState`, `SessionBusyError`, `ExecPayload`/error payload contracts, and `LocalRunManager` now carry the fail-fast same-session contract, including blocking-run metadata (`active_execution_id`) and non-blocking implicit session resolution.
 - Background follow/show semantics:
   `LocalRunManager.follow_run`, `wait_for_run`, `get_run`, and the stored `ExecutionRecord` shape are where snapshot freshness and queued-command semantics should be clarified.
 - `history @last-error` behavior:
@@ -209,7 +209,6 @@ Use it next for:
 ### Deferred
 
 - Decide whether read-only commands should wait during startup/busy windows or always fail fast with structured state. The smoke run showed the current hybrid behavior is confusing, but the fix should be a deliberate policy choice, not an accidental timeout tweak.
-- Decide whether background runs should permit queued foreground commands on the same session. Current behavior appears mixed enough that the CLI contract should be made explicit before adding more control-plane fields.
 
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 

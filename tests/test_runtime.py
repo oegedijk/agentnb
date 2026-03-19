@@ -343,6 +343,35 @@ def test_runtime_resolve_session_id_prefers_current_session_preference(project_d
     assert resolved == "analysis"
 
 
+def test_runtime_resolve_session_id_does_not_probe_backend_status(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="analysis")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.status.side_effect = AssertionError("resolve_session_id should not probe backend")
+    runtime = KernelRuntime(backend=backend)
+
+    resolved = runtime.resolve_session_id(
+        project_root=project_dir,
+        requested_session_id=None,
+        require_live_session=True,
+    )
+
+    assert resolved == "analysis"
+    backend.status.assert_not_called()
+
+
 def test_runtime_resolve_session_id_raises_when_multiple_live_sessions_exist(
     project_dir: Path,
 ) -> None:

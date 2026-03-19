@@ -56,6 +56,7 @@ class SessionBusyError(AgentNBException):
         lock_pid: int | None = None,
         lock_acquired_at: str | None = None,
         busy_for_ms: int | None = None,
+        active_execution_id: str | None = None,
     ) -> None:
         data: dict[str, object] = {
             "wait_behavior": wait_behavior,
@@ -67,6 +68,8 @@ class SessionBusyError(AgentNBException):
             data["lock_acquired_at"] = lock_acquired_at
         if busy_for_ms is not None:
             data["busy_for_ms"] = max(busy_for_ms, 0)
+        if active_execution_id is not None:
+            data["active_execution_id"] = active_execution_id
         super().__init__(
             code="SESSION_BUSY",
             message=(

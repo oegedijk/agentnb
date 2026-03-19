@@ -242,31 +242,39 @@ class KernelRuntime:
         if not require_live_session:
             return preferred_session_id or DEFAULT_SESSION_ID
 
-        sessions = self.list_sessions(project_root=project_root)
+        live_session_ids = self._live_session_ids_for_resolution(project_root=project_root)
         if preferred_session_id is not None:
-            live_session_ids = {str(session["session_id"]) for session in sessions}
             if not live_session_ids:
                 return preferred_session_id
             if preferred_session_id in live_session_ids:
                 return preferred_session_id
-        if not sessions:
+        if not live_session_ids:
             return DEFAULT_SESSION_ID
-        if len(sessions) == 1:
-            return str(sessions[0]["session_id"])
-        raise AmbiguousSessionError([str(session["session_id"]) for session in sessions])
+        if len(live_session_ids) == 1:
+            return live_session_ids[0]
+        raise AmbiguousSessionError(list(live_session_ids))
 
     def _check_session_prefix_collision(
         self, *, project_root: Path, requested_session_id: str
     ) -> None:
-        sessions = self.list_sessions(project_root=project_root)
-        if not sessions:
+        live_ids = self._live_session_ids_for_resolution(project_root=project_root)
+        if not live_ids:
             return
-        live_ids = [str(s["session_id"]) for s in sessions]
         if requested_session_id in live_ids:
             return
         prefix_matches = [sid for sid in live_ids if sid.startswith(requested_session_id)]
         if prefix_matches:
             raise AmbiguousSessionError(prefix_matches)
+
+    def _live_session_ids_for_resolution(self, *, project_root: Path) -> list[str]:
+        live_ids: list[str] = []
+        for session in SessionStore.list_sessions(project_root):
+            if not pid_exists(session.pid):
+                continue
+            if not Path(session.connection_file).exists():
+                continue
+            live_ids.append(session.session_id)
+        return live_ids
 
     def current_session_id(self, *, project_root: Path) -> str | None:
         return StateRepository(project_root).session_preferences().current_session_id

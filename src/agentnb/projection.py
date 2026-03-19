@@ -69,6 +69,7 @@ class ResponseProjector:
                 "lock_pid",
                 "lock_acquired_at",
                 "busy_for_ms",
+                "active_execution_id",
             )
             for key in ("result", "stdout", "stderr", "selected_output", "selected_text"):
                 value = data.get(key)

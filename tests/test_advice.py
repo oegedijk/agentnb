@@ -234,6 +234,24 @@ def test_advice_policy_session_busy_suggests_wait() -> None:
     ]
 
 
+def test_advice_policy_session_busy_with_active_run_suggests_run_controls() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={"active_execution_id": "run-7"},
+            error_code="SESSION_BUSY",
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb runs wait run-7 --json` to wait for the blocking run.",
+        "Run `agentnb runs show run-7 --json` to inspect the blocking run.",
+    ]
+
+
 def test_advice_policy_status_starting_suggests_wait() -> None:
     policy = AdvicePolicy()
 

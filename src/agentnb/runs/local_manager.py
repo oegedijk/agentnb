@@ -13,6 +13,7 @@ from ..errors import (
     KernelNotReadyError,
     NoKernelRunningError,
     RunWaitTimedOutError,
+    SessionBusyError,
 )
 from ..payloads import CancelRunResult, RunSnapshot
 from ..recording import CommandRecorder, CommandRecording
@@ -246,8 +247,6 @@ class LocalRunManager(RunManager):
         *,
         observer: RunObserver | None,
     ) -> ManagedExecution:
-        started_new_session = self._ensure_plan_ready(plan)
-
         run = self._new_run(
             project_root=plan.project_root,
             session_id=plan.session_id,
@@ -257,6 +256,8 @@ class LocalRunManager(RunManager):
         )
 
         try:
+            self._reject_if_session_run_active(plan=plan, run=run)
+            started_new_session = self._ensure_plan_ready(plan)
             execution = self._executor.run_foreground(plan=plan, run=run, observer=observer)
         except Exception as exc:
             if isinstance(exc, (NoKernelRunningError, KernelNotReadyError)):
@@ -277,8 +278,6 @@ class LocalRunManager(RunManager):
         return ManagedExecution(record=record, started_new_session=started_new_session)
 
     def _submit_background(self, plan: RunPlan) -> ManagedExecution:
-        started_new_session = self._ensure_plan_ready(plan)
-
         run = self._new_run(
             project_root=plan.project_root,
             session_id=plan.session_id,
@@ -286,15 +285,29 @@ class LocalRunManager(RunManager):
             code=plan.code,
             status="starting",
         )
-        run.start()
 
         try:
+            self._reject_if_session_run_active(plan=plan, run=run)
+            started_new_session = self._ensure_plan_ready(plan)
+            run.start()
             record = self._executor.start_background(
                 plan=plan,
                 run=run,
             )
         except Exception as exc:
-            run.finalize_error(exc)
+            if run.started:
+                run.finalize_error(exc)
+            else:
+                record = run.finalize_error(exc)
+                if isinstance(exc, AgentNBException):
+                    raise AgentNBException(
+                        code=exc.code,
+                        message=exc.message,
+                        ename=exc.ename,
+                        evalue=exc.evalue,
+                        traceback=exc.traceback,
+                        data=dict(record.to_execution_payload()),
+                    ) from exc
             raise
 
         return ManagedExecution(record=record, started_new_session=started_new_session)
@@ -363,6 +376,21 @@ class LocalRunManager(RunManager):
                 timeout_s=30.0,
             )
         raise ValueError(f"Unsupported run command type: {record.command_type}")
+
+    def _reject_if_session_run_active(self, *, plan: RunPlan, run: ExecutionRun) -> None:
+        active = self._active_run_for_session(
+            project_root=plan.project_root,
+            session_id=plan.session_id,
+            excluding_execution_id=run.record.execution_id,
+        )
+        if active is None:
+            return
+        raise SessionBusyError(
+            wait_behavior="immediate",
+            waited_ms=0,
+            lock_pid=active.worker_pid,
+            active_execution_id=active.execution_id,
+        )
 
     def _finalize_cancelled_run(
         self,
@@ -467,6 +495,27 @@ class LocalRunManager(RunManager):
         if record is None:
             return None
         return self._normalize_run_state(project_root=project_root, record=record)
+
+    def _active_run_for_session(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        excluding_execution_id: str | None = None,
+    ) -> ExecutionRecord | None:
+        for record in reversed(
+            self._read_runs(
+                project_root=project_root,
+                session_id=session_id,
+                command_types={"exec", "reset"},
+                errors_only=False,
+            )
+        ):
+            if excluding_execution_id is not None and record.execution_id == excluding_execution_id:
+                continue
+            if record.status in _ACTIVE_RUN_STATUSES:
+                return record
+        return None
 
     def _normalize_run_state(
         self,

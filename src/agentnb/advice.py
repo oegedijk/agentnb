@@ -35,6 +35,12 @@ class AdvicePolicy:
                 "Retry with `agentnb runs show EXECUTION_ID --json` to target one explicitly.",
             ]
         if context.error_code == "SESSION_BUSY":
+            execution_id = data.get("active_execution_id")
+            if isinstance(execution_id, str) and execution_id:
+                return [
+                    f"Run `{_run_command('wait', execution_id)}` to wait for the blocking run.",
+                    f"Run `{_run_command('show', execution_id)}` to inspect the blocking run.",
+                ]
             return ["Run `agentnb wait --json` to block until the session is idle, then retry."]
         if context.error_code == "KERNEL_NOT_READY":
             return [

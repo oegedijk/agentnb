@@ -105,6 +105,7 @@ def test_response_projector_agent_keeps_busy_metadata_for_exec_errors() -> None:
             "lock_pid": 321,
             "lock_acquired_at": "2026-03-19T12:00:00+00:00",
             "busy_for_ms": 1500,
+            "active_execution_id": "run-7",
         },
     )
 
@@ -120,6 +121,7 @@ def test_response_projector_agent_keeps_busy_metadata_for_exec_errors() -> None:
             "lock_pid": 321,
             "lock_acquired_at": "2026-03-19T12:00:00+00:00",
             "busy_for_ms": 1500,
+            "active_execution_id": "run-7",
         },
         "error": {
             "code": "SESSION_BUSY",

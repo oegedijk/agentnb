@@ -176,6 +176,7 @@ class ExecPayload(TypedDict, total=False):
     lock_pid: int
     lock_acquired_at: str
     busy_for_ms: int
+    active_execution_id: str
     selected_output: str
     selected_text: str
 
@@ -195,6 +196,7 @@ class CompactExecPayloadInput(TypedDict, total=False):
     lock_pid: int
     lock_acquired_at: str
     busy_for_ms: int
+    active_execution_id: str
     selected_output: str
     selected_text: str
 

@@ -293,6 +293,52 @@ def test_local_run_manager_submit_exec_preserves_agent_error_metadata(project_di
     assert exc_info.value.data["busy_for_ms"] == 1500
 
 
+@pytest.mark.parametrize("mode", ["foreground", "background"])
+def test_local_run_manager_submit_rejects_active_same_session_run(
+    project_dir: Path,
+    mocker,
+    mode: Literal["foreground", "background"],
+) -> None:
+    mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    runtime = _runtime()
+    ensure_started = mocker.patch.object(runtime, "ensure_started", return_value=(object(), False))
+    execute = mocker.patch.object(runtime, "execute")
+    popen = mocker.patch("agentnb.runs.executor.subprocess.Popen")
+    manager = LocalRunManager(runtime)
+    active = _active_record(status="starting", worker_pid=456)
+    ExecutionStore(project_dir).append(active)
+
+    with pytest.raises(AgentNBException) as exc_info:
+        manager.submit(
+            RunSpec(
+                project_root=project_dir,
+                session_id="default",
+                command_type="exec",
+                code="2 + 2",
+                mode=mode,
+                ensure_started=True,
+            )
+        )
+
+    runs = ExecutionStore(project_dir).read(session_id="default")
+    assert len(runs) == 2
+    rejected = next(record for record in runs if record.execution_id != active.execution_id)
+    assert rejected.status == "error"
+    assert rejected.failure_origin == "control"
+    assert rejected.error_data == {
+        "wait_behavior": "immediate",
+        "waited_ms": 0,
+        "lock_pid": 456,
+        "active_execution_id": active.execution_id,
+    }
+    assert exc_info.value.code == "SESSION_BUSY"
+    assert exc_info.value.data["execution_id"] == rejected.execution_id
+    assert exc_info.value.data["active_execution_id"] == active.execution_id
+    ensure_started.assert_not_called()
+    execute.assert_not_called()
+    popen.assert_not_called()
+
+
 @pytest.mark.parametrize("error_type", [NoKernelRunningError, KernelNotReadyError])
 def test_local_run_manager_submit_reset_does_not_persist_kernel_state_errors(
     project_dir: Path,

@@ -32,6 +32,8 @@ class ResponseProjector:
             payload["data"] = data
         if response.status == "error" and response.error is not None:
             payload["error"] = self._project_agent_error(response)
+        if response.suggestion_actions:
+            payload["suggestion_actions"] = list(response.suggestion_actions)
         return payload
 
     def _project_agent_data(

@@ -223,6 +223,7 @@ class HelperAccessPayload(TypedDict, total=False):
     waited_for: Literal["ready", "idle"]
     waited_ms: int
     initial_runtime_state: Literal["missing", "starting", "ready", "busy", "dead", "stale"]
+    blocking_execution_id: str
 
 
 class VarsPayload(HelperAccessPayload):

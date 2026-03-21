@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 
@@ -12,6 +12,8 @@ SCHEMA_VERSION = "1.0"
 
 ResponseStatus = Literal["ok", "error"]
 EventKind = Literal["stdout", "stderr", "result", "display", "error", "status"]
+HelperWaitFor = Literal["ready", "idle"]
+HelperInitialRuntimeState = Literal["missing", "starting", "ready", "busy", "dead", "stale"]
 
 
 class SuggestionAction(TypedDict, total=False):
@@ -149,6 +151,33 @@ class KernelStatus:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(slots=True, frozen=True)
+class HelperAccessMetadata:
+    started_new_session: bool = False
+    waited: bool = False
+    waited_for: HelperWaitFor | None = None
+    waited_ms: int = 0
+    initial_runtime_state: HelperInitialRuntimeState | None = None
+    blocking_execution_id: str | None = None
+
+    def with_updates(self, **changes: object) -> HelperAccessMetadata:
+        return replace(self, **changes)
+
+    def merge_data(self, data: Mapping[str, object] | None = None) -> dict[str, object]:
+        payload = dict(data) if data is not None else {}
+        if self.started_new_session:
+            payload["started_new_session"] = True
+        payload["waited"] = self.waited
+        payload["waited_ms"] = self.waited_ms
+        if self.waited_for is not None:
+            payload["waited_for"] = self.waited_for
+        if self.initial_runtime_state is not None:
+            payload["initial_runtime_state"] = self.initial_runtime_state
+        if self.blocking_execution_id is not None:
+            payload["blocking_execution_id"] = self.blocking_execution_id
+        return payload
 
 
 @dataclass(slots=True)

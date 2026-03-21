@@ -239,7 +239,7 @@ Use `--session NAME` when you want more than one live kernel for the same projec
 ```bash
 agentnb --session analysis "1 + 1"
 agentnb start --session analysis
-agentnb sessions list        # bare `agentnb sessions` shows help, not the list
+agentnb sessions             # same as `agentnb sessions list`
 agentnb sessions delete analysis
 agentnb sessions delete --stale      # delete sessions with dead kernels
 agentnb sessions delete --all        # delete all sessions

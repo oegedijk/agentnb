@@ -53,8 +53,8 @@ from .selectors import (
 from .session import DEFAULT_SESSION_ID, resolve_project_root, validate_session_id
 
 runtime = KernelRuntime()
-ops = NotebookOps(runtime)
 executions = ExecutionService(runtime)
+ops = NotebookOps(runtime, executions=executions)
 application = AgentNBApp(runtime=runtime, executions=executions, ops=ops)
 invocations = InvocationResolver()
 

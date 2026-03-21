@@ -102,6 +102,35 @@ def test_response_projector_agent_compacts_error_shape() -> None:
     }
 
 
+def test_response_projector_agent_keeps_suggestion_actions() -> None:
+    response = error_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        code="AMBIGUOUS_SESSION",
+        message="Multiple live sessions exist.",
+        suggestion_actions=[
+            {
+                "kind": "command",
+                "label": "List sessions",
+                "command": "agentnb",
+                "args": ["sessions", "list", "--json"],
+            }
+        ],
+    )
+
+    projected = ResponseProjector().project(response, profile="agent")
+
+    assert projected["suggestion_actions"] == [
+        {
+            "kind": "command",
+            "label": "List sessions",
+            "command": "agentnb",
+            "args": ["sessions", "list", "--json"],
+        }
+    ]
+
+
 def test_response_projector_agent_keeps_busy_metadata_for_exec_errors() -> None:
     response = error_response(
         command="exec",

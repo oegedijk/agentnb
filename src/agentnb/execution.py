@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .contracts import ExecutionSink
+from .contracts import ExecutionSink, HelperAccessMetadata
 from .payloads import CancelRunResult, RunSnapshot
 from .recording import CommandRecorder
 from .runs import (
@@ -154,6 +154,21 @@ class ExecutionService:
         return self._run_manager.cancel_run(
             project_root=project_root,
             execution_id=execution_id,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+        )
+
+    def wait_for_helper_session_access(
+        self,
+        *,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        timeout_s: float = 10.0,
+        poll_interval_s: float = 0.1,
+    ) -> HelperAccessMetadata:
+        return self._run_manager.wait_for_helper_session_access(
+            project_root=project_root,
+            session_id=session_id,
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,
         )

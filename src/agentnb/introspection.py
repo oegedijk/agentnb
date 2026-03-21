@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, TypeVar, cast
 
-from .contracts import ExecutionResult
+from .contracts import (
+    ExecutionResult,
+    HelperAccessMetadata,
+    HelperInitialRuntimeState,
+    HelperWaitFor,
+)
 from .errors import AgentNBException, KernelNotReadyError, NoKernelRunningError, SessionBusyError
+from .execution import ExecutionService
 from .history import HistoryStore
 from .payloads import (
     DataframePreview,
@@ -41,8 +48,7 @@ class KernelHelperRequest:
 class KernelHelperResult(Generic[PayloadT]):
     execution: ExecutionResult
     payload: PayloadT
-    wait_result: KernelWaitResult | None = None
-    started_new_session: bool = False
+    access_metadata: HelperAccessMetadata = field(default_factory=HelperAccessMetadata)
 
 
 @dataclass(slots=True, frozen=True)
@@ -56,26 +62,14 @@ class KernelIntrospection:
     def __init__(
         self,
         runtime: KernelRuntime,
+        executions: ExecutionService | None = None,
         recorder: CommandRecorder | None = None,
     ) -> None:
         self.runtime = runtime
+        self.executions = executions
         self.recorder = recorder or CommandRecorder()
 
     def list_vars(
-        self,
-        project_root: Path,
-        session_id: str = DEFAULT_SESSION_ID,
-        timeout_s: float = 10.0,
-        execution_policy: HelperExecutionPolicy | None = None,
-    ) -> list[VarEntry]:
-        return self.list_vars_result(
-            project_root=project_root,
-            session_id=session_id,
-            timeout_s=timeout_s,
-            execution_policy=execution_policy,
-        ).payload
-
-    def list_vars_result(
         self,
         project_root: Path,
         session_id: str = DEFAULT_SESSION_ID,
@@ -92,27 +86,10 @@ class KernelIntrospection:
         return KernelHelperResult(
             execution=result.execution,
             payload=_parse_var_entries(result.payload),
-            wait_result=result.wait_result,
-            started_new_session=result.started_new_session,
+            access_metadata=result.access_metadata,
         )
 
     def inspect_var(
-        self,
-        project_root: Path,
-        name: str,
-        session_id: str = DEFAULT_SESSION_ID,
-        timeout_s: float = 10.0,
-        execution_policy: HelperExecutionPolicy | None = None,
-    ) -> InspectPayload:
-        return self.inspect_var_result(
-            project_root=project_root,
-            name=name,
-            session_id=session_id,
-            timeout_s=timeout_s,
-            execution_policy=execution_policy,
-        ).payload
-
-    def inspect_var_result(
         self,
         project_root: Path,
         name: str,
@@ -130,27 +107,10 @@ class KernelIntrospection:
         return KernelHelperResult(
             execution=result.execution,
             payload=_parse_inspect_payload(result.payload),
-            wait_result=result.wait_result,
-            started_new_session=result.started_new_session,
+            access_metadata=result.access_metadata,
         )
 
     def reload_module(
-        self,
-        project_root: Path,
-        module_name: str | None = None,
-        session_id: str = DEFAULT_SESSION_ID,
-        timeout_s: float = 10.0,
-        execution_policy: HelperExecutionPolicy | None = None,
-    ) -> ReloadReport:
-        return self.reload_module_result(
-            project_root=project_root,
-            module_name=module_name,
-            session_id=session_id,
-            timeout_s=timeout_s,
-            execution_policy=execution_policy,
-        ).payload
-
-    def reload_module_result(
         self,
         project_root: Path,
         module_name: str | None = None,
@@ -168,8 +128,7 @@ class KernelIntrospection:
         return KernelHelperResult(
             execution=result.execution,
             payload=_parse_reload_report(result.payload),
-            wait_result=result.wait_result,
-            started_new_session=result.started_new_session,
+            access_metadata=result.access_metadata,
         )
 
     def _run_json_helper(
@@ -184,8 +143,7 @@ class KernelIntrospection:
         history = HistoryStore(project_root=project_root, session_id=session_id)
         recording = self._recording_for_helper(helper)
         policy = execution_policy or HelperExecutionPolicy()
-        wait_result: KernelWaitResult | None = None
-        started_new_session = False
+        access_metadata = HelperAccessMetadata()
 
         try:
             if policy.ensure_started:
@@ -193,24 +151,34 @@ class KernelIntrospection:
                     project_root=project_root,
                     session_id=session_id,
                 )
-            execution, wait_result = self._execute_helper(
+                access_metadata = access_metadata.with_updates(
+                    started_new_session=started_new_session
+                )
+            execution, access_metadata = self._execute_helper(
                 project_root=project_root,
                 session_id=session_id,
                 timeout_s=timeout_s,
                 helper=helper,
                 policy=policy,
-                wait_result=wait_result,
+                access_metadata=access_metadata,
             )
         except Exception as exc:
+            original_exc = exc
             if isinstance(exc, (NoKernelRunningError, KernelNotReadyError)):
                 raise
+            if isinstance(exc, SessionBusyError):
+                exc = _augment_session_busy_error(exc, access_metadata)
+            elif isinstance(exc, AgentNBException):
+                exc = _augment_helper_error(exc, access_metadata)
             self._append_execution_error(
                 history=history,
                 session_id=session_id,
                 helper=helper,
                 error=exc,
             )
-            raise
+            if exc is original_exc:
+                raise
+            raise exc from original_exc
 
         internal_record = recording.build_internal_record(
             session_id=session_id,
@@ -231,14 +199,18 @@ class KernelIntrospection:
                 ename=execution.ename,
                 evalue=execution.evalue,
                 traceback=execution.traceback,
+                data=access_metadata.merge_data(),
             )
 
-        payload = self._parse_json_payload(
-            execution=execution,
-            session_id=session_id,
-            history=history,
-            helper=helper,
-        )
+        try:
+            payload = self._parse_json_payload(
+                execution=execution,
+                session_id=session_id,
+                history=history,
+                helper=helper,
+            )
+        except AgentNBException as exc:
+            raise _augment_helper_error(exc, access_metadata) from exc
         history.append(
             recording.build_user_record(
                 session_id=session_id,
@@ -248,8 +220,7 @@ class KernelIntrospection:
         return KernelHelperResult(
             execution=execution,
             payload=payload,
-            wait_result=wait_result,
-            started_new_session=started_new_session,
+            access_metadata=access_metadata,
         )
 
     def _ensure_helper_session_started(
@@ -268,6 +239,8 @@ class KernelIntrospection:
                     "session_exists": state.session_exists,
                 },
             )
+        if state.kind in {"ready", "busy"}:
+            return False
         _, started_new_session = self.runtime.ensure_started(
             project_root=project_root,
             session_id=session_id,
@@ -282,19 +255,22 @@ class KernelIntrospection:
         timeout_s: float,
         helper: KernelHelperRequest,
         policy: HelperExecutionPolicy,
-        wait_result: KernelWaitResult | None,
-    ) -> tuple[ExecutionResult, KernelWaitResult | None]:
+        access_metadata: HelperAccessMetadata,
+    ) -> tuple[ExecutionResult, HelperAccessMetadata]:
         attempts = 0
-        accumulated_wait = wait_result
+        accumulated_access = access_metadata
 
         while True:
             if policy.wait_for_usable:
-                next_wait = self.runtime.wait_for_usable(
+                next_access = self._wait_for_helper_access(
                     project_root=project_root,
                     session_id=session_id,
                     timeout_s=timeout_s,
                 )
-                accumulated_wait = _merge_wait_results(accumulated_wait, next_wait)
+                accumulated_access = _merge_helper_access_metadata(
+                    accumulated_access,
+                    next_access,
+                )
             try:
                 execution = self.runtime.execute(
                     project_root=project_root,
@@ -302,13 +278,33 @@ class KernelIntrospection:
                     code=helper.code,
                     timeout_s=timeout_s,
                 )
-                return execution, accumulated_wait
+                return execution, accumulated_access
             except SessionBusyError as exc:
                 if not policy.retry_on_busy:
-                    raise
+                    raise _augment_session_busy_error(exc, accumulated_access) from exc
                 attempts += 1
                 if attempts >= 3:
-                    raise _session_busy_after_wait(exc, accumulated_wait) from exc
+                    raise _augment_session_busy_error(exc, accumulated_access) from exc
+
+    def _wait_for_helper_access(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        timeout_s: float,
+    ) -> HelperAccessMetadata:
+        if self.executions is not None:
+            return self.executions.wait_for_helper_session_access(
+                project_root=project_root,
+                session_id=session_id,
+                timeout_s=timeout_s,
+            )
+        wait_result = self.runtime.wait_for_usable(
+            project_root=project_root,
+            session_id=session_id,
+            timeout_s=timeout_s,
+        )
+        return _helper_access_from_wait_result(wait_result)
 
     def _append_execution_error(
         self,
@@ -396,36 +392,97 @@ class KernelIntrospection:
         raise ValueError(f"Unsupported helper command type: {helper.command_type}")
 
 
-def _merge_wait_results(
-    previous: KernelWaitResult | None,
-    current: KernelWaitResult | None,
-) -> KernelWaitResult | None:
-    if current is None:
-        return previous
-    if previous is None:
-        return current
-    return KernelWaitResult(
-        status=current.status,
-        waited=previous.waited or current.waited,
-        waited_for=current.waited_for or previous.waited_for,
-        runtime_state=current.runtime_state or previous.runtime_state,
+def _merge_helper_access_metadata(
+    previous: HelperAccessMetadata,
+    current: HelperAccessMetadata,
+) -> HelperAccessMetadata:
+    waited = previous.waited or current.waited
+    waited_for = current.waited_for or previous.waited_for
+    initial_runtime_state = previous.initial_runtime_state or current.initial_runtime_state
+    return HelperAccessMetadata(
+        started_new_session=previous.started_new_session or current.started_new_session,
+        waited=waited,
+        waited_for=waited_for,
         waited_ms=previous.waited_ms + current.waited_ms,
-        initial_runtime_state=previous.initial_runtime_state or current.initial_runtime_state,
+        initial_runtime_state=initial_runtime_state,
+        blocking_execution_id=previous.blocking_execution_id or current.blocking_execution_id,
+    )
+
+
+def _helper_access_from_wait_result(wait_result: KernelWaitResult) -> HelperAccessMetadata:
+    return HelperAccessMetadata(
+        waited=wait_result.waited,
+        waited_for=wait_result.waited_for,
+        waited_ms=wait_result.waited_ms,
+        initial_runtime_state=wait_result.initial_runtime_state,
+    )
+
+
+def _helper_access_from_data(data: Mapping[str, object]) -> HelperAccessMetadata:
+    waited_for = data.get("waited_for")
+    initial_runtime_state = data.get("initial_runtime_state")
+    blocking_execution_id = data.get("blocking_execution_id")
+    waited_ms = data.get("waited_ms")
+    waited_for_value: HelperWaitFor | None = (
+        cast(HelperWaitFor, waited_for) if waited_for in {"ready", "idle"} else None
+    )
+    initial_runtime_state_value: HelperInitialRuntimeState | None = (
+        cast(HelperInitialRuntimeState, initial_runtime_state)
+        if initial_runtime_state in {"missing", "starting", "ready", "busy", "dead", "stale"}
+        else None
+    )
+    return HelperAccessMetadata(
+        started_new_session=data.get("started_new_session") is True,
+        waited=data.get("waited") is True,
+        waited_for=waited_for_value,
+        waited_ms=waited_ms if isinstance(waited_ms, int) else 0,
+        initial_runtime_state=initial_runtime_state_value,
+        blocking_execution_id=blocking_execution_id
+        if isinstance(blocking_execution_id, str)
+        else None,
     )
 
 
 def _session_busy_after_wait(
     error: SessionBusyError,
-    wait_result: KernelWaitResult | None,
+    access_metadata: HelperAccessMetadata,
 ) -> SessionBusyError:
     data = error.data
     return SessionBusyError(
         wait_behavior="after_wait",
-        waited_ms=wait_result.waited_ms if wait_result is not None else 0,
+        waited_ms=access_metadata.waited_ms,
         lock_pid=cast(int | None, data.get("lock_pid")),
         lock_acquired_at=cast(str | None, data.get("lock_acquired_at")),
         busy_for_ms=cast(int | None, data.get("busy_for_ms")),
-        active_execution_id=cast(str | None, data.get("active_execution_id")),
+        active_execution_id=cast(str | None, data.get("active_execution_id"))
+        or access_metadata.blocking_execution_id,
+    )
+
+
+def _augment_session_busy_error(
+    error: SessionBusyError,
+    access_metadata: HelperAccessMetadata,
+) -> SessionBusyError:
+    combined_access = _merge_helper_access_metadata(
+        access_metadata,
+        _helper_access_from_data(error.data),
+    )
+    augmented = _session_busy_after_wait(error, combined_access)
+    augmented.data = combined_access.merge_data(augmented.data)
+    return augmented
+
+
+def _augment_helper_error(
+    error: AgentNBException,
+    access_metadata: HelperAccessMetadata,
+) -> AgentNBException:
+    return AgentNBException(
+        code=error.code,
+        message=error.message,
+        ename=error.ename,
+        evalue=error.evalue,
+        traceback=error.traceback,
+        data=access_metadata.merge_data(error.data),
     )
 
 

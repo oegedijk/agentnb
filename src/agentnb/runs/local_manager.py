@@ -5,9 +5,9 @@ import signal
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
-from ..contracts import utc_now_iso
+from ..contracts import HelperAccessMetadata, HelperInitialRuntimeState, utc_now_iso
 from ..errors import (
     AgentNBException,
     KernelNotReadyError,
@@ -203,6 +203,72 @@ class LocalRunManager(RunManager):
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(poll_interval_s)
+
+    def wait_for_helper_session_access(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        timeout_s: float = 10.0,
+        poll_interval_s: float = 0.1,
+    ) -> HelperAccessMetadata:
+        started = time.monotonic()
+        deadline = started + timeout_s
+        initial_state = self.runtime.runtime_state(
+            project_root=project_root,
+            session_id=session_id,
+        )
+        initial_runtime_state = cast(HelperInitialRuntimeState | None, initial_state.kind)
+        blocking_execution_id: str | None = None
+        waited_for_run = False
+
+        while True:
+            active = self._active_run_for_session(
+                project_root=project_root,
+                session_id=session_id,
+            )
+            if active is None:
+                break
+            waited_for_run = True
+            if blocking_execution_id is None:
+                blocking_execution_id = active.execution_id
+                if initial_runtime_state == "ready":
+                    initial_runtime_state = "busy"
+            if time.monotonic() >= deadline:
+                waited_ms = int((time.monotonic() - started) * 1000)
+                raise SessionBusyError(
+                    wait_behavior="after_wait",
+                    waited_ms=waited_ms,
+                    lock_pid=active.worker_pid,
+                    active_execution_id=blocking_execution_id,
+                )
+            time.sleep(poll_interval_s)
+
+        remaining_timeout = max(deadline - time.monotonic(), 0.0)
+        wait_result = self.runtime.wait_for_usable(
+            project_root=project_root,
+            session_id=session_id,
+            timeout_s=remaining_timeout,
+            poll_interval_s=poll_interval_s,
+        )
+        waited = waited_for_run or wait_result.waited
+        waited_for = wait_result.waited_for or ("idle" if waited_for_run else None)
+        if waited_for_run:
+            waited_ms = int((time.monotonic() - started) * 1000)
+        else:
+            waited_ms = wait_result.waited_ms
+        if not waited_for_run and wait_result.initial_runtime_state is not None:
+            initial_runtime_state = cast(
+                HelperInitialRuntimeState | None,
+                wait_result.initial_runtime_state,
+            )
+        return HelperAccessMetadata(
+            waited=waited,
+            waited_for=waited_for,
+            waited_ms=waited_ms,
+            initial_runtime_state=initial_runtime_state,
+            blocking_execution_id=blocking_execution_id,
+        )
 
     def complete_background_run(self, *, project_root: Path, execution_id: str) -> None:
         record = self._load_run(project_root=project_root, execution_id=execution_id)

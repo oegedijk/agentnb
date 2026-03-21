@@ -50,7 +50,6 @@ from .payloads import (
 )
 from .runtime import (
     KernelRuntime,
-    KernelWaitResult,
     RuntimeState,
     RuntimeStateKind,
     SessionResolutionPolicy,
@@ -241,9 +240,10 @@ class AgentNBApp:
         history_selectors: HistorySelectorResolver | None = None,
     ) -> None:
         resolved_runtime = runtime or KernelRuntime()
+        resolved_executions = executions or ExecutionService(resolved_runtime)
         self.runtime = resolved_runtime
-        self.executions = executions or ExecutionService(resolved_runtime)
-        self.ops = ops or NotebookOps(resolved_runtime)
+        self.executions = resolved_executions
+        self.ops = ops or NotebookOps(resolved_runtime, executions=resolved_executions)
         self.advisor = advisor or AdvicePolicy()
         self.run_selectors = run_selectors or RunSelectorResolver(self.executions)
         self.history_selectors = history_selectors or HistorySelectorResolver()
@@ -630,18 +630,10 @@ class AgentNBApp:
                 {"name": item["name"], "repr": item["repr"]} for item in values
             ]
             payload = cast(VarsPayload, {"vars": display_values})
-            _apply_helper_access_metadata(
-                payload,
-                helper_result.wait_result,
-                helper_result.started_new_session,
-            )
+            payload.update(helper_result.access_metadata.merge_data())
             return payload
         payload = cast(VarsPayload, {"vars": cast(list[VarDisplayEntry], values)})
-        _apply_helper_access_metadata(
-            payload,
-            helper_result.wait_result,
-            helper_result.started_new_session,
-        )
+        payload.update(helper_result.access_metadata.merge_data())
         return payload
 
     def _inspect_payload(
@@ -657,11 +649,7 @@ class AgentNBApp:
             InspectResponsePayload,
             {"inspect": compact_inspect_payload(helper_result.payload)},
         )
-        _apply_helper_access_metadata(
-            payload,
-            helper_result.wait_result,
-            helper_result.started_new_session,
-        )
+        payload.update(helper_result.access_metadata.merge_data())
         return payload
 
     def _reload_payload(self, *, request: ReloadRequest, session_id: str) -> ReloadReport:
@@ -672,11 +660,7 @@ class AgentNBApp:
             execution_policy=_HELPER_EXECUTION_POLICY,
         )
         payload = dict(helper_result.payload)
-        _apply_helper_access_metadata(
-            payload,
-            helper_result.wait_result,
-            helper_result.started_new_session,
-        )
+        payload.update(helper_result.access_metadata.merge_data())
         return cast(ReloadReport, payload)
 
     def _history_payload(self, *, request: HistoryRequest, session_id: str) -> HistoryPayload:
@@ -1049,24 +1033,6 @@ def _prefer_preview_text(preview: object, result: object) -> bool:
     if not isinstance(result, str):
         return True
     return "\n" in result or len(result) > 120
-
-
-def _apply_helper_access_metadata(
-    payload: object,
-    wait_result: KernelWaitResult | None,
-    started_new_session: bool,
-) -> None:
-    payload_map = cast(dict[str, object], payload)
-    if started_new_session:
-        payload_map["started_new_session"] = True
-    if wait_result is None:
-        return
-    payload_map["waited"] = wait_result.waited
-    if wait_result.waited_for is not None:
-        payload_map["waited_for"] = wait_result.waited_for
-    payload_map["waited_ms"] = wait_result.waited_ms
-    if wait_result.initial_runtime_state is not None:
-        payload_map["initial_runtime_state"] = wait_result.initial_runtime_state
 
 
 def _status_payload_from_runtime_state(state: RuntimeState) -> StatusPayload:

@@ -12,7 +12,13 @@ from click.testing import CliRunner
 from pytest_mock import MockerFixture
 
 from agentnb.cli import main
-from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink, KernelStatus
+from agentnb.contracts import (
+    ExecutionEvent,
+    ExecutionResult,
+    ExecutionSink,
+    HelperAccessMetadata,
+    KernelStatus,
+)
 from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
 from agentnb.execution_output import OutputItem
@@ -115,6 +121,18 @@ def _managed_execution(
             traceback=traceback,
         ),
         started_new_session=started_new_session,
+    )
+
+
+def _helper_result(
+    payload: object,
+    *,
+    access_metadata: HelperAccessMetadata | None = None,
+) -> KernelHelperResult[object]:
+    return KernelHelperResult(
+        execution=ExecutionResult(status="ok"),
+        payload=payload,
+        access_metadata=access_metadata or HelperAccessMetadata(),
     )
 
 
@@ -570,6 +588,37 @@ def test_cli_exec_implicit_target_is_ambiguous_even_with_current_session_prefere
     assert result.exit_code == 1
     payload = _payload(result.output)
     assert _error(payload)["code"] == "AMBIGUOUS_SESSION"
+    assert payload["suggestion_actions"] == [
+        {
+            "kind": "command",
+            "label": "List sessions",
+            "command": "agentnb",
+            "args": ["sessions", "list", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Retry with --session",
+            "command": "agentnb",
+            "args": ["exec", "--session", "NAME", "--json"],
+        },
+    ]
+
+
+def test_cli_agent_exec_ambiguity_keeps_suggestion_actions(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {"session_id": "default"},
+        {"session_id": "analysis"},
+    ]
+
+    result = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--agent", "1 + 1"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"]["code"] == "AMBIGUOUS_SESSION"
     assert payload["suggestion_actions"] == [
         {
             "kind": "command",
@@ -1094,7 +1143,9 @@ def test_cli_exec_background_returns_run_id(cli_runner: CliRunner, project_dir: 
 def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [{"name": "value", "type": "int", "repr": "42"}]  # type: ignore[method-assign]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "value", "type": "int", "repr": "42"}]
+    )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
     assert vars_res.exit_code == 0
@@ -1107,18 +1158,16 @@ def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: 
 def test_cli_vars_reports_helper_wait_metadata(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: KernelHelperResult(  # type: ignore[method-assign]
+    cli.ops.list_vars_result = lambda **_: KernelHelperResult(  # type: ignore[method-assign]
         execution=ExecutionResult(status="ok"),
         payload=[{"name": "value", "type": "int", "repr": "42"}],
-        wait_result=KernelWaitResult(
-            status=KernelStatus(alive=True, pid=123, busy=False),
+        access_metadata=HelperAccessMetadata(
+            started_new_session=True,
             waited=True,
             waited_for="idle",
-            runtime_state="ready",
             waited_ms=30,
             initial_runtime_state="busy",
         ),
-        started_new_session=True,
     )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
@@ -1138,10 +1187,12 @@ def test_cli_vars_hides_routines_and_compacts_container_values(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [  # type: ignore[method-assign]
-        {"name": "posts", "type": "list", "repr": "list len=1 item_keys=id, title, body"},
-        {"name": "query", "type": "dict", "repr": "dict len=2 keys=postId, _limit"},
-    ]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [
+            {"name": "posts", "type": "list", "repr": "list len=1 item_keys=id, title, body"},
+            {"name": "query", "type": "dict", "repr": "dict len=2 keys=postId, _limit"},
+        ]
+    )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
     assert vars_res.exit_code == 0
@@ -1157,7 +1208,9 @@ def test_cli_vars_hides_routines_and_compacts_container_values(
 def test_cli_vars_no_types_hides_types(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [{"name": "value", "type": "int", "repr": "42"}]  # type: ignore[method-assign]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "value", "type": "int", "repr": "42"}]
+    )
 
     vars_res = cli_runner.invoke(
         main,
@@ -1174,11 +1227,13 @@ def test_cli_vars_match_and_recent_filter_namespace(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [  # type: ignore[method-assign]
-        {"name": "alpha_value", "type": "int", "repr": "1"},
-        {"name": "beta_value", "type": "int", "repr": "2"},
-        {"name": "gamma_value", "type": "int", "repr": "3"},
-    ]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [
+            {"name": "alpha_value", "type": "int", "repr": "1"},
+            {"name": "beta_value", "type": "int", "repr": "2"},
+            {"name": "gamma_value", "type": "int", "repr": "3"},
+        ]
+    )
 
     recent_res = cli_runner.invoke(
         main,
@@ -2022,17 +2077,19 @@ def test_cli_reload_without_module_reloads_project_local_imports(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.ops.reload_module = lambda **_: {  # type: ignore[method-assign]
-        "mode": "project",
-        "requested_module": None,
-        "reloaded_modules": ["localmod"],
-        "failed_modules": [],
-        "skipped_modules": [],
-        "rebound_names": ["greet"],
-        "stale_names": [],
-        "excluded_module_count": 3,
-        "notes": [],
-    }
+    cli.ops.reload_module_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        {
+            "mode": "project",
+            "requested_module": None,
+            "reloaded_modules": ["localmod"],
+            "failed_modules": [],
+            "skipped_modules": [],
+            "rebound_names": ["greet"],
+            "stale_names": [],
+            "excluded_module_count": 3,
+            "notes": [],
+        }
+    )
 
     reload_res = cli_runner.invoke(main, ["reload", "--project", str(project_dir), "--json"])
     assert reload_res.exit_code == 0
@@ -2186,9 +2243,9 @@ def test_cli_doctor_fix_uses_target_project_root(
 def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [  # type: ignore[method-assign]
-        {"name": "frame", "type": "FakeFrame", "repr": "DataFrame shape=(10, 3) columns=a, b, c"}
-    ]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "frame", "type": "FakeFrame", "repr": "DataFrame shape=(10, 3) columns=a, b, c"}]
+    )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
     payload = _payload(vars_res.output)
@@ -2198,23 +2255,25 @@ def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Pa
 def test_cli_sqlite_rows_get_structural_previews(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [  # type: ignore[method-assign]
-        {"name": "rows", "type": "list", "repr": "list len=2 item_keys=id, title"}
-    ]
-    cli.ops.inspect_var = lambda **_: {  # type: ignore[method-assign]
-        "name": "rows",
-        "type": "list",
-        "preview": {
-            "kind": "sequence-like",
-            "length": 2,
-            "sample_keys": ["id", "title"],
-            "sample": [{"id": 1, "title": "a"}, {"id": 2, "title": "b"}],
-            "item_type": "Row",
-        },
-        "members": [],
-        "doc": "",
-        "repr": "[...]",
-    }
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "rows", "type": "list", "repr": "list len=2 item_keys=id, title"}]
+    )
+    cli.ops.inspect_var_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        {
+            "name": "rows",
+            "type": "list",
+            "preview": {
+                "kind": "sequence-like",
+                "length": 2,
+                "sample_keys": ["id", "title"],
+                "sample": [{"id": 1, "title": "a"}, {"id": 2, "title": "b"}],
+                "item_type": "Row",
+            },
+            "members": [],
+            "doc": "",
+            "repr": "[...]",
+        }
+    )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
     assert vars_res.exit_code == 0
@@ -2234,19 +2293,21 @@ def test_cli_sqlite_rows_get_structural_previews(cli_runner: CliRunner, project_
 def test_cli_inspect_compacts_dataframe_payload(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.inspect_var = lambda **_: {  # type: ignore[method-assign]
-        "name": "df",
-        "type": "DataFrameLike",
-        "preview": {
-            "kind": "dataframe-like",
-            "shape": [4, 2],
-            "columns": ["a", "b"],
-            "head": [{"a": 1, "b": 5}, {"a": 2, "b": 6}, {"a": 3, "b": 7}],
-        },
-        "members": [],
-        "doc": "",
-        "repr": "DataFrameLike(...)",
-    }
+    cli.ops.inspect_var_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        {
+            "name": "df",
+            "type": "DataFrameLike",
+            "preview": {
+                "kind": "dataframe-like",
+                "shape": [4, 2],
+                "columns": ["a", "b"],
+                "head": [{"a": 1, "b": 5}, {"a": 2, "b": 6}, {"a": 3, "b": 7}],
+            },
+            "members": [],
+            "doc": "",
+            "repr": "DataFrameLike(...)",
+        }
+    )
 
     inspect_res = cli_runner.invoke(
         main,
@@ -2263,24 +2324,26 @@ def test_cli_inspect_compacts_dataframe_payload(cli_runner: CliRunner, project_d
 def test_cli_inspect_compacts_sequence_payload(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.inspect_var = lambda **_: {  # type: ignore[method-assign]
-        "name": "posts",
-        "type": "list",
-        "preview": {
-            "kind": "sequence-like",
-            "length": 3,
-            "sample": [
-                {"id": 1, "title": "a", "body": "alpha"},
-                {"id": 2, "title": "b", "body": "beta"},
-                {"id": 3, "title": "c", "body": "gamma"},
-            ],
-            "item_type": "dict",
-            "sample_keys": ["id", "title", "body"],
-        },
-        "members": [],
-        "doc": "",
-        "repr": "[...]",
-    }
+    cli.ops.inspect_var_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        {
+            "name": "posts",
+            "type": "list",
+            "preview": {
+                "kind": "sequence-like",
+                "length": 3,
+                "sample": [
+                    {"id": 1, "title": "a", "body": "alpha"},
+                    {"id": 2, "title": "b", "body": "beta"},
+                    {"id": 3, "title": "c", "body": "gamma"},
+                ],
+                "item_type": "dict",
+                "sample_keys": ["id", "title", "body"],
+            },
+            "members": [],
+            "doc": "",
+            "repr": "[...]",
+        }
+    )
 
     inspect_res = cli_runner.invoke(
         main,

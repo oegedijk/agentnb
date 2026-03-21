@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -108,6 +109,17 @@ class AdvicePolicy:
                         ),
                         "Then retry the execution.",
                     ]
+            if _missing_pip_in_called_process(context):
+                package = _extract_pip_install_target(context.error_value)
+                install_hint = (
+                    f"run `uv add {package}` in your shell (not inside the session)."
+                    if package
+                    else "use `uv add PACKAGE` in your shell (not inside the session)."
+                )
+                return [
+                    "The selected interpreter does not provide pip inside the live session.",
+                    f"Install the dependency from this project with {install_hint}",
+                ]
             if context.error_name == "NameError" and context.session_id:
                 session = context.session_id
                 return [
@@ -236,7 +248,59 @@ class AdvicePolicy:
         return []
 
     def suggestion_actions(self, context: AdviceContext) -> list[SuggestionAction]:
-        del context
+        command_name = context.command_name
+        data = context.data
+
+        if context.error_code == "AMBIGUOUS_SESSION":
+            return [
+                _agentnb_action("List sessions", "sessions", "list", "--json"),
+                _agentnb_action(
+                    "Retry with --session",
+                    command_name,
+                    "--session",
+                    "NAME",
+                    "--json",
+                ),
+            ]
+        if context.error_code == "AMBIGUOUS_EXECUTION":
+            return [
+                _agentnb_action("List runs", "runs", "list", "--json"),
+                _agentnb_action("Show run", "runs", "show", "EXECUTION_ID", "--json"),
+            ]
+        if context.error_code == "SESSION_BUSY":
+            execution_id = data.get("active_execution_id")
+            if isinstance(execution_id, str) and execution_id:
+                return [
+                    _agentnb_action("Wait for run", "runs", "wait", execution_id, "--json"),
+                    _agentnb_action("Show run", "runs", "show", execution_id, "--json"),
+                ]
+            return [_agentnb_action("Wait for session", "wait", "--json")]
+        if context.error_code == "KERNEL_NOT_READY":
+            return [
+                _agentnb_action("Wait for kernel", "wait", "--json"),
+                _agentnb_action("Check status", "status", "--json"),
+            ]
+        if context.error_code in {"NO_KERNEL", "BACKEND_ERROR", "KERNEL_DEAD"}:
+            return [
+                _agentnb_action("Start kernel", "start", "--json"),
+                _agentnb_action("Run doctor", "doctor", "--json"),
+            ]
+        if command_name == "exec":
+            if context.response_status == "ok" and data.get("background"):
+                execution_id = _execution_id(data)
+                return [
+                    _agentnb_action("Wait for run", "runs", "wait", execution_id, "--json"),
+                    _agentnb_action("Show run", "runs", "show", execution_id, "--json"),
+                    _agentnb_action("Cancel run", "runs", "cancel", execution_id, "--json"),
+                ]
+            if context.error_name == "ModuleNotFoundError":
+                module = _extract_module_name(context.error_value)
+                if module:
+                    return [_shell_action("Install dependency", "uv", "add", module)]
+            if _missing_pip_in_called_process(context):
+                package = _extract_pip_install_target(context.error_value)
+                if package:
+                    return [_shell_action("Install dependency", "uv", "add", package)]
         return []
 
 
@@ -267,9 +331,46 @@ def _extract_module_name(error_value: str | None) -> str | None:
     return None
 
 
+def _extract_pip_install_target(error_value: str | None) -> str | None:
+    if not error_value:
+        return None
+    match = re.search(r"pip', 'install', '([^']+)'", error_value)
+    if match is None:
+        return None
+    package = match.group(1).strip()
+    return package or None
+
+
+def _missing_pip_in_called_process(context: AdviceContext) -> bool:
+    if context.command_name != "exec" or context.error_name != "CalledProcessError":
+        return False
+    stderr = context.data.get("stderr")
+    if isinstance(stderr, str) and "No module named pip" in stderr:
+        return True
+    return bool(context.error_value and "No module named pip" in context.error_value)
+
+
 def _exec_output_is_empty(data: Mapping[str, object]) -> bool:
     for key in ("result", "stdout", "stderr", "selected_text"):
         value = data.get(key)
         if isinstance(value, str) and value:
             return False
     return True
+
+
+def _agentnb_action(label: str, *args: str) -> SuggestionAction:
+    return {
+        "kind": "command",
+        "label": label,
+        "command": "agentnb",
+        "args": list(args),
+    }
+
+
+def _shell_action(label: str, command: str, *args: str) -> SuggestionAction:
+    return {
+        "kind": "shell",
+        "label": label,
+        "command": command,
+        "args": list(args),
+    }

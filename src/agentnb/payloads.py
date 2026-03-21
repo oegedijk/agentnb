@@ -25,6 +25,7 @@ class RunSnapshot(TypedDict, total=False):
     stdout: str
     stderr: str
     result: str | None
+    result_preview: InspectPreview
     execution_count: int | None
     ename: str | None
     evalue: str | None
@@ -134,6 +135,11 @@ class ReloadReport(TypedDict, total=False):
     stale_names: list[str]
     excluded_module_count: int
     notes: list[str]
+    started_new_session: bool
+    waited: bool
+    waited_for: Literal["ready", "idle"]
+    waited_ms: int
+    initial_runtime_state: Literal["missing", "starting", "ready", "busy", "dead", "stale"]
 
 
 class StatusPayload(TypedDict, total=False):
@@ -151,6 +157,8 @@ class StatusPayload(TypedDict, total=False):
     session_exists: bool
     waited: bool
     waited_for: Literal["ready", "idle"]
+    waited_ms: int
+    initial_runtime_state: Literal["missing", "starting", "ready", "busy", "dead", "stale"]
 
 
 class StartPayload(StatusPayload, total=False):
@@ -209,11 +217,19 @@ class VarDisplayEntry(TypedDict, total=False):
     repr: str
 
 
-class VarsPayload(TypedDict):
+class HelperAccessPayload(TypedDict, total=False):
+    started_new_session: bool
+    waited: bool
+    waited_for: Literal["ready", "idle"]
+    waited_ms: int
+    initial_runtime_state: Literal["missing", "starting", "ready", "busy", "dead", "stale"]
+
+
+class VarsPayload(HelperAccessPayload):
     vars: list[VarDisplayEntry]
 
 
-class InspectResponsePayload(TypedDict):
+class InspectResponsePayload(HelperAccessPayload):
     inspect: InspectPayload
 
 
@@ -273,7 +289,7 @@ class RunListEntryPayload(TypedDict, total=False):
     duration_ms: int | None
     terminal_reason: str | None
     cancel_requested: bool
-    result_preview: str
+    result_preview: str | InspectPreview
     stdout_preview: str
     error_type: str
 

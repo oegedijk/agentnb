@@ -162,11 +162,12 @@ def main(
       agentnb --agent "1+1"         agentnb --json "1+1"
 
     `exec` auto-starts the target session by default. Read-only commands such
-    as `vars`, `inspect`, and `reload` require an existing usable session.
+    as `vars`, `inspect`, and `reload` also auto-start when session targeting
+    is unambiguous, and they wait behind active same-session work.
     Drive one session serially: only one command at a time can use a session,
     including quick reads such as `vars` and `inspect`. If a session is busy,
     use `agentnb wait`, `agentnb status --wait-idle`, or `agentnb runs
-    wait/show` before retrying.
+    wait/show` when you want explicit control over sequencing.
 
     `--session NAME` and `--background` work in prefix position for inline
     exec and for most subcommands. Putting them after the subcommand name is
@@ -573,8 +574,8 @@ def vars_cmd(
     Type information is included by default. Pass --no-types to hide it.
     Imported helper routines and classes are omitted, and common dataframe or
     container values are summarized compactly. Use --recent or --match when
-    the namespace gets noisy. This command expects an existing usable session;
-    it does not auto-start a missing one.
+    the namespace gets noisy. This command auto-starts a missing session when
+    targeting is unambiguous and waits behind active same-session work.
     """
 
     request = VarsRequest(
@@ -597,8 +598,8 @@ def inspect_cmd(name: str, project: Path | None, session_id: str | None, as_json
 
     Dataframe-like values get a compact tabular preview. Lists, tuples, sets,
     and dicts get a compact structural preview instead of a generic repr. This
-    command expects an existing usable session; it does not auto-start a
-    missing one.
+    command auto-starts a missing session when targeting is unambiguous and
+    waits behind active same-session work.
     """
 
     request = InspectRequest(
@@ -623,8 +624,9 @@ def reload_cmd(
     module to reload all currently imported project-local modules. The reload
     report includes rebound names and possible stale objects. Only imported
     project-local modules are eligible. Installing a new package does not
-    require `reload`, but editing a local module does. This command expects an
-    existing usable session; it does not auto-start a missing one.
+    require `reload`, but editing a local module does. This command auto-starts
+    a missing session when targeting is unambiguous and waits behind active
+    same-session work.
     """
 
     request = ReloadRequest(
@@ -835,14 +837,16 @@ def doctor(
 
 
 @main.group("sessions", invoke_without_command=True)
+@project_option
+@json_option
 @click.pass_context
-def sessions_group(ctx: click.Context) -> None:
+def sessions_group(ctx: click.Context, project: Path | None, as_json: bool) -> None:
     """Inspect and manage named sessions for the current project.
 
     Bare `agentnb sessions` lists all live sessions (same as `sessions list`).
     """
     if ctx.invoked_subcommand is None:
-        ctx.invoke(sessions_list)
+        ctx.invoke(sessions_list, project=project, as_json=as_json)
 
 
 @sessions_group.command("list")

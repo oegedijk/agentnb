@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from .compact import compact_run_entry, compact_traceback
 from .contracts import CommandResponse
-from .payloads import RunSnapshot
+from .payloads import InspectPreview, RunSnapshot
 
 ProjectionProfile = str
 
@@ -52,6 +52,8 @@ class ResponseProjector:
                 "started_new",
                 "waited",
                 "waited_for",
+                "waited_ms",
+                "initial_runtime_state",
             )
         if command_name in {"stop", "interrupt"}:
             return dict(data)
@@ -102,8 +104,11 @@ class ResponseProjector:
                 run_snapshot = cast(RunSnapshot, run)
                 compacted = compact_run_entry(run_snapshot)
                 compacted["status"] = run_snapshot.get("status")
+                result_preview = run_snapshot.get("result_preview")
+                if isinstance(result_preview, dict):
+                    compacted["result_preview"] = cast(InspectPreview, dict(result_preview))
                 result = run_snapshot.get("result")
-                if isinstance(result, str):
+                if "result_preview" not in compacted and isinstance(result, str):
                     compacted["result_preview"] = result
                 return {"run": compacted}
             return {}

@@ -5,6 +5,8 @@ import pytest
 from agentnb.contracts import ExecutionEvent
 from agentnb.execution_events import ExecutionResultAccumulator, dispatch_output_item
 from agentnb.execution_output import (
+    ExecutionOutput,
+    OutputItem,
     output_item_from_iopub_message,
     output_item_from_jupyter_message,
     output_item_from_shell_reply,
@@ -99,6 +101,47 @@ def test_jupyter_execute_result_falls_back_when_text_plain_is_missing() -> None:
         content='{"value": 2}',
         metadata={"mime": {"text/html": "<b>2</b>", "application/json": '{"value": 2}'}},
     )
+
+
+def test_execution_output_result_preview_extracts_dataframe_summary() -> None:
+    output = ExecutionOutput(
+        items=[
+            OutputItem.result(
+                text=("     i text\n0    0    x\n1    1    x\n\n[200 rows x 2 columns]"),
+                mime={
+                    "text/plain": (
+                        "     i text\n0    0    x\n1    1    x\n\n[200 rows x 2 columns]"
+                    ),
+                    "text/html": (
+                        '<table border="1" class="dataframe">'
+                        "<thead><tr><th></th><th>i</th><th>text</th></tr></thead>"
+                        "<tbody><tr><th>0</th><td>0</td><td>x</td></tr></tbody>"
+                        "</table>"
+                    ),
+                },
+            )
+        ]
+    )
+
+    preview = output.result_preview()
+
+    assert preview is not None
+    assert preview["kind"] == "dataframe-like"
+    assert preview["shape"] == [200, 2]
+    assert preview["columns"] == ["i", "text"]
+    assert preview["head"] == [{"i": 0, "text": "x"}]
+
+
+def test_execution_output_result_preview_extracts_container_summary() -> None:
+    output = ExecutionOutput(items=[OutputItem.result(text="[{'id': 1}, {'id': 2}]")])
+
+    preview = output.result_preview()
+
+    assert preview is not None
+    assert preview["kind"] == "sequence-like"
+    assert preview["length"] == 2
+    assert preview["item_type"] == "dict"
+    assert preview["sample_keys"] == ["id"]
 
 
 def test_accumulator_build_projects_legacy_text_without_losing_display_order() -> None:

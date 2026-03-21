@@ -42,7 +42,15 @@ def test_response_projector_agent_compacts_wait_like_status() -> None:
         command="wait",
         project="/tmp/project",
         session_id="default",
-        data={"alive": True, "pid": 123, "busy": False, "waited": True, "waited_for": "idle"},
+        data={
+            "alive": True,
+            "pid": 123,
+            "busy": False,
+            "waited": True,
+            "waited_for": "idle",
+            "waited_ms": 25,
+            "initial_runtime_state": "busy",
+        },
     )
 
     projected = ResponseProjector().project(response, profile="agent")
@@ -57,6 +65,8 @@ def test_response_projector_agent_compacts_wait_like_status() -> None:
             "busy": False,
             "waited": True,
             "waited_for": "idle",
+            "waited_ms": 25,
+            "initial_runtime_state": "busy",
         },
     }
 

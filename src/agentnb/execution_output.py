@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import ast
+import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any, Literal, cast
 
 from .contracts import ExecutionEvent
@@ -13,9 +18,11 @@ from .kernel.jupyter_protocol import (
     StatusMessage,
     StreamMessage,
 )
+from .payloads import DataframePreview, InspectPreview, JSONValue, MappingPreview, SequencePreview
 
 OutputItemKind = Literal["stream", "result", "display", "error", "status"]
 StreamName = Literal["stdout", "stderr"]
+_DATAFRAME_SHAPE_RE = re.compile(r"\[(\d+)\s+rows\s+x\s+(\d+)\s+columns\]\s*$")
 
 
 @dataclass(slots=True)
@@ -182,6 +189,21 @@ class ExecutionOutput:
             elif item.kind == "display" and item.text:
                 rendered = f"{rendered}\n{item.text}" if rendered else item.text
         return rendered
+
+    def result_item(self) -> OutputItem | None:
+        for item in reversed(self.items):
+            if item.kind == "result":
+                return item
+        return None
+
+    def result_preview(self) -> InspectPreview | None:
+        item = self.result_item()
+        if item is None:
+            return None
+        preview = _preview_from_mime(item.mime)
+        if preview is not None:
+            return preview
+        return _preview_from_text(item.text)
 
     def error_item(self) -> OutputItem | None:
         for item in reversed(self.items):
@@ -371,6 +393,266 @@ def output_item_from_shell_reply_message(message: ShellReplyMessage) -> OutputIt
         evalue=message.evalue,
         traceback=message.traceback,
     )
+
+
+def _preview_from_mime(bundle: dict[str, str]) -> InspectPreview | None:
+    json_payload = bundle.get("application/json")
+    if isinstance(json_payload, str):
+        try:
+            decoded = json.loads(json_payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            decoded = None
+        preview = _preview_from_value(decoded)
+        if preview is not None:
+            return preview
+
+    text_plain = bundle.get("text/plain")
+    html = bundle.get("text/html")
+    if isinstance(html, str) and "dataframe" in html.lower():
+        preview = _dataframe_preview_from_bundle(text_plain=text_plain, html=html)
+        if preview is not None:
+            return preview
+    return _preview_from_text(text_plain)
+
+
+def _preview_from_text(text: str | None) -> InspectPreview | None:
+    if not isinstance(text, str) or not text.strip():
+        return None
+    dataframe_preview = _dataframe_preview_from_bundle(text_plain=text, html=None)
+    if dataframe_preview is not None:
+        return dataframe_preview
+    try:
+        value = ast.literal_eval(text)
+    except (SyntaxError, ValueError):
+        try:
+            value = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+    return _preview_from_value(value)
+
+
+def _preview_from_value(value: object) -> InspectPreview | None:
+    if isinstance(value, dict):
+        return _mapping_preview_from_value(cast(Mapping[object, object], value))
+    if isinstance(value, (list, tuple, set)):
+        return _sequence_preview_from_value(list(value))
+    return None
+
+
+def _mapping_preview_from_value(value: Mapping[object, object]) -> MappingPreview:
+    keys = [str(key) for key in list(value)[:10]]
+    sample: dict[str, JSONValue] = {}
+    for index, (key, item) in enumerate(value.items()):
+        if index >= 3:
+            break
+        sample[str(key)] = _json_safe(item)
+    return {
+        "kind": "mapping-like",
+        "length": len(value),
+        "keys": keys,
+        "sample": sample,
+    }
+
+
+def _sequence_preview_from_value(value: list[object]) -> SequencePreview:
+    preview: SequencePreview = {
+        "kind": "sequence-like",
+        "length": len(value),
+        "sample": [_json_safe(item) for item in value[:3]],
+    }
+    if value:
+        preview["item_type"] = type(value[0]).__name__
+        if isinstance(value[0], dict):
+            preview["sample_keys"] = [str(key) for key in list(value[0])[:10]]
+    return preview
+
+
+def _dataframe_preview_from_bundle(
+    *,
+    text_plain: str | None,
+    html: str | None,
+) -> DataframePreview | None:
+    shape = _dataframe_shape(text_plain)
+    headers: list[str] = []
+    head_rows: list[dict[str, JSONValue]] = []
+    if isinstance(html, str) and html:
+        headers, head_rows = _parse_html_table_preview(html)
+    if not headers and isinstance(text_plain, str):
+        headers = _dataframe_columns_from_text(text_plain)
+
+    if shape is None and not headers and not head_rows:
+        return None
+    if not isinstance(html, str):
+        if shape is None and (not isinstance(text_plain, str) or "\n" not in text_plain):
+            return None
+        if shape is None and len(headers) < 2:
+            return None
+
+    preview: DataframePreview = {"kind": "dataframe-like"}
+    if shape is not None:
+        preview["shape"] = [shape[0], shape[1]]
+    if headers:
+        preview["columns"] = headers
+        preview["column_count"] = len(headers)
+    if head_rows:
+        preview["head"] = head_rows
+    return preview
+
+
+def _dataframe_shape(text: str | None) -> tuple[int, int] | None:
+    if not isinstance(text, str):
+        return None
+    match = _DATAFRAME_SHAPE_RE.search(text.strip())
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _dataframe_columns_from_text(text: str) -> list[str]:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("[") or stripped.startswith(".."):
+            continue
+        parts = [part for part in re.split(r"\s{2,}", stripped) if part]
+        if len(parts) >= 2 and parts[0].isdigit():
+            continue
+        if parts:
+            return parts
+    return []
+
+
+def _parse_html_table_preview(html: str) -> tuple[list[str], list[dict[str, JSONValue]]]:
+    parser = _HTMLTablePreviewParser()
+    parser.feed(html)
+    parser.close()
+    return parser.columns(), parser.rows()
+
+
+def _json_safe(value: object, depth: int = 0) -> JSONValue:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value if len(value) <= 80 else value[:77] + "..."
+    if depth >= 2:
+        text = str(value)
+        return text if len(text) <= 80 else text[:77] + "..."
+    if isinstance(value, dict):
+        sample: dict[str, JSONValue] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 5:
+                break
+            sample[str(key)] = _json_safe(item, depth + 1)
+        return sample
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item, depth + 1) for item in list(value)[:3]]
+    text = str(value)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+class _HTMLTablePreviewParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_table = False
+        self._in_head = False
+        self._in_body = False
+        self._in_row = False
+        self._in_cell = False
+        self._current_cell: list[str] = []
+        self._current_row: list[str] = []
+        self._header_rows: list[list[str]] = []
+        self._body_rows: list[list[str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "table" and not self._in_table:
+            attrs_dict = dict(attrs)
+            css_class = attrs_dict.get("class", "") or ""
+            if "dataframe" in css_class:
+                self._in_table = True
+            return
+        if not self._in_table:
+            return
+        if tag == "thead":
+            self._in_head = True
+        elif tag == "tbody":
+            self._in_body = True
+        elif tag == "tr":
+            self._in_row = True
+            self._current_row = []
+        elif tag in {"th", "td"} and self._in_row:
+            self._in_cell = True
+            self._current_cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._in_table:
+            return
+        if tag in {"th", "td"} and self._in_cell:
+            self._current_row.append("".join(self._current_cell).strip())
+            self._current_cell = []
+            self._in_cell = False
+            return
+        if tag == "tr" and self._in_row:
+            if self._current_row:
+                if self._in_head:
+                    self._header_rows.append(list(self._current_row))
+                elif self._in_body and len(self._body_rows) < 5:
+                    self._body_rows.append(list(self._current_row))
+            self._current_row = []
+            self._in_row = False
+            return
+        if tag == "thead":
+            self._in_head = False
+        elif tag == "tbody":
+            self._in_body = False
+        elif tag == "table":
+            self._in_table = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_cell:
+            self._current_cell.append(data)
+
+    def columns(self) -> list[str]:
+        if not self._header_rows:
+            return []
+        header = [cell for cell in self._header_rows[-1] if cell]
+        return header
+
+    def rows(self) -> list[dict[str, JSONValue]]:
+        columns = self.columns()
+        if not columns:
+            return []
+        rows: list[dict[str, JSONValue]] = []
+        for raw_row in self._body_rows[:3]:
+            row = list(raw_row)
+            if len(row) == len(columns) + 1:
+                row = row[1:]
+            if len(row) != len(columns):
+                continue
+            rows.append(
+                {
+                    column: _coerce_cell_value(value)
+                    for column, value in zip(columns, row, strict=False)
+                }
+            )
+        return rows
+
+
+def _coerce_cell_value(value: str) -> JSONValue:
+    lowered = value.strip().lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered in {"none", "nan"}:
+        return value.strip()
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    return value.strip()
 
 
 def _mime_bundle(content: dict[str, object]) -> dict[str, str]:

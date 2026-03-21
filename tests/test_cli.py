@@ -15,6 +15,8 @@ from agentnb.cli import main
 from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink, KernelStatus
 from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
+from agentnb.execution_output import OutputItem
+from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
 from agentnb.runtime import KernelWaitResult
@@ -42,6 +44,7 @@ class CommandEnvelope(TypedDict):
     timestamp: str
     data: JSONDict
     suggestions: list[str]
+    suggestion_actions: list[JSONDict]
     error: ErrorEnvelope | None
 
 
@@ -551,6 +554,38 @@ def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
     ]
 
 
+def test_cli_exec_implicit_target_is_ambiguous_even_with_current_session_preference(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {"session_id": "default"},
+        {"session_id": "analysis"},
+    ]
+    cli.runtime.current_session_id = lambda **_: "analysis"  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1 + 1"])
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert _error(payload)["code"] == "AMBIGUOUS_SESSION"
+    assert payload["suggestion_actions"] == [
+        {
+            "kind": "command",
+            "label": "List sessions",
+            "command": "agentnb",
+            "args": ["sessions", "list", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Retry with --session",
+            "command": "agentnb",
+            "args": ["exec", "--session", "NAME", "--json"],
+        },
+    ]
+
+
 def test_cli_status_uses_only_live_session_when_implicit(
     cli_runner: CliRunner, project_dir: Path
 ) -> None:
@@ -645,6 +680,8 @@ def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
     assert payload["data"]["alive"] is True
     assert payload["data"]["waited"] is True
     assert payload["data"]["waited_for"] == "idle"
+    assert payload["data"]["waited_ms"] == 10
+    assert payload["data"]["initial_runtime_state"] == "busy"
     assert wait_calls[0]["timeout_s"] == 5.0
 
 
@@ -926,6 +963,54 @@ def test_cli_exec_result_only_returns_selected_text(
     assert exec_res.output.strip() == "2"
 
 
+def test_cli_exec_result_only_prefers_preview_summary_for_large_values(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.execute_code = lambda **_: ManagedExecution(  # type: ignore[method-assign]
+        record=ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="ok",
+            duration_ms=5,
+            code="big",
+            outputs=[
+                OutputItem.result(
+                    text=(
+                        "     i text\n"
+                        "0    0    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+                        "\n[200 rows x 2 columns]"
+                    ),
+                    mime={
+                        "text/plain": (
+                            "     i text\n"
+                            "0    0    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+                            "\n[200 rows x 2 columns]"
+                        ),
+                        "text/html": (
+                            '<table border="1" class="dataframe">'
+                            "<thead><tr><th></th><th>i</th><th>text</th></tr></thead>"
+                            "<tbody><tr><th>0</th><td>0</td><td>x</td></tr></tbody>"
+                            "</table>"
+                        ),
+                    },
+                )
+            ],
+        )
+    )
+
+    exec_res = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--result-only", "big"],
+    )
+
+    assert exec_res.exit_code == 0
+    assert exec_res.output.strip() == "DataFrame shape=(200, 2) columns=i, text"
+
+
 def test_cli_exec_passes_named_session(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
@@ -1017,6 +1102,34 @@ def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: 
     payload = _payload(vars_res.output)
     assert payload["data"]["vars"][0]["name"] == "value"
     assert payload["data"]["vars"][0]["type"] == "int"
+
+
+def test_cli_vars_reports_helper_wait_metadata(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.ops.list_vars = lambda **_: KernelHelperResult(  # type: ignore[method-assign]
+        execution=ExecutionResult(status="ok"),
+        payload=[{"name": "value", "type": "int", "repr": "42"}],
+        wait_result=KernelWaitResult(
+            status=KernelStatus(alive=True, pid=123, busy=False),
+            waited=True,
+            waited_for="idle",
+            runtime_state="ready",
+            waited_ms=30,
+            initial_runtime_state="busy",
+        ),
+        started_new_session=True,
+    )
+
+    vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
+
+    assert vars_res.exit_code == 0
+    payload = _payload(vars_res.output)
+    assert payload["data"]["started_new_session"] is True
+    assert payload["data"]["waited"] is True
+    assert payload["data"]["waited_for"] == "idle"
+    assert payload["data"]["waited_ms"] == 30
+    assert payload["data"]["initial_runtime_state"] == "busy"
 
 
 def test_cli_vars_hides_routines_and_compacts_container_values(
@@ -1385,6 +1498,21 @@ def test_cli_sessions_list_returns_runtime_entries(
     ]
 
 
+def test_cli_bare_sessions_shortcut_accepts_group_options(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [{"session_id": "default"}]  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["sessions", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "sessions-list"
+    assert payload["data"]["sessions"] == [{"session_id": "default"}]
+
+
 def test_cli_sessions_list_empty_has_actionable_suggestions(
     cli_runner: CliRunner, project_dir: Path
 ) -> None:
@@ -1505,6 +1633,41 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
     assert payload["data"]["run"]["terminal_reason"] == "cancelled"
     assert payload["data"]["run"]["cancel_requested"] is True
     assert payload["data"]["run"]["recorded_ename"] == "KeyboardInterrupt"
+
+
+def test_cli_runs_show_json_strips_ansi_tracebacks(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "session_id": "default",
+        "status": "error",
+        "traceback": ["\u001b[31mTraceback...\u001b[0m", "ZeroDivisionError: boom"],
+        "recorded_traceback": ["\u001b[31mKeyboardInterrupt\u001b[0m"],
+        "events": [
+            {
+                "kind": "error",
+                "content": "boom",
+                "metadata": {
+                    "traceback": ["\u001b[31mTraceback...\u001b[0m", "ZeroDivisionError: boom"]
+                },
+            }
+        ],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["run"]["traceback"] == ["Traceback...", "ZeroDivisionError: boom"]
+    assert payload["data"]["run"]["recorded_traceback"] == ["KeyboardInterrupt"]
+    event_tb = payload["data"]["run"]["events"][0]["metadata"]["traceback"]
+    assert event_tb == ["Traceback...", "ZeroDivisionError: boom"]
 
 
 def test_cli_runs_show_accepts_latest_selector(cli_runner: CliRunner, project_dir: Path) -> None:

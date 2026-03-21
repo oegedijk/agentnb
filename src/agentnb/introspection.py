@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Generic, TypeVar, cast
 
 from .contracts import ExecutionResult
-from .errors import AgentNBException, KernelNotReadyError, NoKernelRunningError
+from .errors import AgentNBException, KernelNotReadyError, NoKernelRunningError, SessionBusyError
 from .history import HistoryStore
 from .payloads import (
     DataframePreview,
@@ -24,6 +24,8 @@ from .runtime import KernelRuntime, KernelWaitResult
 from .session import DEFAULT_SESSION_ID
 from .state import StateRepository
 
+PayloadT = TypeVar("PayloadT")
+
 
 @dataclass(slots=True, frozen=True)
 class KernelHelperRequest:
@@ -36,15 +38,18 @@ class KernelHelperRequest:
 
 
 @dataclass(slots=True, frozen=True)
-class KernelHelperResult:
+class KernelHelperResult(Generic[PayloadT]):
     execution: ExecutionResult
-    payload: JSONValue
+    payload: PayloadT
     wait_result: KernelWaitResult | None = None
+    started_new_session: bool = False
 
 
 @dataclass(slots=True, frozen=True)
 class HelperExecutionPolicy:
+    ensure_started: bool = False
     wait_for_usable: bool = False
+    retry_on_busy: bool = False
 
 
 class KernelIntrospection:
@@ -63,6 +68,20 @@ class KernelIntrospection:
         timeout_s: float = 10.0,
         execution_policy: HelperExecutionPolicy | None = None,
     ) -> list[VarEntry]:
+        return self.list_vars_result(
+            project_root=project_root,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            execution_policy=execution_policy,
+        ).payload
+
+    def list_vars_result(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
+    ) -> KernelHelperResult[list[VarEntry]]:
         result = self._run_json_helper(
             project_root=project_root,
             session_id=session_id,
@@ -70,7 +89,12 @@ class KernelIntrospection:
             helper=_list_vars_helper(),
             execution_policy=execution_policy,
         )
-        return _parse_var_entries(result.payload)
+        return KernelHelperResult(
+            execution=result.execution,
+            payload=_parse_var_entries(result.payload),
+            wait_result=result.wait_result,
+            started_new_session=result.started_new_session,
+        )
 
     def inspect_var(
         self,
@@ -80,6 +104,22 @@ class KernelIntrospection:
         timeout_s: float = 10.0,
         execution_policy: HelperExecutionPolicy | None = None,
     ) -> InspectPayload:
+        return self.inspect_var_result(
+            project_root=project_root,
+            name=name,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            execution_policy=execution_policy,
+        ).payload
+
+    def inspect_var_result(
+        self,
+        project_root: Path,
+        name: str,
+        session_id: str = DEFAULT_SESSION_ID,
+        timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
+    ) -> KernelHelperResult[InspectPayload]:
         result = self._run_json_helper(
             project_root=project_root,
             session_id=session_id,
@@ -87,7 +127,12 @@ class KernelIntrospection:
             helper=_inspect_helper(name),
             execution_policy=execution_policy,
         )
-        return _parse_inspect_payload(result.payload)
+        return KernelHelperResult(
+            execution=result.execution,
+            payload=_parse_inspect_payload(result.payload),
+            wait_result=result.wait_result,
+            started_new_session=result.started_new_session,
+        )
 
     def reload_module(
         self,
@@ -97,6 +142,22 @@ class KernelIntrospection:
         timeout_s: float = 10.0,
         execution_policy: HelperExecutionPolicy | None = None,
     ) -> ReloadReport:
+        return self.reload_module_result(
+            project_root=project_root,
+            module_name=module_name,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            execution_policy=execution_policy,
+        ).payload
+
+    def reload_module_result(
+        self,
+        project_root: Path,
+        module_name: str | None = None,
+        session_id: str = DEFAULT_SESSION_ID,
+        timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
+    ) -> KernelHelperResult[ReloadReport]:
         result = self._run_json_helper(
             project_root=project_root,
             session_id=session_id,
@@ -104,7 +165,12 @@ class KernelIntrospection:
             helper=_reload_helper(project_root=project_root, module_name=module_name),
             execution_policy=execution_policy,
         )
-        return _parse_reload_report(result.payload)
+        return KernelHelperResult(
+            execution=result.execution,
+            payload=_parse_reload_report(result.payload),
+            wait_result=result.wait_result,
+            started_new_session=result.started_new_session,
+        )
 
     def _run_json_helper(
         self,
@@ -114,24 +180,26 @@ class KernelIntrospection:
         timeout_s: float,
         helper: KernelHelperRequest,
         execution_policy: HelperExecutionPolicy | None = None,
-    ) -> KernelHelperResult:
+    ) -> KernelHelperResult[JSONValue]:
         history = HistoryStore(project_root=project_root, session_id=session_id)
         recording = self._recording_for_helper(helper)
         policy = execution_policy or HelperExecutionPolicy()
         wait_result: KernelWaitResult | None = None
+        started_new_session = False
 
         try:
-            if policy.wait_for_usable:
-                wait_result = self.runtime.wait_for_usable(
+            if policy.ensure_started:
+                started_new_session = self._ensure_helper_session_started(
                     project_root=project_root,
                     session_id=session_id,
-                    timeout_s=timeout_s,
                 )
-            execution = self.runtime.execute(
+            execution, wait_result = self._execute_helper(
                 project_root=project_root,
                 session_id=session_id,
-                code=helper.code,
                 timeout_s=timeout_s,
+                helper=helper,
+                policy=policy,
+                wait_result=wait_result,
             )
         except Exception as exc:
             if isinstance(exc, (NoKernelRunningError, KernelNotReadyError)):
@@ -177,7 +245,70 @@ class KernelIntrospection:
                 execution=execution,
             )
         )
-        return KernelHelperResult(execution=execution, payload=payload, wait_result=wait_result)
+        return KernelHelperResult(
+            execution=execution,
+            payload=payload,
+            wait_result=wait_result,
+            started_new_session=started_new_session,
+        )
+
+    def _ensure_helper_session_started(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+    ) -> bool:
+        state = self.runtime.runtime_state(project_root=project_root, session_id=session_id)
+        if state.kind == "starting":
+            raise AgentNBException(
+                code="KERNEL_NOT_READY",
+                message="Kernel startup is still in progress or not yet ready. Wait and retry.",
+                data={
+                    "runtime_state": state.kind,
+                    "session_exists": state.session_exists,
+                },
+            )
+        _, started_new_session = self.runtime.ensure_started(
+            project_root=project_root,
+            session_id=session_id,
+        )
+        return started_new_session
+
+    def _execute_helper(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        timeout_s: float,
+        helper: KernelHelperRequest,
+        policy: HelperExecutionPolicy,
+        wait_result: KernelWaitResult | None,
+    ) -> tuple[ExecutionResult, KernelWaitResult | None]:
+        attempts = 0
+        accumulated_wait = wait_result
+
+        while True:
+            if policy.wait_for_usable:
+                next_wait = self.runtime.wait_for_usable(
+                    project_root=project_root,
+                    session_id=session_id,
+                    timeout_s=timeout_s,
+                )
+                accumulated_wait = _merge_wait_results(accumulated_wait, next_wait)
+            try:
+                execution = self.runtime.execute(
+                    project_root=project_root,
+                    session_id=session_id,
+                    code=helper.code,
+                    timeout_s=timeout_s,
+                )
+                return execution, accumulated_wait
+            except SessionBusyError as exc:
+                if not policy.retry_on_busy:
+                    raise
+                attempts += 1
+                if attempts >= 3:
+                    raise _session_busy_after_wait(exc, accumulated_wait) from exc
 
     def _append_execution_error(
         self,
@@ -263,6 +394,39 @@ class KernelIntrospection:
         if helper.command_type == "reload":
             return self.recorder.reload(module_name=helper.input_text, code=helper.code)
         raise ValueError(f"Unsupported helper command type: {helper.command_type}")
+
+
+def _merge_wait_results(
+    previous: KernelWaitResult | None,
+    current: KernelWaitResult | None,
+) -> KernelWaitResult | None:
+    if current is None:
+        return previous
+    if previous is None:
+        return current
+    return KernelWaitResult(
+        status=current.status,
+        waited=previous.waited or current.waited,
+        waited_for=current.waited_for or previous.waited_for,
+        runtime_state=current.runtime_state or previous.runtime_state,
+        waited_ms=previous.waited_ms + current.waited_ms,
+        initial_runtime_state=previous.initial_runtime_state or current.initial_runtime_state,
+    )
+
+
+def _session_busy_after_wait(
+    error: SessionBusyError,
+    wait_result: KernelWaitResult | None,
+) -> SessionBusyError:
+    data = error.data
+    return SessionBusyError(
+        wait_behavior="after_wait",
+        waited_ms=wait_result.waited_ms if wait_result is not None else 0,
+        lock_pid=cast(int | None, data.get("lock_pid")),
+        lock_acquired_at=cast(str | None, data.get("lock_acquired_at")),
+        busy_for_ms=cast(int | None, data.get("busy_for_ms")),
+        active_execution_id=cast(str | None, data.get("active_execution_id")),
+    )
 
 
 def _parse_var_entries(payload: JSONValue) -> list[VarEntry]:

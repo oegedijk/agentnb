@@ -13,6 +13,8 @@ from .compact import (
     compact_run_entry,
     compact_traceback,
     full_history_entry,
+    preview_text,
+    strip_ansi_lines,
 )
 from .contracts import (
     CommandResponse,
@@ -24,12 +26,14 @@ from .contracts import (
 from .errors import AgentNBException
 from .execution import ExecutionService
 from .execution_invocation import ExecInvocationPolicy, OutputSelector
+from .introspection import HelperExecutionPolicy
 from .ops import NotebookOps
 from .payloads import (
     CompactExecPayloadInput,
     DoctorPayload,
     ExecPayload,
     HistoryPayload,
+    InspectPreview,
     InspectResponsePayload,
     InterruptPayload,
     ReloadReport,
@@ -44,7 +48,13 @@ from .payloads import (
     VarDisplayEntry,
     VarsPayload,
 )
-from .runtime import KernelRuntime, RuntimeState, RuntimeStateKind, SessionResolutionPolicy
+from .runtime import (
+    KernelRuntime,
+    KernelWaitResult,
+    RuntimeState,
+    RuntimeStateKind,
+    SessionResolutionPolicy,
+)
 from .selectors import (
     HistoryReference,
     HistorySelectorResolver,
@@ -67,9 +77,17 @@ class CommandRuntimePolicy:
 
 
 _LIVE_SESSION_RESOLUTION = SessionResolutionPolicy(require_live_session=True)
+_STRICT_EXEC_SESSION_RESOLUTION = SessionResolutionPolicy(
+    require_live_session=True,
+    error_on_multiple_live_sessions=True,
+)
 _NONLIVE_SESSION_RESOLUTION = SessionResolutionPolicy(require_live_session=False)
 _DEFAULT_LIVE_COMMAND_POLICY = CommandRuntimePolicy(
     session_resolution=_LIVE_SESSION_RESOLUTION,
+    remember_session_preference=True,
+)
+_STRICT_EXEC_COMMAND_POLICY = CommandRuntimePolicy(
+    session_resolution=_STRICT_EXEC_SESSION_RESOLUTION,
     remember_session_preference=True,
 )
 _HELPER_COMMAND_POLICY = CommandRuntimePolicy(
@@ -81,6 +99,11 @@ _NONLIVE_COMMAND_POLICY = CommandRuntimePolicy(session_resolution=_NONLIVE_SESSI
 _NONLIVE_REMEMBERING_COMMAND_POLICY = CommandRuntimePolicy(
     session_resolution=_NONLIVE_SESSION_RESOLUTION,
     remember_session_preference=True,
+)
+_HELPER_EXECUTION_POLICY = HelperExecutionPolicy(
+    ensure_started=True,
+    wait_for_usable=True,
+    retry_on_busy=True,
 )
 
 
@@ -248,7 +271,7 @@ class AgentNBApp:
             command_name="exec",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_DEFAULT_LIVE_COMMAND_POLICY,
+            policy=_STRICT_EXEC_COMMAND_POLICY,
             handler=lambda session_id: self._exec_payload(
                 request=request,
                 session_id=session_id,
@@ -535,8 +558,13 @@ class AgentNBApp:
                 runtime_state=wait_result.runtime_state,
                 session_exists=True,
             )
-            payload["waited"] = True
+            payload["waited"] = wait_result.waited
             payload["waited_for"] = wait_result.waited_for or "idle"
+            waited_ms = getattr(wait_result, "waited_ms", None)
+            payload["waited_ms"] = waited_ms if isinstance(waited_ms, int) else 0
+            initial_runtime_state = getattr(wait_result, "initial_runtime_state", None)
+            if isinstance(initial_runtime_state, str):
+                payload["initial_runtime_state"] = initial_runtime_state
             return payload
         if request.wait_for == "ready":
             wait_result = self.runtime.wait_until_ready(
@@ -549,8 +577,13 @@ class AgentNBApp:
                 runtime_state=wait_result.runtime_state,
                 session_exists=True,
             )
-            payload["waited"] = True
+            payload["waited"] = wait_result.waited
             payload["waited_for"] = wait_result.waited_for or "ready"
+            waited_ms = getattr(wait_result, "waited_ms", None)
+            payload["waited_ms"] = waited_ms if isinstance(waited_ms, int) else 0
+            initial_runtime_state = getattr(wait_result, "initial_runtime_state", None)
+            if isinstance(initial_runtime_state, str):
+                payload["initial_runtime_state"] = initial_runtime_state
             return payload
         return _status_payload_from_runtime_state(
             self.runtime.runtime_state(
@@ -573,10 +606,20 @@ class AgentNBApp:
         payload["waited"] = wait_result.waited
         if wait_result.waited_for is not None:
             payload["waited_for"] = wait_result.waited_for
+        waited_ms = getattr(wait_result, "waited_ms", None)
+        payload["waited_ms"] = waited_ms if isinstance(waited_ms, int) else 0
+        initial_runtime_state = getattr(wait_result, "initial_runtime_state", None)
+        if isinstance(initial_runtime_state, str):
+            payload["initial_runtime_state"] = initial_runtime_state
         return payload
 
     def _vars_payload(self, *, request: VarsRequest, session_id: str) -> VarsPayload:
-        values = self.ops.list_vars(project_root=request.project_root, session_id=session_id)
+        helper_result = self.ops.list_vars_result(
+            project_root=request.project_root,
+            session_id=session_id,
+            execution_policy=_HELPER_EXECUTION_POLICY,
+        )
+        values = helper_result.payload
         if request.match_text:
             match_lower = request.match_text.lower()
             values = [item for item in values if match_lower in str(item["name"]).lower()]
@@ -586,25 +629,55 @@ class AgentNBApp:
             display_values: list[VarDisplayEntry] = [
                 {"name": item["name"], "repr": item["repr"]} for item in values
             ]
-            return {"vars": display_values}
-        return {"vars": cast(list[VarDisplayEntry], values)}
+            payload = cast(VarsPayload, {"vars": display_values})
+            _apply_helper_access_metadata(
+                payload,
+                helper_result.wait_result,
+                helper_result.started_new_session,
+            )
+            return payload
+        payload = cast(VarsPayload, {"vars": cast(list[VarDisplayEntry], values)})
+        _apply_helper_access_metadata(
+            payload,
+            helper_result.wait_result,
+            helper_result.started_new_session,
+        )
+        return payload
 
     def _inspect_payload(
         self, *, request: InspectRequest, session_id: str
     ) -> InspectResponsePayload:
-        payload = self.ops.inspect_var(
+        helper_result = self.ops.inspect_var_result(
             project_root=request.project_root,
             session_id=session_id,
             name=request.name,
+            execution_policy=_HELPER_EXECUTION_POLICY,
         )
-        return {"inspect": compact_inspect_payload(payload)}
+        payload = cast(
+            InspectResponsePayload,
+            {"inspect": compact_inspect_payload(helper_result.payload)},
+        )
+        _apply_helper_access_metadata(
+            payload,
+            helper_result.wait_result,
+            helper_result.started_new_session,
+        )
+        return payload
 
     def _reload_payload(self, *, request: ReloadRequest, session_id: str) -> ReloadReport:
-        return self.ops.reload_module(
+        helper_result = self.ops.reload_module_result(
             project_root=request.project_root,
             session_id=session_id,
             module_name=request.module_name,
+            execution_policy=_HELPER_EXECUTION_POLICY,
         )
+        payload = dict(helper_result.payload)
+        _apply_helper_access_metadata(
+            payload,
+            helper_result.wait_result,
+            helper_result.started_new_session,
+        )
+        return cast(ReloadReport, payload)
 
     def _history_payload(self, *, request: HistoryRequest, session_id: str) -> HistoryPayload:
         selection = self.runtime.select_history(
@@ -958,10 +1031,42 @@ def _current_session_preference(runtime: KernelRuntime, *, project_root: Path) -
 
 def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:
     if selector == "result":
+        preview = payload.get("result_preview")
+        result = payload.get("result")
+        if isinstance(preview, dict) and _prefer_preview_text(preview, result):
+            return preview_text(cast(InspectPreview, preview))
         result = payload.get("result")
         return "" if result is None else str(result)
     value = payload.get(selector)
     return "" if value is None else str(value)
+
+
+def _prefer_preview_text(preview: object, result: object) -> bool:
+    if isinstance(preview, dict):
+        preview_map = cast(dict[str, object], preview)
+        if preview_map.get("kind") == "dataframe-like":
+            return True
+    if not isinstance(result, str):
+        return True
+    return "\n" in result or len(result) > 120
+
+
+def _apply_helper_access_metadata(
+    payload: object,
+    wait_result: KernelWaitResult | None,
+    started_new_session: bool,
+) -> None:
+    payload_map = cast(dict[str, object], payload)
+    if started_new_session:
+        payload_map["started_new_session"] = True
+    if wait_result is None:
+        return
+    payload_map["waited"] = wait_result.waited
+    if wait_result.waited_for is not None:
+        payload_map["waited_for"] = wait_result.waited_for
+    payload_map["waited_ms"] = wait_result.waited_ms
+    if wait_result.initial_runtime_state is not None:
+        payload_map["initial_runtime_state"] = wait_result.initial_runtime_state
 
 
 def _status_payload_from_runtime_state(state: RuntimeState) -> StatusPayload:
@@ -1016,7 +1121,25 @@ def _sessions_list_payload(sessions: list[SessionSummary]) -> SessionsListPayloa
 
 
 def _public_run_payload(run: Mapping[str, object]) -> RunSnapshot:
-    return cast(
-        RunSnapshot,
-        {key: value for key, value in run.items() if key != "outputs"},
-    )
+    payload = {key: value for key, value in run.items() if key != "outputs"}
+    for key in ("traceback", "recorded_traceback"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            payload[key] = strip_ansi_lines(cast(list[str], value))
+    events = payload.get("events")
+    if isinstance(events, list):
+        sanitized_events: list[dict[str, object]] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            sanitized_event = dict(event)
+            metadata = sanitized_event.get("metadata")
+            if isinstance(metadata, dict):
+                sanitized_metadata = dict(metadata)
+                traceback = sanitized_metadata.get("traceback")
+                if isinstance(traceback, list):
+                    sanitized_metadata["traceback"] = strip_ansi_lines(cast(list[str], traceback))
+                sanitized_event["metadata"] = sanitized_metadata
+            sanitized_events.append(sanitized_event)
+        payload["events"] = sanitized_events
+    return cast(RunSnapshot, payload)

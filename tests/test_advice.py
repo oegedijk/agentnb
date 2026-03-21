@@ -67,6 +67,28 @@ def test_advice_policy_handles_ambiguous_session_error() -> None:
         "Retry with `agentnb status --session NAME --json` to target one explicitly.",
     ]
 
+    assert policy.suggestion_actions(
+        AdviceContext(
+            command_name="status",
+            response_status="error",
+            data={},
+            error_code="AMBIGUOUS_SESSION",
+        )
+    ) == [
+        {
+            "kind": "command",
+            "label": "List sessions",
+            "command": "agentnb",
+            "args": ["sessions", "list", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Retry with --session",
+            "command": "agentnb",
+            "args": ["status", "--session", "NAME", "--json"],
+        },
+    ]
+
 
 def test_advice_policy_uses_session_name_for_preserved_run_cancel() -> None:
     policy = AdvicePolicy()
@@ -127,6 +149,55 @@ def test_advice_policy_module_not_found_error_suggests_install() -> None:
     assert suggestions == [
         "Install the missing module: run `uv add pandas` in your shell (not inside the session).",
         "Then retry the execution.",
+    ]
+    assert policy.suggestion_actions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={},
+            error_code="EXECUTION_ERROR",
+            error_name="ModuleNotFoundError",
+            error_value="No module named 'pandas'",
+        )
+    ) == [
+        {
+            "kind": "shell",
+            "label": "Install dependency",
+            "command": "uv",
+            "args": ["add", "pandas"],
+        }
+    ]
+
+
+def test_advice_policy_pipless_called_process_suggests_uv_add() -> None:
+    policy = AdvicePolicy()
+
+    context = AdviceContext(
+        command_name="exec",
+        response_status="error",
+        data={"stderr": "/tmp/.venv/bin/python: No module named pip\n"},
+        error_code="EXECUTION_ERROR",
+        error_name="CalledProcessError",
+        error_value=(
+            "Command '['/tmp/.venv/bin/python', '-m', 'pip', 'install', 'pyjokes']' "
+            "returned non-zero exit status 1."
+        ),
+    )
+
+    assert policy.suggestions(context) == [
+        "The selected interpreter does not provide pip inside the live session.",
+        (
+            "Install the dependency from this project with "
+            "run `uv add pyjokes` in your shell (not inside the session)."
+        ),
+    ]
+    assert policy.suggestion_actions(context) == [
+        {
+            "kind": "shell",
+            "label": "Install dependency",
+            "command": "uv",
+            "args": ["add", "pyjokes"],
+        }
     ]
 
 

@@ -134,22 +134,30 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             status_data = cast(StatusPayload, data)
             session_label = f"session: {response.session_id}, " if response.session_id else ""
             session_name = f"session: {response.session_id}" if response.session_id else None
+            wait_note = _wait_note(status_data)
             if status_data.get("alive"):
                 if status_data.get("busy"):
                     busy_for_ms = status_data.get("busy_for_ms")
                     if isinstance(busy_for_ms, int):
+                        busy_detail = (
+                            f"busy for {_format_duration_ms(busy_for_ms)}"
+                            f"{_detail_suffix(wait_note)}"
+                        )
                         body = (
                             "Kernel is running "
-                            f"({session_label}pid {status_data.get('pid')}, "
-                            f"busy for {_format_duration_ms(busy_for_ms)})."
+                            f"({session_label}pid {status_data.get('pid')}, {busy_detail})."
                         )
                     else:
+                        busy_detail = f"busy{_detail_suffix(wait_note)}"
                         body = (
                             "Kernel is running "
-                            f"({session_label}pid {status_data.get('pid')}, busy)."
+                            f"({session_label}pid {status_data.get('pid')}, {busy_detail})."
                         )
                 else:
-                    body = f"Kernel is running ({session_label}pid {status_data.get('pid')})."
+                    body = (
+                        f"Kernel is running ({session_label}pid {status_data.get('pid')}"
+                        f"{_detail_suffix(wait_note)})."
+                    )
             elif status_data.get("runtime_state") == "starting":
                 body = (
                     f"Kernel is starting ({session_name})."
@@ -168,12 +176,19 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             status_data = cast(StatusPayload, data)
             session_label = f"session: {response.session_id}, " if response.session_id else ""
             session_name = f"session: {response.session_id}" if response.session_id else None
+            wait_note = _wait_note(status_data)
             if status_data.get("alive"):
                 waited_for = status_data.get("waited_for")
                 if waited_for == "ready":
-                    body = f"Kernel is ready ({session_label}pid {status_data.get('pid')})."
+                    body = (
+                        f"Kernel is ready ({session_label}pid {status_data.get('pid')}"
+                        f"{_detail_suffix(wait_note)})."
+                    )
                 else:
-                    body = f"Kernel is idle ({session_label}pid {status_data.get('pid')})."
+                    body = (
+                        f"Kernel is idle ({session_label}pid {status_data.get('pid')}"
+                        f"{_detail_suffix(wait_note)})."
+                    )
             elif status_data.get("runtime_state") == "starting":
                 body = (
                     f"Kernel is starting ({session_name})."
@@ -208,6 +223,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             else:
                 lines = [_render_var_entry(item) for item in vars_data]
                 body = "\n".join(lines)
+            body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
         elif command == "inspect":
             inspect_response = cast(InspectResponsePayload, data)
@@ -240,9 +256,11 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 ]
                 lines.append(f"members: {members_text}")
             body = "\n".join(lines)
+            body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
         elif command == "reload":
             body = _render_reload(cast(ReloadReport, data))
+            body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
         elif command == "history":
             entries = cast(HistoryPayload, data).get("entries", [])
@@ -425,6 +443,47 @@ def _format_duration_ms(duration_ms: int) -> str:
     if seconds < 10:
         return f"{seconds:.1f}s"
     return f"{int(seconds)}s"
+
+
+def _detail_suffix(detail: str | None) -> str:
+    if not detail:
+        return ""
+    return f", {detail}"
+
+
+def _wait_note(data: Mapping[str, object]) -> str | None:
+    if not data.get("waited"):
+        return None
+    waited_ms = data.get("waited_ms")
+    waited_for = data.get("waited_for")
+    initial_runtime_state = data.get("initial_runtime_state")
+    if not isinstance(waited_ms, int) and not isinstance(initial_runtime_state, str):
+        return None
+    parts: list[str] = []
+    if isinstance(waited_ms, int):
+        parts.append(f"waited {_format_duration_ms(waited_ms)}")
+    else:
+        parts.append("waited")
+    if isinstance(waited_for, str) and waited_for:
+        parts.append(f"for {waited_for}")
+    if isinstance(initial_runtime_state, str) and initial_runtime_state:
+        parts.append(f"from {initial_runtime_state}")
+    return " ".join(parts)
+
+
+def _append_helper_access_note(body: str, data: Mapping[str, object]) -> str:
+    parts: list[str] = []
+    if data.get("started_new_session"):
+        parts.append("auto-started session")
+    wait_note = _wait_note(data)
+    if wait_note:
+        parts.append(wait_note)
+    if not parts:
+        return body
+    note = f"({'; '.join(parts)})"
+    if not body:
+        return note
+    return f"{body}\n{note}"
 
 
 def _staleness_hint(iso_timestamp: str | None) -> str | None:

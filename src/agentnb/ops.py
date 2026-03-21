@@ -4,8 +4,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .contracts import ExecutionResult
 from .errors import AgentNBException
-from .introspection import HelperExecutionPolicy, KernelIntrospection
+from .introspection import HelperExecutionPolicy, KernelHelperResult, KernelIntrospection
 from .payloads import InspectPayload, ReloadReport, VarEntry
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID
@@ -47,6 +48,33 @@ class NotebookOps:
             execution_policy=execution_policy,
         )
 
+    def list_vars_result(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
+    ) -> KernelHelperResult[list[VarEntry]]:
+        if getattr(self.list_vars, "__func__", None) is NotebookOps.list_vars:
+            return self.introspection.list_vars_result(
+                project_root=project_root,
+                session_id=session_id,
+                timeout_s=timeout_s,
+                execution_policy=execution_policy,
+            )
+        result = self.list_vars(
+            project_root=project_root,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            execution_policy=execution_policy,
+        )
+        if isinstance(result, KernelHelperResult):
+            return result
+        return KernelHelperResult(
+            execution=ExecutionResult(status="ok"),
+            payload=result,
+        )
+
     def inspect_var(
         self,
         project_root: Path,
@@ -63,6 +91,36 @@ class NotebookOps:
             execution_policy=execution_policy,
         )
 
+    def inspect_var_result(
+        self,
+        project_root: Path,
+        name: str,
+        session_id: str = DEFAULT_SESSION_ID,
+        timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
+    ) -> KernelHelperResult[InspectPayload]:
+        if getattr(self.inspect_var, "__func__", None) is NotebookOps.inspect_var:
+            return self.introspection.inspect_var_result(
+                project_root=project_root,
+                name=name,
+                session_id=session_id,
+                timeout_s=timeout_s,
+                execution_policy=execution_policy,
+            )
+        result = self.inspect_var(
+            project_root=project_root,
+            name=name,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            execution_policy=execution_policy,
+        )
+        if isinstance(result, KernelHelperResult):
+            return result
+        return KernelHelperResult(
+            execution=ExecutionResult(status="ok"),
+            payload=result,
+        )
+
     def reload_module(
         self,
         project_root: Path,
@@ -77,4 +135,34 @@ class NotebookOps:
             session_id=session_id,
             timeout_s=timeout_s,
             execution_policy=execution_policy,
+        )
+
+    def reload_module_result(
+        self,
+        project_root: Path,
+        module_name: str | None = None,
+        session_id: str = DEFAULT_SESSION_ID,
+        timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
+    ) -> KernelHelperResult[ReloadReport]:
+        if getattr(self.reload_module, "__func__", None) is NotebookOps.reload_module:
+            return self.introspection.reload_module_result(
+                project_root=project_root,
+                module_name=module_name,
+                session_id=session_id,
+                timeout_s=timeout_s,
+                execution_policy=execution_policy,
+            )
+        result = self.reload_module(
+            project_root=project_root,
+            module_name=module_name,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            execution_policy=execution_policy,
+        )
+        if isinstance(result, KernelHelperResult):
+            return result
+        return KernelHelperResult(
+            execution=ExecutionResult(status="ok"),
+            payload=result,
         )

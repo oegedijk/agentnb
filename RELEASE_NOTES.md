@@ -1,3 +1,41 @@
+# v0.3.5 — Helper Access And Agent Contract Fixes
+
+## Bug fixes
+
+**Read-only helpers now cooperate with active same-session work** — `vars`,
+`inspect`, and `reload` no longer fail fast so often behind active same-session
+execution. The helper path now waits through the run manager, records whether
+it waited, and surfaces the blocking execution id when that context matters.
+
+**Helper startup behavior is now consistent with `exec`** — On an
+unambiguously targeted missing session, `vars`, `inspect`, and `reload` now
+auto-start the session instead of falling back to generic no-kernel behavior.
+Structured helper responses include whether a new session was started.
+
+**Helper error metadata no longer disappears on exception paths** — Helper
+failures raised directly during execution or busy handling now preserve the new
+access metadata instead of dropping it during exception rewriting.
+
+**Bare `sessions` no longer drifts from its shortcut behavior** — The CLI now
+accepts `agentnb sessions --project ... --json` as a true shortcut for
+`sessions list`, and the repo docs/examples now match that behavior.
+
+## Improvements
+
+**Typed helper-access contract** — Helper read commands now use a shared
+`HelperAccessMetadata` contract instead of ad hoc payload mutation. The access
+fields flow through introspection, ops, app shaping, and the local run manager
+as typed state.
+
+**Hard ambiguity error for omitted-session exec** — When more than one live
+session exists, omitted-session `exec` and implicit top-level exec now return
+`AMBIGUOUS_SESSION` instead of silently following the remembered current
+session.
+
+**Structured recovery actions in `--agent` responses** — Compact agent-mode
+responses now preserve `suggestion_actions`, so ambiguity and recovery flows
+carry machine-readable next steps instead of only prose suggestions.
+
 # v0.3.4 — Smoke-Driven Consistency And Recovery Fixes
 
 ## Bug fixes

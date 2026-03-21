@@ -13,6 +13,8 @@ from .compact import (
     compact_run_entry,
     compact_traceback,
     full_history_entry,
+    preview_text,
+    strip_ansi_lines,
 )
 from .contracts import (
     CommandResponse,
@@ -24,12 +26,14 @@ from .contracts import (
 from .errors import AgentNBException
 from .execution import ExecutionService
 from .execution_invocation import ExecInvocationPolicy, OutputSelector
+from .introspection import HelperExecutionPolicy
 from .ops import NotebookOps
 from .payloads import (
     CompactExecPayloadInput,
     DoctorPayload,
     ExecPayload,
     HistoryPayload,
+    InspectPreview,
     InspectResponsePayload,
     InterruptPayload,
     ReloadReport,
@@ -44,7 +48,12 @@ from .payloads import (
     VarDisplayEntry,
     VarsPayload,
 )
-from .runtime import KernelRuntime, RuntimeState, RuntimeStateKind
+from .runtime import (
+    KernelRuntime,
+    RuntimeState,
+    RuntimeStateKind,
+    SessionResolutionPolicy,
+)
 from .selectors import (
     HistoryReference,
     HistorySelectorResolver,
@@ -56,6 +65,45 @@ from .session import DEFAULT_SESSION_ID
 from .state import CommandLockInfo
 
 StatusWaitFor = Literal["ready", "idle"]
+StartingSessionBehavior = Literal["allow", "reject"]
+
+
+@dataclass(slots=True, frozen=True)
+class CommandRuntimePolicy:
+    session_resolution: SessionResolutionPolicy
+    remember_session_preference: bool = False
+    starting_session_behavior: StartingSessionBehavior = "allow"
+
+
+_LIVE_SESSION_RESOLUTION = SessionResolutionPolicy(require_live_session=True)
+_STRICT_EXEC_SESSION_RESOLUTION = SessionResolutionPolicy(
+    require_live_session=True,
+    error_on_multiple_live_sessions=True,
+)
+_NONLIVE_SESSION_RESOLUTION = SessionResolutionPolicy(require_live_session=False)
+_DEFAULT_LIVE_COMMAND_POLICY = CommandRuntimePolicy(
+    session_resolution=_LIVE_SESSION_RESOLUTION,
+    remember_session_preference=True,
+)
+_STRICT_EXEC_COMMAND_POLICY = CommandRuntimePolicy(
+    session_resolution=_STRICT_EXEC_SESSION_RESOLUTION,
+    remember_session_preference=True,
+)
+_HELPER_COMMAND_POLICY = CommandRuntimePolicy(
+    session_resolution=_LIVE_SESSION_RESOLUTION,
+    remember_session_preference=True,
+    starting_session_behavior="reject",
+)
+_NONLIVE_COMMAND_POLICY = CommandRuntimePolicy(session_resolution=_NONLIVE_SESSION_RESOLUTION)
+_NONLIVE_REMEMBERING_COMMAND_POLICY = CommandRuntimePolicy(
+    session_resolution=_NONLIVE_SESSION_RESOLUTION,
+    remember_session_preference=True,
+)
+_HELPER_EXECUTION_POLICY = HelperExecutionPolicy(
+    ensure_started=True,
+    wait_for_usable=True,
+    retry_on_busy=True,
+)
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -192,9 +240,10 @@ class AgentNBApp:
         history_selectors: HistorySelectorResolver | None = None,
     ) -> None:
         resolved_runtime = runtime or KernelRuntime()
+        resolved_executions = executions or ExecutionService(resolved_runtime)
         self.runtime = resolved_runtime
-        self.executions = executions or ExecutionService(resolved_runtime)
-        self.ops = ops or NotebookOps(resolved_runtime)
+        self.executions = resolved_executions
+        self.ops = ops or NotebookOps(resolved_runtime, executions=resolved_executions)
         self.advisor = advisor or AdvicePolicy()
         self.run_selectors = run_selectors or RunSelectorResolver(self.executions)
         self.history_selectors = history_selectors or HistorySelectorResolver()
@@ -204,7 +253,7 @@ class AgentNBApp:
             command_name="start",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=False,
+            policy=_NONLIVE_REMEMBERING_COMMAND_POLICY,
             handler=lambda session_id: self._start_payload(request=request, session_id=session_id),
         )
 
@@ -222,7 +271,7 @@ class AgentNBApp:
             command_name="exec",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
+            policy=_STRICT_EXEC_COMMAND_POLICY,
             handler=lambda session_id: self._exec_payload(
                 request=request,
                 session_id=session_id,
@@ -235,7 +284,7 @@ class AgentNBApp:
             command_name="status",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
+            policy=_DEFAULT_LIVE_COMMAND_POLICY,
             handler=lambda session_id: self._status_payload(request=request, session_id=session_id),
         )
 
@@ -244,7 +293,7 @@ class AgentNBApp:
             command_name="wait",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
+            policy=_DEFAULT_LIVE_COMMAND_POLICY,
             handler=lambda session_id: self._wait_payload(request=request, session_id=session_id),
         )
 
@@ -253,8 +302,7 @@ class AgentNBApp:
             command_name="vars",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            project_starting_state=True,
+            policy=_HELPER_COMMAND_POLICY,
             handler=lambda session_id: self._vars_payload(request=request, session_id=session_id),
         )
 
@@ -263,8 +311,7 @@ class AgentNBApp:
             command_name="inspect",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            project_starting_state=True,
+            policy=_HELPER_COMMAND_POLICY,
             handler=lambda session_id: self._inspect_payload(
                 request=request,
                 session_id=session_id,
@@ -276,8 +323,7 @@ class AgentNBApp:
             command_name="reload",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            project_starting_state=True,
+            policy=_HELPER_COMMAND_POLICY,
             handler=lambda session_id: self._reload_payload(request=request, session_id=session_id),
         )
 
@@ -290,7 +336,7 @@ class AgentNBApp:
             command_name="history",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
+            policy=_DEFAULT_LIVE_COMMAND_POLICY,
             handler=lambda session_id: self._history_payload(
                 request=request,
                 session_id=session_id,
@@ -302,7 +348,7 @@ class AgentNBApp:
             command_name="interrupt",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
+            policy=_DEFAULT_LIVE_COMMAND_POLICY,
             handler=lambda session_id: self._interrupt_payload(
                 request=request, session_id=session_id
             ),
@@ -313,7 +359,7 @@ class AgentNBApp:
             command_name="reset",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
+            policy=_DEFAULT_LIVE_COMMAND_POLICY,
             handler=lambda session_id: self._reset_payload(request=request, session_id=session_id),
         )
 
@@ -322,7 +368,7 @@ class AgentNBApp:
             command_name="stop",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=True,
+            policy=_DEFAULT_LIVE_COMMAND_POLICY,
             handler=lambda session_id: self._stop_payload(request=request, session_id=session_id),
         )
 
@@ -331,7 +377,7 @@ class AgentNBApp:
             command_name="doctor",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=False,
+            policy=_NONLIVE_COMMAND_POLICY,
             handler=lambda session_id: self._doctor_payload(request=request, session_id=session_id),
         )
 
@@ -340,7 +386,7 @@ class AgentNBApp:
             command_name="sessions-list",
             project_root=request.project_root,
             requested_session_id=None,
-            require_live_session=False,
+            policy=_NONLIVE_COMMAND_POLICY,
             handler=lambda _: _sessions_list_payload(
                 self.runtime.list_sessions(project_root=request.project_root)
             ),
@@ -351,7 +397,7 @@ class AgentNBApp:
             command_name="sessions-delete",
             project_root=request.project_root,
             requested_session_id=request.session_name,
-            require_live_session=False,
+            policy=_NONLIVE_COMMAND_POLICY,
             handler=lambda _: self.runtime.delete_session(
                 project_root=request.project_root,
                 session_id=request.session_name,
@@ -363,7 +409,7 @@ class AgentNBApp:
             command_name="runs-list",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            require_live_session=False,
+            policy=_NONLIVE_COMMAND_POLICY,
             handler=lambda _: self._runs_list_payload(request=request),
         )
 
@@ -372,7 +418,7 @@ class AgentNBApp:
             command_name="runs-show",
             project_root=request.project_root,
             requested_session_id=None,
-            require_live_session=False,
+            policy=_NONLIVE_COMMAND_POLICY,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
                 run_reference=request.run_reference,
@@ -387,7 +433,7 @@ class AgentNBApp:
             command_name="runs-wait",
             project_root=request.project_root,
             requested_session_id=None,
-            require_live_session=False,
+            policy=_NONLIVE_COMMAND_POLICY,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
                 run_reference=request.run_reference,
@@ -407,7 +453,7 @@ class AgentNBApp:
             command_name="runs-follow",
             project_root=request.project_root,
             requested_session_id=None,
-            require_live_session=False,
+            policy=_NONLIVE_COMMAND_POLICY,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
                 run_reference=request.run_reference,
@@ -424,7 +470,7 @@ class AgentNBApp:
             command_name="runs-cancel",
             project_root=request.project_root,
             requested_session_id=None,
-            require_live_session=False,
+            policy=_NONLIVE_COMMAND_POLICY,
             handler=lambda _: self.executions.cancel_run(
                 project_root=request.project_root,
                 execution_id=self.run_selectors.resolve_execution_id(
@@ -502,32 +548,42 @@ class AgentNBApp:
 
     def _status_payload(self, *, request: StatusRequest, session_id: str) -> StatusPayload:
         if request.wait_for == "idle":
-            status = self.runtime.wait_for_idle(
+            wait_result = self.runtime.wait_until_idle(
                 project_root=request.project_root,
                 session_id=session_id,
                 timeout_s=request.timeout_s,
             )
             payload = _kernel_status_payload(
-                status,
-                runtime_state="ready",
+                wait_result.status,
+                runtime_state=wait_result.runtime_state,
                 session_exists=True,
             )
-            payload["waited"] = True
-            payload["waited_for"] = "idle"
+            payload["waited"] = wait_result.waited
+            payload["waited_for"] = wait_result.waited_for or "idle"
+            waited_ms = getattr(wait_result, "waited_ms", None)
+            payload["waited_ms"] = waited_ms if isinstance(waited_ms, int) else 0
+            initial_runtime_state = getattr(wait_result, "initial_runtime_state", None)
+            if isinstance(initial_runtime_state, str):
+                payload["initial_runtime_state"] = initial_runtime_state
             return payload
         if request.wait_for == "ready":
-            status = self.runtime.wait_for_ready(
+            wait_result = self.runtime.wait_until_ready(
                 project_root=request.project_root,
                 session_id=session_id,
                 timeout_s=request.timeout_s,
             )
             payload = _kernel_status_payload(
-                status,
-                runtime_state=_runtime_state_from_status(status),
+                wait_result.status,
+                runtime_state=wait_result.runtime_state,
                 session_exists=True,
             )
-            payload["waited"] = True
-            payload["waited_for"] = "ready"
+            payload["waited"] = wait_result.waited
+            payload["waited_for"] = wait_result.waited_for or "ready"
+            waited_ms = getattr(wait_result, "waited_ms", None)
+            payload["waited_ms"] = waited_ms if isinstance(waited_ms, int) else 0
+            initial_runtime_state = getattr(wait_result, "initial_runtime_state", None)
+            if isinstance(initial_runtime_state, str):
+                payload["initial_runtime_state"] = initial_runtime_state
             return payload
         return _status_payload_from_runtime_state(
             self.runtime.runtime_state(
@@ -550,10 +606,20 @@ class AgentNBApp:
         payload["waited"] = wait_result.waited
         if wait_result.waited_for is not None:
             payload["waited_for"] = wait_result.waited_for
+        waited_ms = getattr(wait_result, "waited_ms", None)
+        payload["waited_ms"] = waited_ms if isinstance(waited_ms, int) else 0
+        initial_runtime_state = getattr(wait_result, "initial_runtime_state", None)
+        if isinstance(initial_runtime_state, str):
+            payload["initial_runtime_state"] = initial_runtime_state
         return payload
 
     def _vars_payload(self, *, request: VarsRequest, session_id: str) -> VarsPayload:
-        values = self.ops.list_vars(project_root=request.project_root, session_id=session_id)
+        helper_result = self.ops.list_vars_result(
+            project_root=request.project_root,
+            session_id=session_id,
+            execution_policy=_HELPER_EXECUTION_POLICY,
+        )
+        values = helper_result.payload
         if request.match_text:
             match_lower = request.match_text.lower()
             values = [item for item in values if match_lower in str(item["name"]).lower()]
@@ -563,25 +629,39 @@ class AgentNBApp:
             display_values: list[VarDisplayEntry] = [
                 {"name": item["name"], "repr": item["repr"]} for item in values
             ]
-            return {"vars": display_values}
-        return {"vars": cast(list[VarDisplayEntry], values)}
+            payload = cast(VarsPayload, {"vars": display_values})
+            payload.update(helper_result.access_metadata.merge_data())
+            return payload
+        payload = cast(VarsPayload, {"vars": cast(list[VarDisplayEntry], values)})
+        payload.update(helper_result.access_metadata.merge_data())
+        return payload
 
     def _inspect_payload(
         self, *, request: InspectRequest, session_id: str
     ) -> InspectResponsePayload:
-        payload = self.ops.inspect_var(
+        helper_result = self.ops.inspect_var_result(
             project_root=request.project_root,
             session_id=session_id,
             name=request.name,
+            execution_policy=_HELPER_EXECUTION_POLICY,
         )
-        return {"inspect": compact_inspect_payload(payload)}
+        payload = cast(
+            InspectResponsePayload,
+            {"inspect": compact_inspect_payload(helper_result.payload)},
+        )
+        payload.update(helper_result.access_metadata.merge_data())
+        return payload
 
     def _reload_payload(self, *, request: ReloadRequest, session_id: str) -> ReloadReport:
-        return self.ops.reload_module(
+        helper_result = self.ops.reload_module_result(
             project_root=request.project_root,
             session_id=session_id,
             module_name=request.module_name,
+            execution_policy=_HELPER_EXECUTION_POLICY,
         )
+        payload = dict(helper_result.payload)
+        payload.update(helper_result.access_metadata.merge_data())
+        return cast(ReloadReport, payload)
 
     def _history_payload(self, *, request: HistoryRequest, session_id: str) -> HistoryPayload:
         selection = self.runtime.select_history(
@@ -736,6 +816,14 @@ class AgentNBApp:
                     error_code="INVALID_INPUT",
                 )
             ),
+            suggestion_actions=self.advisor.suggestion_actions(
+                AdviceContext(
+                    command_name=command_name,
+                    response_status="error",
+                    data={},
+                    error_code="INVALID_INPUT",
+                )
+            ),
         )
 
     def _handle_command(
@@ -744,9 +832,8 @@ class AgentNBApp:
         command_name: str,
         project_root: Path,
         requested_session_id: str | None,
-        require_live_session: bool,
+        policy: CommandRuntimePolicy,
         handler: Callable[[str], Mapping[str, object]],
-        project_starting_state: bool = False,
         response_session_id_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
     ) -> CommandResponse:
         response_session_id = requested_session_id or DEFAULT_SESSION_ID
@@ -755,11 +842,11 @@ class AgentNBApp:
             resolved_session_id = self.runtime.resolve_session_id(
                 project_root=project_root,
                 requested_session_id=requested_session_id,
-                require_live_session=require_live_session,
+                policy=policy.session_resolution,
             )
             response_session_id = resolved_session_id
             switched_session: str | None = None
-            if _should_remember_session_preference(command_name):
+            if policy.remember_session_preference:
                 previous = _current_session_preference(self.runtime, project_root=project_root)
                 self.runtime.remember_current_session(
                     project_root=project_root,
@@ -767,7 +854,7 @@ class AgentNBApp:
                 )
                 if previous is not None and previous != resolved_session_id:
                     switched_session = resolved_session_id
-            if project_starting_state:
+            if policy.starting_session_behavior == "reject":
                 state = self.runtime.runtime_state(
                     project_root=project_root,
                     session_id=resolved_session_id,
@@ -801,6 +888,17 @@ class AgentNBApp:
                                 session_id=response_session_id,
                             )
                         ),
+                        suggestion_actions=self.advisor.suggestion_actions(
+                            AdviceContext(
+                                command_name=command_name,
+                                response_status="error",
+                                data=error.data,
+                                error_code=error.code,
+                                error_name=error.ename,
+                                error_value=error.evalue,
+                                session_id=response_session_id,
+                            )
+                        ),
                     )
             data = handler(resolved_session_id)
             if switched_session is not None:
@@ -821,6 +919,14 @@ class AgentNBApp:
                         session_id=resolved_session_id,
                     )
                 ),
+                suggestion_actions=self.advisor.suggestion_actions(
+                    AdviceContext(
+                        command_name=command_name,
+                        response_status="ok",
+                        data=data,
+                        session_id=resolved_session_id,
+                    )
+                ),
             )
         except AgentNBException as exc:
             return error_response(
@@ -834,6 +940,17 @@ class AgentNBApp:
                 traceback=compact_traceback(exc.traceback),
                 data=exc.data,
                 suggestions=self.advisor.suggestions(
+                    AdviceContext(
+                        command_name=command_name,
+                        response_status="error",
+                        data=exc.data,
+                        error_code=exc.code,
+                        error_name=exc.ename,
+                        error_value=exc.evalue,
+                        session_id=response_session_id,
+                    )
+                ),
+                suggestion_actions=self.advisor.suggestion_actions(
                     AdviceContext(
                         command_name=command_name,
                         response_status="error",
@@ -865,6 +982,17 @@ class AgentNBApp:
                         session_id=response_session_id,
                     )
                 ),
+                suggestion_actions=self.advisor.suggestion_actions(
+                    AdviceContext(
+                        command_name=command_name,
+                        response_status="error",
+                        data={},
+                        error_code="INTERNAL_ERROR",
+                        error_name=type(exc).__name__,
+                        error_value=str(exc),
+                        session_id=response_session_id,
+                    )
+                ),
             )
 
 
@@ -885,28 +1013,26 @@ def _current_session_preference(runtime: KernelRuntime, *, project_root: Path) -
     return None
 
 
-def _should_remember_session_preference(command_name: str) -> bool:
-    return command_name in {
-        "start",
-        "exec",
-        "status",
-        "wait",
-        "vars",
-        "inspect",
-        "reload",
-        "history",
-        "interrupt",
-        "reset",
-        "stop",
-    }
-
-
 def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:
     if selector == "result":
+        preview = payload.get("result_preview")
+        result = payload.get("result")
+        if isinstance(preview, dict) and _prefer_preview_text(preview, result):
+            return preview_text(cast(InspectPreview, preview))
         result = payload.get("result")
         return "" if result is None else str(result)
     value = payload.get(selector)
     return "" if value is None else str(value)
+
+
+def _prefer_preview_text(preview: object, result: object) -> bool:
+    if isinstance(preview, dict):
+        preview_map = cast(dict[str, object], preview)
+        if preview_map.get("kind") == "dataframe-like":
+            return True
+    if not isinstance(result, str):
+        return True
+    return "\n" in result or len(result) > 120
 
 
 def _status_payload_from_runtime_state(state: RuntimeState) -> StatusPayload:
@@ -961,7 +1087,25 @@ def _sessions_list_payload(sessions: list[SessionSummary]) -> SessionsListPayloa
 
 
 def _public_run_payload(run: Mapping[str, object]) -> RunSnapshot:
-    return cast(
-        RunSnapshot,
-        {key: value for key, value in run.items() if key != "outputs"},
-    )
+    payload = {key: value for key, value in run.items() if key != "outputs"}
+    for key in ("traceback", "recorded_traceback"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            payload[key] = strip_ansi_lines(cast(list[str], value))
+    events = payload.get("events")
+    if isinstance(events, list):
+        sanitized_events: list[dict[str, object]] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            sanitized_event = dict(event)
+            metadata = sanitized_event.get("metadata")
+            if isinstance(metadata, dict):
+                sanitized_metadata = dict(metadata)
+                traceback = sanitized_metadata.get("traceback")
+                if isinstance(traceback, list):
+                    sanitized_metadata["traceback"] = strip_ansi_lines(cast(list[str], traceback))
+                sanitized_event["metadata"] = sanitized_metadata
+            sanitized_events.append(sanitized_event)
+        payload["events"] = sanitized_events
+    return cast(RunSnapshot, payload)

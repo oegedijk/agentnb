@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink
+from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink, KernelStatus
 from agentnb.errors import (
     AgentNBException,
     KernelNotReadyError,
@@ -18,7 +18,7 @@ from agentnb.errors import (
 from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.kernel.backend import BackendCapabilities
 from agentnb.runs import LocalRunManager, RunSpec
-from agentnb.runtime import KernelRuntime
+from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
 
 
 def _runtime(*, supports_interrupt: bool = True) -> KernelRuntime:
@@ -390,6 +390,119 @@ def test_local_run_manager_wait_for_run_returns_completed_record(project_dir: Pa
 
     assert run["execution_id"] == "run-1"
     assert run["status"] == "ok"
+
+
+def test_local_run_manager_helper_access_passes_through_runtime_wait(project_dir: Path) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="starting",
+        session_id="default",
+        kernel_status=KernelStatus(alive=False),
+        has_connection_file=True,
+    )
+    runtime.wait_for_usable.return_value = KernelWaitResult(
+        status=KernelStatus(alive=True, pid=123, busy=False),
+        waited=True,
+        waited_for="ready",
+        runtime_state="ready",
+        waited_ms=20,
+        initial_runtime_state="starting",
+    )
+
+    access = LocalRunManager(runtime).wait_for_helper_session_access(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )
+
+    assert access.waited is True
+    assert access.waited_for == "ready"
+    assert access.waited_ms == 20
+    assert access.initial_runtime_state == "starting"
+    assert access.blocking_execution_id is None
+    runtime.wait_for_usable.assert_called_once()
+    kwargs = runtime.wait_for_usable.call_args.kwargs
+    assert kwargs["project_root"] == project_dir
+    assert kwargs["session_id"] == "default"
+    assert kwargs["poll_interval_s"] == 0.0
+    assert 0.0 <= kwargs["timeout_s"] <= 1.0
+
+
+def test_local_run_manager_helper_access_waits_for_active_run(project_dir: Path, mocker) -> None:
+    mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    runtime = Mock(spec=KernelRuntime)
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="ready",
+        session_id="default",
+        kernel_status=KernelStatus(alive=True, pid=321, busy=False),
+    )
+    runtime.wait_for_usable.return_value = KernelWaitResult(
+        status=KernelStatus(alive=True, pid=321, busy=False),
+        waited=False,
+        runtime_state="ready",
+        waited_ms=0,
+        initial_runtime_state="ready",
+    )
+    store = ExecutionStore(project_dir)
+    store.append(_active_record())
+
+    def sleep_stub(_: float) -> None:
+        store.append(
+            ExecutionRecord(
+                execution_id="run-1",
+                ts="2026-03-10T00:00:01+00:00",
+                session_id="default",
+                command_type="exec",
+                status="ok",
+                duration_ms=10,
+                worker_pid=123,
+                result="2",
+            )
+        )
+
+    mocker.patch("agentnb.runs.local_manager.time.sleep", side_effect=sleep_stub)
+
+    access = LocalRunManager(runtime).wait_for_helper_session_access(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=1.0,
+        poll_interval_s=0.0,
+    )
+
+    assert access.waited is True
+    assert access.waited_for == "idle"
+    assert access.waited_ms >= 0
+    assert access.initial_runtime_state == "busy"
+    assert access.blocking_execution_id == "run-1"
+    runtime.wait_for_usable.assert_called_once()
+
+
+def test_local_run_manager_helper_access_times_out_behind_active_run(
+    project_dir: Path,
+    mocker,
+) -> None:
+    mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    runtime = Mock(spec=KernelRuntime)
+    runtime.runtime_state.return_value = RuntimeState(
+        kind="ready",
+        session_id="default",
+        kernel_status=KernelStatus(alive=True, pid=321, busy=False),
+    )
+    ExecutionStore(project_dir).append(_active_record())
+
+    with pytest.raises(SessionBusyError) as exc_info:
+        LocalRunManager(runtime).wait_for_helper_session_access(
+            project_root=project_dir,
+            session_id="default",
+            timeout_s=0.0,
+            poll_interval_s=0.0,
+        )
+
+    assert exc_info.value.data["wait_behavior"] == "after_wait"
+    assert exc_info.value.data["active_execution_id"] == "run-1"
+    assert exc_info.value.data["lock_pid"] == 123
+    runtime.wait_for_usable.assert_not_called()
 
 
 def test_local_run_manager_wait_for_run_times_out(project_dir: Path, mocker) -> None:

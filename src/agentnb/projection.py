@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from .compact import compact_run_entry, compact_traceback
 from .contracts import CommandResponse
-from .payloads import RunSnapshot
+from .payloads import InspectPreview, RunSnapshot
 
 ProjectionProfile = str
 
@@ -32,6 +32,8 @@ class ResponseProjector:
             payload["data"] = data
         if response.status == "error" and response.error is not None:
             payload["error"] = self._project_agent_error(response)
+        if response.suggestion_actions:
+            payload["suggestion_actions"] = list(response.suggestion_actions)
         return payload
 
     def _project_agent_data(
@@ -52,6 +54,8 @@ class ResponseProjector:
                 "started_new",
                 "waited",
                 "waited_for",
+                "waited_ms",
+                "initial_runtime_state",
             )
         if command_name in {"stop", "interrupt"}:
             return dict(data)
@@ -75,6 +79,9 @@ class ResponseProjector:
                 value = data.get(key)
                 if isinstance(value, str) and value:
                     compacted[key] = value
+            result_preview = data.get("result_preview")
+            if isinstance(result_preview, dict):
+                compacted["result_preview"] = dict(result_preview)
             result = compacted.get("result")
             if isinstance(result, str):
                 parsed = _try_parse_result_json(result)
@@ -99,8 +106,11 @@ class ResponseProjector:
                 run_snapshot = cast(RunSnapshot, run)
                 compacted = compact_run_entry(run_snapshot)
                 compacted["status"] = run_snapshot.get("status")
+                result_preview = run_snapshot.get("result_preview")
+                if isinstance(result_preview, dict):
+                    compacted["result_preview"] = cast(InspectPreview, dict(result_preview))
                 result = run_snapshot.get("result")
-                if isinstance(result, str):
+                if "result_preview" not in compacted and isinstance(result, str):
                     compacted["result_preview"] = result
                 return {"run": compacted}
             return {}

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
+from ..contracts import HelperAccessMetadata
 from ..payloads import CancelRunResult, RunSnapshot
 from .models import RunObserver, RunSpec
 from .store import ManagedExecution
@@ -49,5 +50,14 @@ class RunManager(Protocol):
         timeout_s: float = 10.0,
         poll_interval_s: float = 0.1,
     ) -> CancelRunResult: ...
+
+    def wait_for_helper_session_access(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        timeout_s: float = 10.0,
+        poll_interval_s: float = 0.1,
+    ) -> HelperAccessMetadata: ...
 
     def complete_background_run(self, *, project_root: Path, execution_id: str) -> None: ...

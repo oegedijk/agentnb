@@ -14,9 +14,13 @@ The main optimization target is agent token efficiency:
 - how rarely it must call `--help`, `sessions list`, `runs list`, or `history` just to decide the next command
 - how little output it must parse to recover the one fact needed for the next step
 
-Human ergonomics matter too, but they follow this same direction: fewer steps, clearer defaults, quieter output, and better recovery guidance.
+The primary usability target is coding agents; human ergonomics matter insofar as they reinforce the same low-friction path.
+
+Human ergonomics still matter, but they follow this same direction: fewer steps, clearer defaults, quieter output, and better recovery guidance.
 
 ## Design Rules
+
+Deterministic targeting and machine-readable recovery take priority over permissive convenience behavior.
 
 1. Optimize the core interactive loop before adding reproducibility, export, or extensibility features.
 2. Keep full `--json` as the exact machine contract, but do not treat it as the default working mode.
@@ -133,6 +137,89 @@ These were plausible smoke findings at the time they were recorded, but represen
 
 - Partial file rerun remains valuable, but it is new file-execution surface area rather than consistency polish. Keep it with the broader file execution work already planned in v0.4.
 
+## v0.3.5 - Agent Correctness And Machine-Contract Frictions (shipped)
+
+v0.3.5 closed the highest-friction agent issues around helper reads, session ambiguity, and machine-readable recovery.
+
+### Shipped
+
+- Read-only helpers now auto-start unambiguous sessions, wait behind same-session work, and report `started_new_session`, `waited`, `waited_for`, `waited_ms`, `initial_runtime_state`, and `blocking_execution_id`.
+- Omitted-session `exec` and implicit top-level exec now fail with hard `AMBIGUOUS_SESSION` errors when multiple live sessions exist.
+- Compact `--agent` responses now preserve structured `suggestion_actions` for ambiguity and recovery flows.
+- Bare `sessions` now behaves like `sessions list`, including `--project` and `--json`, and the docs/examples now match.
+- Helper access metadata now lives in a typed contract and flows through introspection, ops, app shaping, and run-control boundaries instead of ad hoc payload mutation.
+
+### Remaining
+
+- Large-value exec output still leans on repr strings; bounded structured exec summaries remain future work.
+- JSON cleanup beyond structured suggestion actions, including traceback hygiene, remains future work.
+- Wait-state visibility for `status --wait-idle` can still get clearer in human output.
+- Missing-dependency recovery inside fresh pip-less interpreters remains future work.
+
+## v0.3.6 - Command Surface Simplification And Footgun Removal
+
+v0.3.6 should remove the remaining agent-confusing behaviors without expanding major feature surface. The focus is a smaller public grammar, fewer hidden state changes, and clearer canonical command forms.
+
+### Planned Simplifications
+
+- Narrow current-session preference updates:
+  - only explicit `--session`, `start`, and successful `exec` mutate remembered current session
+  - implicitly resolved read/control commands no longer rewrite remembered session
+
+- Make `wait` the primary documented blocking readiness command:
+  - keep `status --wait` and `status --wait-idle` for compatibility in `0.3.x`
+  - demote those `status` wait modes in help and README so `wait` is the obvious primary path
+
+- Keep history selectors first-class and add `--successes`:
+  - `history @latest`, `@last-error`, and `@last-success` stay
+  - add `history --successes --latest` as the flag equivalent of `history @last-success`
+
+- Normalize equivalent history selector/flag combinations:
+  - accept redundant equivalent combinations and resolve them to the same query
+  - reject only contradictory combinations
+
+- Make `sessions list` the canonical documented form:
+  - change bare `sessions` back to help-only behavior for consistency with other groups
+  - keep `sessions list` as the one documented listing command
+
+- Document one canonical CLI grammar:
+  - `agentnb <command> [subcommand] [options]`
+  - keep root output flags globally placeable, but stop teaching command-local option shuffling as part of the public model
+
+- Reframe the Python import API:
+  - describe the import-level helpers as low-level wrappers around runtime operations
+  - do not present them as the primary ergonomic agent surface
+
+### API / Contract Notes
+
+- Read/control commands no longer rewrite remembered current session when they resolve implicitly.
+- `wait` is the primary blocking command, while `status --wait` and `status --wait-idle` remain compatibility surface.
+- `history @latest`, `@last-error`, and `@last-success` stay, and `--successes --latest` is the flag equivalent of `@last-success`.
+- Bare `sessions` returns to help-only behavior, and `sessions list` is the canonical form.
+
+### Acceptance Notes
+
+- Tests proving implicit read/control commands do not mutate current-session preference.
+- Tests for `history @last-success` parity with `history --successes --latest`.
+- Docs/help parity tests for `sessions`, `wait`, and canonical command shapes.
+
+### Implementation Seams
+
+- `StateRepository` + `KernelRuntime`:
+  - own current-session preference mutation policy and multi-session targeting rules that remain after `0.3.5`
+
+- `AgentNBApp`:
+  - own command-level blocking semantics and the demoted `status --wait*` documentation path
+
+- Selector resolvers and history query validation:
+  - own selector/flag equivalence, contradiction checks, and the `--successes` addition
+
+- `InvocationResolver` plus CLI help and docs:
+  - own canonical command grammar, root-flag placement guidance, and the return to help-only bare `sessions`
+
+- Docs/help parity tests:
+  - ensure README, `--help`, and agent skill examples stay aligned with the actual surface
+
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 
 ### Goals
@@ -146,20 +233,21 @@ These were plausible smoke findings at the time they were recorded, but represen
 - Better debugging:
   - traceback enrichment
   - frame and locals inspection commands
-  - optional profiling (`cProfile`) paths where useful
+
 - Safer, more compact inspection:
   - bounded previews for large values
   - structured previews for common containers (`list`, `dict`, `tuple`, dataframe-like objects)
   - side-effect-aware inspection paths that avoid arbitrary `repr(...)` when possible
+
 - Richer history metadata where it directly improves debugging:
   - execution mode
   - failure markers
   - replay and verify provenance once those features exist
   - optional tags if they add real value without bloating defaults
-- Recovery-oriented control-plane improvements:
-  - health checks and structured diagnostics
-  - improved cleanup for stale state
+
+- Selective recovery controls:
   - selective reset (`reset --keep df,weather`): current `reset` is all-or-nothing. The friction is in the rebuild cost after reset, which is exactly this milestone's theme. Design questions (keep by name? by type? by pattern?) should not be rushed.
+
 - File execution improvements:
   - partial file execution (`exec --lines 17-20 script.py`): run specific lines from a file without re-executing the whole script. The workaround (copy-paste lines as inline code) is functional but breaks the file-to-interactive workflow.
 
@@ -319,6 +407,8 @@ These were plausible smoke findings at the time they were recorded, but represen
   - keep session preferences, retention rules, and future sharable-bundle rules inside `StateRepository`
 
 ## Near-Term Priority Queue
+
+Command-surface simplification is part of near-term recovery efficiency because agents pay for ambiguity with extra probing and wrong-session risk.
 
 1. Recovery/debugging improvements that reduce session drops and extra probing
 2. Verification workflows

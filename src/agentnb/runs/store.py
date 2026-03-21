@@ -238,6 +238,13 @@ class ExecutionRecord:
 
     def to_execution_payload(self) -> RunSnapshot:
         payload = self.to_dict()
+        output = ExecutionOutput(
+            items=list(self.outputs),
+            execution_count=self.execution_count,
+        )
+        result_preview = output.result_preview()
+        if result_preview is not None:
+            payload["result_preview"] = result_preview
         error_data = payload.pop("error_data", None)
         if isinstance(error_data, dict):
             payload.update(error_data)

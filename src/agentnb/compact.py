@@ -12,6 +12,7 @@ from .payloads import (
     ExecPayload,
     HistoryEntryPayload,
     InspectPayload,
+    InspectPreview,
     JSONValue,
     MappingPreview,
     RunListEntryPayload,
@@ -37,7 +38,7 @@ _HISTORY_INPUT_LIMIT = 64
 def compact_traceback(lines: list[str] | None) -> list[str] | None:
     if not lines:
         return None
-    cleaned = [_ANSI_ESCAPE_RE.sub("", line) for line in lines if line]
+    cleaned = strip_ansi_lines(lines)
     if len(cleaned) <= _TRACEBACK_HEAD_LINES + _TRACEBACK_TAIL_LINES:
         return cleaned
     return [
@@ -45,6 +46,10 @@ def compact_traceback(lines: list[str] | None) -> list[str] | None:
         "...",
         *cleaned[-_TRACEBACK_TAIL_LINES:],
     ]
+
+
+def strip_ansi_lines(lines: list[str]) -> list[str]:
+    return [_ANSI_ESCAPE_RE.sub("", line) for line in lines if line]
 
 
 def compact_execution_payload(
@@ -97,6 +102,10 @@ def compact_execution_payload(
             if summary is not None:
                 compacted["result"] = summary
 
+    result_preview = payload.get("result_preview")
+    if isinstance(result_preview, dict):
+        compacted["result_preview"] = compact_preview(cast(InspectPreview, result_preview))
+
     ename = payload.get("ename")
     if isinstance(ename, str):
         compacted["ename"] = ename
@@ -123,13 +132,9 @@ def compact_inspect_payload(payload: InspectPayload) -> InspectPayload:
         compacted["type"] = type_name
     preview = payload.get("preview")
     if isinstance(preview, dict):
-        if preview.get("kind") == "dataframe-like":
-            compacted["preview"] = compact_dataframe_preview(cast(DataframePreview, preview))
-            return compacted
-        if preview.get("kind") in {"sequence-like", "mapping-like"}:
-            compacted["preview"] = compact_collection_preview(
-                cast(MappingPreview | SequencePreview, preview)
-            )
+        compacted_preview = compact_preview(cast(InspectPreview, preview))
+        if compacted_preview:
+            compacted["preview"] = compacted_preview
             return compacted
 
     repr_text = payload.get("repr")
@@ -143,6 +148,46 @@ def compact_inspect_payload(payload: InspectPayload) -> InspectPayload:
         compacted["members"] = [str(member) for member in members[:_MEMBER_LIMIT]]
 
     return compacted
+
+
+def compact_preview(preview: InspectPreview) -> InspectPreview:
+    if preview.get("kind") == "dataframe-like":
+        return compact_dataframe_preview(cast(DataframePreview, preview))
+    if preview.get("kind") in {"sequence-like", "mapping-like"}:
+        return compact_collection_preview(cast(MappingPreview | SequencePreview, preview))
+    return preview
+
+
+def preview_text(preview: InspectPreview) -> str:
+    kind = preview.get("kind")
+    if kind == "dataframe-like":
+        dataframe = cast(DataframePreview, preview)
+        parts = ["DataFrame"]
+        shape = dataframe.get("shape")
+        if isinstance(shape, list) and len(shape) == 2:
+            parts.append(f"shape=({shape[0]}, {shape[1]})")
+        columns = dataframe.get("columns")
+        if isinstance(columns, list) and columns:
+            parts.append(f"columns={', '.join(str(column) for column in columns[:5])}")
+        return " ".join(parts)
+    if kind == "mapping-like":
+        mapping = cast(MappingPreview, preview)
+        parts = [f"mapping len={mapping.get('length', 0)}"]
+        keys = mapping.get("keys")
+        if isinstance(keys, list) and keys:
+            parts.append(f"keys={', '.join(str(key) for key in keys[:5])}")
+        return " ".join(parts)
+    if kind == "sequence-like":
+        sequence = cast(SequencePreview, preview)
+        parts = [f"sequence len={sequence.get('length', 0)}"]
+        item_type = sequence.get("item_type")
+        if isinstance(item_type, str) and item_type:
+            parts.append(f"item_type={item_type}")
+        sample_keys = sequence.get("sample_keys")
+        if isinstance(sample_keys, list) and sample_keys:
+            parts.append(f"keys={', '.join(str(key) for key in sample_keys[:5])}")
+        return " ".join(parts)
+    return str(preview)
 
 
 def compact_dataframe_preview(preview: DataframePreview) -> DataframePreview:

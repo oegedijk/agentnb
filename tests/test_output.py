@@ -260,6 +260,28 @@ def test_render_human_wait_variants() -> None:
     )
 
 
+def test_render_human_status_wait_includes_wait_detail() -> None:
+    response = success_response(
+        command="status",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "alive": True,
+            "pid": 321,
+            "busy": False,
+            "waited": True,
+            "waited_for": "idle",
+            "waited_ms": 3900,
+            "initial_runtime_state": "busy",
+        },
+    )
+
+    assert (
+        render_human(response, options=RenderOptions())
+        == "Kernel is running (session: default, pid 321, waited 3.9s for idle from busy)."
+    )
+
+
 def test_render_human_exec_renders_stdout_stderr_and_result() -> None:
     response = success_response(
         command="exec",
@@ -347,6 +369,26 @@ def test_render_human_vars_and_empty_history() -> None:
 
     assert render_human(vars_response, options=RenderOptions()) == "value: 42 (int)"
     assert render_human(history_response, options=RenderOptions()) == "No history entries."
+
+
+def test_render_human_vars_appends_helper_access_note() -> None:
+    response = success_response(
+        command="vars",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "vars": [{"name": "value", "repr": "42", "type": "int"}],
+            "started_new_session": True,
+            "waited": True,
+            "waited_for": "idle",
+            "waited_ms": 25,
+            "initial_runtime_state": "busy",
+        },
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "value: 42 (int)\n(auto-started session; waited 25ms for idle from busy)"
+    )
 
 
 def test_render_human_inspect_generic_shape() -> None:

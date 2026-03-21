@@ -42,7 +42,15 @@ def test_response_projector_agent_compacts_wait_like_status() -> None:
         command="wait",
         project="/tmp/project",
         session_id="default",
-        data={"alive": True, "pid": 123, "busy": False, "waited": True, "waited_for": "idle"},
+        data={
+            "alive": True,
+            "pid": 123,
+            "busy": False,
+            "waited": True,
+            "waited_for": "idle",
+            "waited_ms": 25,
+            "initial_runtime_state": "busy",
+        },
     )
 
     projected = ResponseProjector().project(response, profile="agent")
@@ -57,6 +65,8 @@ def test_response_projector_agent_compacts_wait_like_status() -> None:
             "busy": False,
             "waited": True,
             "waited_for": "idle",
+            "waited_ms": 25,
+            "initial_runtime_state": "busy",
         },
     }
 
@@ -90,6 +100,35 @@ def test_response_projector_agent_compacts_error_shape() -> None:
             "traceback": ["Traceback...", "ZeroDivisionError: division by zero"],
         },
     }
+
+
+def test_response_projector_agent_keeps_suggestion_actions() -> None:
+    response = error_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        code="AMBIGUOUS_SESSION",
+        message="Multiple live sessions exist.",
+        suggestion_actions=[
+            {
+                "kind": "command",
+                "label": "List sessions",
+                "command": "agentnb",
+                "args": ["sessions", "list", "--json"],
+            }
+        ],
+    )
+
+    projected = ResponseProjector().project(response, profile="agent")
+
+    assert projected["suggestion_actions"] == [
+        {
+            "kind": "command",
+            "label": "List sessions",
+            "command": "agentnb",
+            "args": ["sessions", "list", "--json"],
+        }
+    ]
 
 
 def test_response_projector_agent_keeps_busy_metadata_for_exec_errors() -> None:
@@ -162,6 +201,44 @@ def test_response_projector_agent_compacts_exec_success_to_next_step_fields() ->
             "result_json": 42,
             "ensured_started": True,
             "started_new_session": False,
+        },
+    }
+
+
+def test_response_projector_agent_keeps_structured_exec_result_preview() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "status": "ok",
+            "execution_id": "run-1",
+            "duration_ms": 12,
+            "result": "large dataframe repr",
+            "result_preview": {
+                "kind": "dataframe-like",
+                "shape": [200, 1],
+                "columns": ["i"],
+            },
+        },
+    )
+
+    projected = ResponseProjector().project(response, profile="agent")
+
+    assert projected == {
+        "ok": True,
+        "command": "exec",
+        "session_id": "default",
+        "data": {
+            "status": "ok",
+            "execution_id": "run-1",
+            "duration_ms": 12,
+            "result": "large dataframe repr",
+            "result_preview": {
+                "kind": "dataframe-like",
+                "shape": [200, 1],
+                "columns": ["i"],
+            },
         },
     }
 

@@ -41,6 +41,8 @@ class KernelWaitResult:
     waited: bool
     waited_for: WaitedFor | None = None
     runtime_state: RuntimeStateKind | None = None
+    waited_ms: int = 0
+    initial_runtime_state: RuntimeStateKind | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -81,6 +83,13 @@ class RuntimeState:
             python=self.kernel_status.python,
             busy=self.kernel_status.busy,
         )
+
+
+@dataclass(slots=True, frozen=True)
+class SessionResolutionPolicy:
+    require_live_session: bool
+    prefer_current_session: bool = True
+    error_on_multiple_live_sessions: bool = False
 
 
 class KernelRuntime:
@@ -249,7 +258,7 @@ class KernelRuntime:
         project_root: Path,
         requested_session_id: str | None,
         *,
-        require_live_session: bool,
+        policy: SessionResolutionPolicy,
     ) -> str:
         if requested_session_id is not None:
             self._check_session_prefix_collision(
@@ -259,12 +268,20 @@ class KernelRuntime:
             return requested_session_id
 
         preferred_session_id = self.current_session_id(project_root=project_root)
-        if not require_live_session:
-            return preferred_session_id or DEFAULT_SESSION_ID
+        if not policy.require_live_session:
+            if policy.prefer_current_session and preferred_session_id is not None:
+                return preferred_session_id
+            return DEFAULT_SESSION_ID
 
         sessions = self.list_sessions(project_root=project_root, probe_backend=False)
         live_session_ids = [str(session["session_id"]) for session in sessions]
-        if preferred_session_id is not None:
+        if (
+            live_session_ids
+            and policy.error_on_multiple_live_sessions
+            and len(live_session_ids) > 1
+        ):
+            raise AmbiguousSessionError(list(live_session_ids))
+        if policy.prefer_current_session and preferred_session_id is not None:
             if not live_session_ids:
                 return preferred_session_id
             if preferred_session_id in live_session_ids:
@@ -315,16 +332,28 @@ class KernelRuntime:
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
     ) -> KernelStatus:
-        deadline = time.monotonic() + timeout_s
-        while True:
-            state = self.runtime_state(project_root=project_root, session_id=session_id)
-            if state.kind == "dead":
-                raise KernelDiedError()
-            if state.alive:
-                return state.to_kernel_status()
-            if time.monotonic() >= deadline:
-                raise KernelWaitTimedOutError(timeout_s, waiting_for="ready")
-            time.sleep(poll_interval_s)
+        return self.wait_until_ready(
+            project_root=project_root,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+        ).status
+
+    def wait_until_ready(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+    ) -> KernelWaitResult:
+        return self._wait_until(
+            project_root=project_root,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            waited_for="ready",
+        )
 
     def wait_for_idle(
         self,
@@ -334,17 +363,28 @@ class KernelRuntime:
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
     ) -> KernelStatus:
-        deadline = time.monotonic() + timeout_s
-        while True:
-            state = self.runtime_state(project_root=project_root, session_id=session_id)
-            if state.kind == "dead":
-                raise KernelDiedError()
-            status = state.to_kernel_status()
-            if status.alive and not status.busy:
-                return status
-            if time.monotonic() >= deadline:
-                raise KernelWaitTimedOutError(timeout_s, waiting_for="idle")
-            time.sleep(poll_interval_s)
+        return self.wait_until_idle(
+            project_root=project_root,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+        ).status
+
+    def wait_until_idle(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+    ) -> KernelWaitResult:
+        return self._wait_until(
+            project_root=project_root,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            waited_for="idle",
+        )
 
     def wait_for_usable(
         self,
@@ -360,29 +400,67 @@ class KernelRuntime:
             raise KernelDiedError()
         if state.alive:
             if not state.busy:
-                return KernelWaitResult(status=status, waited=False, runtime_state=state.kind)
-            return KernelWaitResult(
-                status=self.wait_for_idle(
-                    project_root=project_root,
-                    session_id=session_id,
-                    timeout_s=timeout_s,
-                    poll_interval_s=poll_interval_s,
-                ),
-                waited=True,
-                waited_for="idle",
-                runtime_state="ready",
-            )
-        return KernelWaitResult(
-            status=self.wait_for_ready(
+                return KernelWaitResult(
+                    status=status,
+                    waited=False,
+                    runtime_state=state.kind,
+                    waited_ms=0,
+                    initial_runtime_state=state.kind,
+                )
+            return self.wait_until_idle(
                 project_root=project_root,
                 session_id=session_id,
                 timeout_s=timeout_s,
                 poll_interval_s=poll_interval_s,
-            ),
-            waited=True,
-            waited_for="ready",
-            runtime_state="ready",
+            )
+        return self.wait_until_ready(
+            project_root=project_root,
+            session_id=session_id,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
         )
+
+    def _wait_until(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        timeout_s: float,
+        poll_interval_s: float,
+        waited_for: WaitedFor,
+    ) -> KernelWaitResult:
+        started = time.monotonic()
+        deadline = started + timeout_s
+        initial_runtime_state: RuntimeStateKind | None = None
+        initial_satisfied = False
+
+        while True:
+            state = self.runtime_state(project_root=project_root, session_id=session_id)
+            if initial_runtime_state is None:
+                initial_runtime_state = state.kind
+                initial_satisfied = self._wait_target_satisfied(state, waited_for=waited_for)
+            if state.kind == "dead":
+                raise KernelDiedError()
+            if self._wait_target_satisfied(state, waited_for=waited_for):
+                waited = not initial_satisfied
+                waited_ms = int((time.monotonic() - started) * 1000) if waited else 0
+                return KernelWaitResult(
+                    status=state.to_kernel_status(),
+                    waited=waited,
+                    waited_for=waited_for,
+                    runtime_state=state.kind,
+                    waited_ms=waited_ms,
+                    initial_runtime_state=initial_runtime_state,
+                )
+            if time.monotonic() >= deadline:
+                raise KernelWaitTimedOutError(timeout_s, waiting_for=waited_for)
+            time.sleep(poll_interval_s)
+
+    @staticmethod
+    def _wait_target_satisfied(state: RuntimeState, *, waited_for: WaitedFor) -> bool:
+        if waited_for == "ready":
+            return state.alive
+        return state.alive and not state.busy
 
     def execute(
         self,

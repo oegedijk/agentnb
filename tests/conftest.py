@@ -80,7 +80,7 @@ def patch_cli_runtime(runtime: KernelRuntime, monkeypatch: pytest.MonkeyPatch) -
     import agentnb.cli as cli
 
     executions = ExecutionService(runtime)
-    ops = NotebookOps(runtime)
+    ops = NotebookOps(runtime, executions=executions)
     monkeypatch.setattr(
         runtime,
         "ensure_started",

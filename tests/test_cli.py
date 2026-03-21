@@ -12,11 +12,20 @@ from click.testing import CliRunner
 from pytest_mock import MockerFixture
 
 from agentnb.cli import main
-from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink, KernelStatus
+from agentnb.contracts import (
+    ExecutionEvent,
+    ExecutionResult,
+    ExecutionSink,
+    HelperAccessMetadata,
+    KernelStatus,
+)
 from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
+from agentnb.execution_output import OutputItem
+from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
+from agentnb.runtime import KernelWaitResult
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
@@ -41,6 +50,7 @@ class CommandEnvelope(TypedDict):
     timestamp: str
     data: JSONDict
     suggestions: list[str]
+    suggestion_actions: list[JSONDict]
     error: ErrorEnvelope | None
 
 
@@ -111,6 +121,18 @@ def _managed_execution(
             traceback=traceback,
         ),
         started_new_session=started_new_session,
+    )
+
+
+def _helper_result(
+    payload: object,
+    *,
+    access_metadata: HelperAccessMetadata | None = None,
+) -> KernelHelperResult[object]:
+    return KernelHelperResult(
+        execution=ExecutionResult(status="ok"),
+        payload=payload,
+        access_metadata=access_metadata or HelperAccessMetadata(),
     )
 
 
@@ -550,6 +572,69 @@ def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
     ]
 
 
+def test_cli_exec_implicit_target_is_ambiguous_even_with_current_session_preference(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {"session_id": "default"},
+        {"session_id": "analysis"},
+    ]
+    cli.runtime.current_session_id = lambda **_: "analysis"  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1 + 1"])
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert _error(payload)["code"] == "AMBIGUOUS_SESSION"
+    assert payload["suggestion_actions"] == [
+        {
+            "kind": "command",
+            "label": "List sessions",
+            "command": "agentnb",
+            "args": ["sessions", "list", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Retry with --session",
+            "command": "agentnb",
+            "args": ["exec", "--session", "NAME", "--json"],
+        },
+    ]
+
+
+def test_cli_agent_exec_ambiguity_keeps_suggestion_actions(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {"session_id": "default"},
+        {"session_id": "analysis"},
+    ]
+
+    result = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--agent", "1 + 1"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["error"]["code"] == "AMBIGUOUS_SESSION"
+    assert payload["suggestion_actions"] == [
+        {
+            "kind": "command",
+            "label": "List sessions",
+            "command": "agentnb",
+            "args": ["sessions", "list", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Retry with --session",
+            "command": "agentnb",
+            "args": ["exec", "--session", "NAME", "--json"],
+        },
+    ]
+
+
 def test_cli_status_uses_only_live_session_when_implicit(
     cli_runner: CliRunner, project_dir: Path
 ) -> None:
@@ -590,9 +675,16 @@ def test_cli_status_wait_uses_runtime_wait_for_ready(
 
     def wait_stub(**kwargs: object) -> object:
         wait_calls.append(dict(kwargs))
-        return KernelStatus(alive=True, pid=321)
+        return KernelWaitResult(
+            status=KernelStatus(alive=True, pid=321),
+            waited=True,
+            waited_for="ready",
+            runtime_state="ready",
+            waited_ms=10,
+            initial_runtime_state="starting",
+        )
 
-    cli.runtime.wait_for_ready = wait_stub  # type: ignore[method-assign]
+    cli.runtime.wait_until_ready = wait_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -616,9 +708,16 @@ def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
 
     def wait_stub(**kwargs: object) -> object:
         wait_calls.append(dict(kwargs))
-        return KernelStatus(alive=True, pid=321, busy=False)
+        return KernelWaitResult(
+            status=KernelStatus(alive=True, pid=321, busy=False),
+            waited=True,
+            waited_for="idle",
+            runtime_state="ready",
+            waited_ms=10,
+            initial_runtime_state="busy",
+        )
 
-    cli.runtime.wait_for_idle = wait_stub  # type: ignore[method-assign]
+    cli.runtime.wait_until_idle = wait_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -630,6 +729,8 @@ def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
     assert payload["data"]["alive"] is True
     assert payload["data"]["waited"] is True
     assert payload["data"]["waited_for"] == "idle"
+    assert payload["data"]["waited_ms"] == 10
+    assert payload["data"]["initial_runtime_state"] == "busy"
     assert wait_calls[0]["timeout_s"] == 5.0
 
 
@@ -911,6 +1012,54 @@ def test_cli_exec_result_only_returns_selected_text(
     assert exec_res.output.strip() == "2"
 
 
+def test_cli_exec_result_only_prefers_preview_summary_for_large_values(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.execute_code = lambda **_: ManagedExecution(  # type: ignore[method-assign]
+        record=ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="ok",
+            duration_ms=5,
+            code="big",
+            outputs=[
+                OutputItem.result(
+                    text=(
+                        "     i text\n"
+                        "0    0    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+                        "\n[200 rows x 2 columns]"
+                    ),
+                    mime={
+                        "text/plain": (
+                            "     i text\n"
+                            "0    0    xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+                            "\n[200 rows x 2 columns]"
+                        ),
+                        "text/html": (
+                            '<table border="1" class="dataframe">'
+                            "<thead><tr><th></th><th>i</th><th>text</th></tr></thead>"
+                            "<tbody><tr><th>0</th><td>0</td><td>x</td></tr></tbody>"
+                            "</table>"
+                        ),
+                    },
+                )
+            ],
+        )
+    )
+
+    exec_res = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--result-only", "big"],
+    )
+
+    assert exec_res.exit_code == 0
+    assert exec_res.output.strip() == "DataFrame shape=(200, 2) columns=i, text"
+
+
 def test_cli_exec_passes_named_session(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
@@ -994,7 +1143,9 @@ def test_cli_exec_background_returns_run_id(cli_runner: CliRunner, project_dir: 
 def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [{"name": "value", "type": "int", "repr": "42"}]  # type: ignore[method-assign]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "value", "type": "int", "repr": "42"}]
+    )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
     assert vars_res.exit_code == 0
@@ -1004,16 +1155,44 @@ def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: 
     assert payload["data"]["vars"][0]["type"] == "int"
 
 
+def test_cli_vars_reports_helper_wait_metadata(cli_runner: CliRunner, project_dir: Path) -> None:
+    import agentnb.cli as cli
+
+    cli.ops.list_vars_result = lambda **_: KernelHelperResult(  # type: ignore[method-assign]
+        execution=ExecutionResult(status="ok"),
+        payload=[{"name": "value", "type": "int", "repr": "42"}],
+        access_metadata=HelperAccessMetadata(
+            started_new_session=True,
+            waited=True,
+            waited_for="idle",
+            waited_ms=30,
+            initial_runtime_state="busy",
+        ),
+    )
+
+    vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
+
+    assert vars_res.exit_code == 0
+    payload = _payload(vars_res.output)
+    assert payload["data"]["started_new_session"] is True
+    assert payload["data"]["waited"] is True
+    assert payload["data"]["waited_for"] == "idle"
+    assert payload["data"]["waited_ms"] == 30
+    assert payload["data"]["initial_runtime_state"] == "busy"
+
+
 def test_cli_vars_hides_routines_and_compacts_container_values(
     cli_runner: CliRunner,
     project_dir: Path,
 ) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [  # type: ignore[method-assign]
-        {"name": "posts", "type": "list", "repr": "list len=1 item_keys=id, title, body"},
-        {"name": "query", "type": "dict", "repr": "dict len=2 keys=postId, _limit"},
-    ]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [
+            {"name": "posts", "type": "list", "repr": "list len=1 item_keys=id, title, body"},
+            {"name": "query", "type": "dict", "repr": "dict len=2 keys=postId, _limit"},
+        ]
+    )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
     assert vars_res.exit_code == 0
@@ -1029,7 +1208,9 @@ def test_cli_vars_hides_routines_and_compacts_container_values(
 def test_cli_vars_no_types_hides_types(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [{"name": "value", "type": "int", "repr": "42"}]  # type: ignore[method-assign]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "value", "type": "int", "repr": "42"}]
+    )
 
     vars_res = cli_runner.invoke(
         main,
@@ -1046,11 +1227,13 @@ def test_cli_vars_match_and_recent_filter_namespace(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [  # type: ignore[method-assign]
-        {"name": "alpha_value", "type": "int", "repr": "1"},
-        {"name": "beta_value", "type": "int", "repr": "2"},
-        {"name": "gamma_value", "type": "int", "repr": "3"},
-    ]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [
+            {"name": "alpha_value", "type": "int", "repr": "1"},
+            {"name": "beta_value", "type": "int", "repr": "2"},
+            {"name": "gamma_value", "type": "int", "repr": "3"},
+        ]
+    )
 
     recent_res = cli_runner.invoke(
         main,
@@ -1370,6 +1553,21 @@ def test_cli_sessions_list_returns_runtime_entries(
     ]
 
 
+def test_cli_bare_sessions_shortcut_accepts_group_options(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [{"session_id": "default"}]  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(main, ["sessions", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["command"] == "sessions-list"
+    assert payload["data"]["sessions"] == [{"session_id": "default"}]
+
+
 def test_cli_sessions_list_empty_has_actionable_suggestions(
     cli_runner: CliRunner, project_dir: Path
 ) -> None:
@@ -1490,6 +1688,41 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
     assert payload["data"]["run"]["terminal_reason"] == "cancelled"
     assert payload["data"]["run"]["cancel_requested"] is True
     assert payload["data"]["run"]["recorded_ename"] == "KeyboardInterrupt"
+
+
+def test_cli_runs_show_json_strips_ansi_tracebacks(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "session_id": "default",
+        "status": "error",
+        "traceback": ["\u001b[31mTraceback...\u001b[0m", "ZeroDivisionError: boom"],
+        "recorded_traceback": ["\u001b[31mKeyboardInterrupt\u001b[0m"],
+        "events": [
+            {
+                "kind": "error",
+                "content": "boom",
+                "metadata": {
+                    "traceback": ["\u001b[31mTraceback...\u001b[0m", "ZeroDivisionError: boom"]
+                },
+            }
+        ],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["run"]["traceback"] == ["Traceback...", "ZeroDivisionError: boom"]
+    assert payload["data"]["run"]["recorded_traceback"] == ["KeyboardInterrupt"]
+    event_tb = payload["data"]["run"]["events"][0]["metadata"]["traceback"]
+    assert event_tb == ["Traceback...", "ZeroDivisionError: boom"]
 
 
 def test_cli_runs_show_accepts_latest_selector(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -1844,17 +2077,19 @@ def test_cli_reload_without_module_reloads_project_local_imports(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.ops.reload_module = lambda **_: {  # type: ignore[method-assign]
-        "mode": "project",
-        "requested_module": None,
-        "reloaded_modules": ["localmod"],
-        "failed_modules": [],
-        "skipped_modules": [],
-        "rebound_names": ["greet"],
-        "stale_names": [],
-        "excluded_module_count": 3,
-        "notes": [],
-    }
+    cli.ops.reload_module_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        {
+            "mode": "project",
+            "requested_module": None,
+            "reloaded_modules": ["localmod"],
+            "failed_modules": [],
+            "skipped_modules": [],
+            "rebound_names": ["greet"],
+            "stale_names": [],
+            "excluded_module_count": 3,
+            "notes": [],
+        }
+    )
 
     reload_res = cli_runner.invoke(main, ["reload", "--project", str(project_dir), "--json"])
     assert reload_res.exit_code == 0
@@ -2008,9 +2243,9 @@ def test_cli_doctor_fix_uses_target_project_root(
 def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [  # type: ignore[method-assign]
-        {"name": "frame", "type": "FakeFrame", "repr": "DataFrame shape=(10, 3) columns=a, b, c"}
-    ]
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "frame", "type": "FakeFrame", "repr": "DataFrame shape=(10, 3) columns=a, b, c"}]
+    )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
     payload = _payload(vars_res.output)
@@ -2020,23 +2255,25 @@ def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Pa
 def test_cli_sqlite_rows_get_structural_previews(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars = lambda **_: [  # type: ignore[method-assign]
-        {"name": "rows", "type": "list", "repr": "list len=2 item_keys=id, title"}
-    ]
-    cli.ops.inspect_var = lambda **_: {  # type: ignore[method-assign]
-        "name": "rows",
-        "type": "list",
-        "preview": {
-            "kind": "sequence-like",
-            "length": 2,
-            "sample_keys": ["id", "title"],
-            "sample": [{"id": 1, "title": "a"}, {"id": 2, "title": "b"}],
-            "item_type": "Row",
-        },
-        "members": [],
-        "doc": "",
-        "repr": "[...]",
-    }
+    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "rows", "type": "list", "repr": "list len=2 item_keys=id, title"}]
+    )
+    cli.ops.inspect_var_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        {
+            "name": "rows",
+            "type": "list",
+            "preview": {
+                "kind": "sequence-like",
+                "length": 2,
+                "sample_keys": ["id", "title"],
+                "sample": [{"id": 1, "title": "a"}, {"id": 2, "title": "b"}],
+                "item_type": "Row",
+            },
+            "members": [],
+            "doc": "",
+            "repr": "[...]",
+        }
+    )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir), "--json"])
     assert vars_res.exit_code == 0
@@ -2056,19 +2293,21 @@ def test_cli_sqlite_rows_get_structural_previews(cli_runner: CliRunner, project_
 def test_cli_inspect_compacts_dataframe_payload(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.inspect_var = lambda **_: {  # type: ignore[method-assign]
-        "name": "df",
-        "type": "DataFrameLike",
-        "preview": {
-            "kind": "dataframe-like",
-            "shape": [4, 2],
-            "columns": ["a", "b"],
-            "head": [{"a": 1, "b": 5}, {"a": 2, "b": 6}, {"a": 3, "b": 7}],
-        },
-        "members": [],
-        "doc": "",
-        "repr": "DataFrameLike(...)",
-    }
+    cli.ops.inspect_var_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        {
+            "name": "df",
+            "type": "DataFrameLike",
+            "preview": {
+                "kind": "dataframe-like",
+                "shape": [4, 2],
+                "columns": ["a", "b"],
+                "head": [{"a": 1, "b": 5}, {"a": 2, "b": 6}, {"a": 3, "b": 7}],
+            },
+            "members": [],
+            "doc": "",
+            "repr": "DataFrameLike(...)",
+        }
+    )
 
     inspect_res = cli_runner.invoke(
         main,
@@ -2085,24 +2324,26 @@ def test_cli_inspect_compacts_dataframe_payload(cli_runner: CliRunner, project_d
 def test_cli_inspect_compacts_sequence_payload(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.inspect_var = lambda **_: {  # type: ignore[method-assign]
-        "name": "posts",
-        "type": "list",
-        "preview": {
-            "kind": "sequence-like",
-            "length": 3,
-            "sample": [
-                {"id": 1, "title": "a", "body": "alpha"},
-                {"id": 2, "title": "b", "body": "beta"},
-                {"id": 3, "title": "c", "body": "gamma"},
-            ],
-            "item_type": "dict",
-            "sample_keys": ["id", "title", "body"],
-        },
-        "members": [],
-        "doc": "",
-        "repr": "[...]",
-    }
+    cli.ops.inspect_var_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+        {
+            "name": "posts",
+            "type": "list",
+            "preview": {
+                "kind": "sequence-like",
+                "length": 3,
+                "sample": [
+                    {"id": 1, "title": "a", "body": "alpha"},
+                    {"id": 2, "title": "b", "body": "beta"},
+                    {"id": 3, "title": "c", "body": "gamma"},
+                ],
+                "item_type": "dict",
+                "sample_keys": ["id", "title", "body"],
+            },
+            "members": [],
+            "doc": "",
+            "repr": "[...]",
+        }
+    )
 
     inspect_res = cli_runner.invoke(
         main,

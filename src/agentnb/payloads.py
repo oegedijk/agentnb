@@ -166,6 +166,7 @@ class ExecPayload(TypedDict, total=False):
     stdout: str
     stderr: str
     result: str
+    result_preview: InspectPreview
     ename: str
     evalue: str
     background: bool
@@ -189,6 +190,7 @@ class CompactExecPayloadInput(TypedDict, total=False):
     stdout: str
     stderr: str
     result: str | None
+    result_preview: InspectPreview
     ename: str | None
     evalue: str | None
     wait_behavior: str

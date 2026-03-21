@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
+from .contracts import SuggestionAction
+
 
 @dataclass(slots=True, frozen=True)
 class AdviceContext:
@@ -231,6 +233,10 @@ class AdvicePolicy:
                     "to inspect the persisted run snapshot."
                 )
             ]
+        return []
+
+    def suggestion_actions(self, context: AdviceContext) -> list[SuggestionAction]:
+        del context
         return []
 
 

@@ -3,11 +3,11 @@ from __future__ import annotations
 import pytest
 from pytest_mock import MockerFixture
 
-from agentnb.contracts import ExecutionResult
+from agentnb.contracts import ExecutionResult, KernelStatus
 from agentnb.errors import AgentNBException
 from agentnb.history import HistoryStore
-from agentnb.introspection import KernelIntrospection
-from agentnb.runtime import KernelRuntime
+from agentnb.introspection import HelperExecutionPolicy, KernelIntrospection
+from agentnb.runtime import KernelRuntime, KernelWaitResult
 
 
 def test_kernel_introspection_returns_payload_and_records_history(
@@ -72,3 +72,41 @@ def test_kernel_introspection_parse_failures_record_semantic_errors(
     assert entries[1].kind == "user_command"
     assert entries[1].status == "error"
     assert entries[1].error_type == expected_error_type
+
+
+def test_kernel_introspection_can_wait_for_helper_access_when_requested(
+    project_dir,
+    mocker: MockerFixture,
+) -> None:
+    runtime = KernelRuntime(backend=mocker.Mock())
+    wait_for_usable = mocker.patch.object(
+        runtime,
+        "wait_for_usable",
+        return_value=KernelWaitResult(
+            status=KernelStatus(alive=True, pid=123, busy=False),
+            waited=True,
+            waited_for="idle",
+            runtime_state="ready",
+            waited_ms=20,
+            initial_runtime_state="busy",
+        ),
+    )
+    execute = mocker.patch.object(
+        runtime,
+        "execute",
+        return_value=ExecutionResult(
+            status="ok",
+            stdout='{"name": "value", "type": "int", "repr": "1"}\n',
+            duration_ms=5,
+        ),
+    )
+
+    payload = KernelIntrospection(runtime).inspect_var(
+        project_root=project_dir,
+        name="value",
+        execution_policy=HelperExecutionPolicy(wait_for_usable=True),
+    )
+
+    assert payload["name"] == "value"
+    wait_for_usable.assert_called_once()
+    execute.assert_called_once()

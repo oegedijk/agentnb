@@ -17,6 +17,7 @@ from agentnb.errors import SessionBusyError
 from agentnb.execution import ExecutionRecord, ManagedExecution
 from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
+from agentnb.runtime import KernelWaitResult
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
@@ -590,9 +591,16 @@ def test_cli_status_wait_uses_runtime_wait_for_ready(
 
     def wait_stub(**kwargs: object) -> object:
         wait_calls.append(dict(kwargs))
-        return KernelStatus(alive=True, pid=321)
+        return KernelWaitResult(
+            status=KernelStatus(alive=True, pid=321),
+            waited=True,
+            waited_for="ready",
+            runtime_state="ready",
+            waited_ms=10,
+            initial_runtime_state="starting",
+        )
 
-    cli.runtime.wait_for_ready = wait_stub  # type: ignore[method-assign]
+    cli.runtime.wait_until_ready = wait_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -616,9 +624,16 @@ def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
 
     def wait_stub(**kwargs: object) -> object:
         wait_calls.append(dict(kwargs))
-        return KernelStatus(alive=True, pid=321, busy=False)
+        return KernelWaitResult(
+            status=KernelStatus(alive=True, pid=321, busy=False),
+            waited=True,
+            waited_for="idle",
+            runtime_state="ready",
+            waited_ms=10,
+            initial_runtime_state="busy",
+        )
 
-    cli.runtime.wait_for_idle = wait_stub  # type: ignore[method-assign]
+    cli.runtime.wait_until_idle = wait_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,

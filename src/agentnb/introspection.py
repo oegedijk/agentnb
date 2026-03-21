@@ -20,7 +20,7 @@ from .payloads import (
     VarEntry,
 )
 from .recording import CommandRecorder, CommandRecording
-from .runtime import KernelRuntime
+from .runtime import KernelRuntime, KernelWaitResult
 from .session import DEFAULT_SESSION_ID
 from .state import StateRepository
 
@@ -39,6 +39,12 @@ class KernelHelperRequest:
 class KernelHelperResult:
     execution: ExecutionResult
     payload: JSONValue
+    wait_result: KernelWaitResult | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class HelperExecutionPolicy:
+    wait_for_usable: bool = False
 
 
 class KernelIntrospection:
@@ -55,12 +61,14 @@ class KernelIntrospection:
         project_root: Path,
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
     ) -> list[VarEntry]:
         result = self._run_json_helper(
             project_root=project_root,
             session_id=session_id,
             timeout_s=timeout_s,
             helper=_list_vars_helper(),
+            execution_policy=execution_policy,
         )
         return _parse_var_entries(result.payload)
 
@@ -70,12 +78,14 @@ class KernelIntrospection:
         name: str,
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
     ) -> InspectPayload:
         result = self._run_json_helper(
             project_root=project_root,
             session_id=session_id,
             timeout_s=timeout_s,
             helper=_inspect_helper(name),
+            execution_policy=execution_policy,
         )
         return _parse_inspect_payload(result.payload)
 
@@ -85,12 +95,14 @@ class KernelIntrospection:
         module_name: str | None = None,
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
     ) -> ReloadReport:
         result = self._run_json_helper(
             project_root=project_root,
             session_id=session_id,
             timeout_s=timeout_s,
             helper=_reload_helper(project_root=project_root, module_name=module_name),
+            execution_policy=execution_policy,
         )
         return _parse_reload_report(result.payload)
 
@@ -101,11 +113,20 @@ class KernelIntrospection:
         session_id: str,
         timeout_s: float,
         helper: KernelHelperRequest,
+        execution_policy: HelperExecutionPolicy | None = None,
     ) -> KernelHelperResult:
         history = HistoryStore(project_root=project_root, session_id=session_id)
         recording = self._recording_for_helper(helper)
+        policy = execution_policy or HelperExecutionPolicy()
+        wait_result: KernelWaitResult | None = None
 
         try:
+            if policy.wait_for_usable:
+                wait_result = self.runtime.wait_for_usable(
+                    project_root=project_root,
+                    session_id=session_id,
+                    timeout_s=timeout_s,
+                )
             execution = self.runtime.execute(
                 project_root=project_root,
                 session_id=session_id,
@@ -156,7 +177,7 @@ class KernelIntrospection:
                 execution=execution,
             )
         )
-        return KernelHelperResult(execution=execution, payload=payload)
+        return KernelHelperResult(execution=execution, payload=payload, wait_result=wait_result)
 
     def _append_execution_error(
         self,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 
 if TYPE_CHECKING:
     from .execution_output import OutputItem
@@ -12,6 +12,13 @@ SCHEMA_VERSION = "1.0"
 
 ResponseStatus = Literal["ok", "error"]
 EventKind = Literal["stdout", "stderr", "result", "display", "error", "status"]
+
+
+class SuggestionAction(TypedDict, total=False):
+    kind: str
+    command: str
+    label: str
+    args: list[str]
 
 
 def utc_now_iso() -> str:
@@ -152,12 +159,13 @@ class CommandResponse:
     session_id: str
     data: dict[str, Any] = field(default_factory=dict)
     suggestions: list[str] = field(default_factory=list)
+    suggestion_actions: list[SuggestionAction] = field(default_factory=list)
     error: AgentNBError | None = None
     schema_version: str = SCHEMA_VERSION
     timestamp: str = field(default_factory=utc_now_iso)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema_version": self.schema_version,
             "status": self.status,
             "command": self.command,
@@ -168,6 +176,9 @@ class CommandResponse:
             "suggestions": self.suggestions,
             "error": self.error.to_dict() if self.error else None,
         }
+        if self.suggestion_actions:
+            payload["suggestion_actions"] = self.suggestion_actions
+        return payload
 
 
 def success_response(
@@ -177,6 +188,7 @@ def success_response(
     session_id: str,
     data: Mapping[str, object] | None = None,
     suggestions: list[str] | None = None,
+    suggestion_actions: list[SuggestionAction] | None = None,
 ) -> CommandResponse:
     return CommandResponse(
         status="ok",
@@ -185,6 +197,7 @@ def success_response(
         session_id=session_id,
         data=dict(data) if data is not None else {},
         suggestions=suggestions or [],
+        suggestion_actions=suggestion_actions or [],
     )
 
 
@@ -200,6 +213,7 @@ def error_response(
     traceback: list[str] | None = None,
     data: Mapping[str, object] | None = None,
     suggestions: list[str] | None = None,
+    suggestion_actions: list[SuggestionAction] | None = None,
 ) -> CommandResponse:
     return CommandResponse(
         status="error",
@@ -208,6 +222,7 @@ def error_response(
         session_id=session_id,
         data=dict(data) if data is not None else {},
         suggestions=suggestions or [],
+        suggestion_actions=suggestion_actions or [],
         error=AgentNBError(
             code=code,
             message=message,

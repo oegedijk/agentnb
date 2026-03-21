@@ -20,7 +20,7 @@ from agentnb.errors import (
 )
 from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.history import HistoryStore
-from agentnb.runtime import KernelRuntime, RuntimeState
+from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState, SessionResolutionPolicy
 from agentnb.session import SessionInfo, SessionStore
 from tests.conftest import TestLocalIPythonBackend
 from tests.helpers import create_project_dir, reset_integration_kernel
@@ -303,7 +303,7 @@ def test_runtime_resolve_session_id_uses_only_live_session(project_dir: Path) ->
     resolved = runtime.resolve_session_id(
         project_root=project_dir,
         requested_session_id=None,
-        require_live_session=True,
+        policy=SessionResolutionPolicy(require_live_session=True),
     )
 
     assert resolved == "analysis"
@@ -337,7 +337,7 @@ def test_runtime_resolve_session_id_prefers_current_session_preference(project_d
     resolved = runtime.resolve_session_id(
         project_root=project_dir,
         requested_session_id=None,
-        require_live_session=True,
+        policy=SessionResolutionPolicy(require_live_session=True),
     )
 
     assert resolved == "analysis"
@@ -365,7 +365,7 @@ def test_runtime_resolve_session_id_does_not_probe_backend_status(project_dir: P
     resolved = runtime.resolve_session_id(
         project_root=project_dir,
         requested_session_id=None,
-        require_live_session=True,
+        policy=SessionResolutionPolicy(require_live_session=True),
     )
 
     assert resolved == "analysis"
@@ -402,7 +402,40 @@ def test_runtime_resolve_session_id_raises_when_multiple_live_sessions_exist(
         runtime.resolve_session_id(
             project_root=project_dir,
             requested_session_id=None,
-            require_live_session=True,
+            policy=SessionResolutionPolicy(require_live_session=True),
+        )
+
+
+def test_runtime_resolve_session_id_can_ignore_current_preference_on_ambiguity(
+    project_dir: Path,
+) -> None:
+    default_store = SessionStore(project_dir, session_id="default")
+    analysis_store = SessionStore(project_dir, session_id="analysis")
+    default_store.ensure_state_dir()
+    for store in (default_store, analysis_store):
+        store.save_session(
+            SessionInfo(
+                session_id=store.session_id,
+                pid=os.getpid(),
+                connection_file=str(store.connection_file),
+                python_executable="python",
+                project_root=str(project_dir),
+                started_at="2026-03-09T00:00:00+00:00",
+            )
+        )
+        store.connection_file.write_text("{}", encoding="utf-8")
+
+    runtime = KernelRuntime(backend=Mock())
+    runtime.remember_current_session(project_root=project_dir, session_id="analysis")
+
+    with pytest.raises(AmbiguousSessionError):
+        runtime.resolve_session_id(
+            project_root=project_dir,
+            requested_session_id=None,
+            policy=SessionResolutionPolicy(
+                require_live_session=True,
+                error_on_multiple_live_sessions=True,
+            ),
         )
 
 
@@ -415,7 +448,7 @@ def test_runtime_resolve_session_id_uses_current_session_preference_when_no_live
     resolved = runtime.resolve_session_id(
         project_root=project_dir,
         requested_session_id=None,
-        require_live_session=True,
+        policy=SessionResolutionPolicy(require_live_session=True),
     )
 
     assert resolved == "analysis"
@@ -430,7 +463,7 @@ def test_runtime_resolve_session_id_uses_current_session_preference_for_non_live
     resolved = runtime.resolve_session_id(
         project_root=project_dir,
         requested_session_id=None,
-        require_live_session=False,
+        policy=SessionResolutionPolicy(require_live_session=False),
     )
 
     assert resolved == "analysis"
@@ -704,6 +737,8 @@ def test_runtime_wait_for_usable_returns_immediately_when_idle(project_dir: Path
     assert result.status.busy is False
     assert result.waited is False
     assert result.waited_for is None
+    assert result.waited_ms == 0
+    assert result.initial_runtime_state == "ready"
 
 
 def test_runtime_wait_for_usable_waits_for_ready_when_not_alive(project_dir: Path, mocker) -> None:
@@ -717,10 +752,17 @@ def test_runtime_wait_for_usable_waits_for_ready_when_not_alive(project_dir: Pat
             kernel_status=KernelStatus(alive=False),
         ),
     )
-    wait_for_ready = mocker.patch.object(
+    wait_until_ready = mocker.patch.object(
         runtime,
-        "wait_for_ready",
-        return_value=KernelStatus(alive=True, pid=123, busy=False),
+        "wait_until_ready",
+        return_value=KernelWaitResult(
+            status=KernelStatus(alive=True, pid=123, busy=False),
+            waited=True,
+            waited_for="ready",
+            runtime_state="ready",
+            waited_ms=50,
+            initial_runtime_state="missing",
+        ),
     )
 
     result = runtime.wait_for_usable(
@@ -733,7 +775,9 @@ def test_runtime_wait_for_usable_waits_for_ready_when_not_alive(project_dir: Pat
     assert result.status.alive is True
     assert result.waited is True
     assert result.waited_for == "ready"
-    wait_for_ready.assert_called_once_with(
+    assert result.waited_ms == 50
+    assert result.initial_runtime_state == "missing"
+    wait_until_ready.assert_called_once_with(
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
@@ -753,10 +797,17 @@ def test_runtime_wait_for_usable_waits_for_idle_when_busy(project_dir: Path, moc
             has_command_lock=True,
         ),
     )
-    wait_for_idle = mocker.patch.object(
+    wait_until_idle = mocker.patch.object(
         runtime,
-        "wait_for_idle",
-        return_value=KernelStatus(alive=True, pid=123, busy=False),
+        "wait_until_idle",
+        return_value=KernelWaitResult(
+            status=KernelStatus(alive=True, pid=123, busy=False),
+            waited=True,
+            waited_for="idle",
+            runtime_state="ready",
+            waited_ms=25,
+            initial_runtime_state="busy",
+        ),
     )
 
     result = runtime.wait_for_usable(
@@ -770,7 +821,9 @@ def test_runtime_wait_for_usable_waits_for_idle_when_busy(project_dir: Path, moc
     assert result.waited is True
     assert result.waited_for == "idle"
     assert result.runtime_state == "ready"
-    wait_for_idle.assert_called_once_with(
+    assert result.waited_ms == 25
+    assert result.initial_runtime_state == "busy"
+    wait_until_idle.assert_called_once_with(
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,

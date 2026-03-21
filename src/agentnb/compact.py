@@ -12,6 +12,7 @@ from .payloads import (
     ExecPayload,
     HistoryEntryPayload,
     InspectPayload,
+    InspectPreview,
     JSONValue,
     MappingPreview,
     RunListEntryPayload,
@@ -97,6 +98,10 @@ def compact_execution_payload(
             if summary is not None:
                 compacted["result"] = summary
 
+    result_preview = payload.get("result_preview")
+    if isinstance(result_preview, dict):
+        compacted["result_preview"] = compact_preview(cast(InspectPreview, result_preview))
+
     ename = payload.get("ename")
     if isinstance(ename, str):
         compacted["ename"] = ename
@@ -123,13 +128,9 @@ def compact_inspect_payload(payload: InspectPayload) -> InspectPayload:
         compacted["type"] = type_name
     preview = payload.get("preview")
     if isinstance(preview, dict):
-        if preview.get("kind") == "dataframe-like":
-            compacted["preview"] = compact_dataframe_preview(cast(DataframePreview, preview))
-            return compacted
-        if preview.get("kind") in {"sequence-like", "mapping-like"}:
-            compacted["preview"] = compact_collection_preview(
-                cast(MappingPreview | SequencePreview, preview)
-            )
+        compacted_preview = compact_preview(cast(InspectPreview, preview))
+        if compacted_preview:
+            compacted["preview"] = compacted_preview
             return compacted
 
     repr_text = payload.get("repr")
@@ -143,6 +144,14 @@ def compact_inspect_payload(payload: InspectPayload) -> InspectPayload:
         compacted["members"] = [str(member) for member in members[:_MEMBER_LIMIT]]
 
     return compacted
+
+
+def compact_preview(preview: InspectPreview) -> InspectPreview:
+    if preview.get("kind") == "dataframe-like":
+        return compact_dataframe_preview(cast(DataframePreview, preview))
+    if preview.get("kind") in {"sequence-like", "mapping-like"}:
+        return compact_collection_preview(cast(MappingPreview | SequencePreview, preview))
+    return preview
 
 
 def compact_dataframe_preview(preview: DataframePreview) -> DataframePreview:

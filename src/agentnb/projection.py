@@ -75,6 +75,9 @@ class ResponseProjector:
                 value = data.get(key)
                 if isinstance(value, str) and value:
                     compacted[key] = value
+            result_preview = data.get("result_preview")
+            if isinstance(result_preview, dict):
+                compacted["result_preview"] = dict(result_preview)
             result = compacted.get("result")
             if isinstance(result, str):
                 parsed = _try_parse_result_json(result)

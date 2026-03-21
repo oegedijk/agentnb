@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import AgentNBException
-from .introspection import KernelIntrospection
+from .introspection import HelperExecutionPolicy, KernelIntrospection
 from .payloads import InspectPayload, ReloadReport, VarEntry
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID
@@ -38,11 +38,13 @@ class NotebookOps:
         project_root: Path,
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
     ) -> list[VarEntry]:
         return self.introspection.list_vars(
             project_root=project_root,
             session_id=session_id,
             timeout_s=timeout_s,
+            execution_policy=execution_policy,
         )
 
     def inspect_var(
@@ -51,12 +53,14 @@ class NotebookOps:
         name: str,
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
     ) -> InspectPayload:
         return self.introspection.inspect_var(
             project_root=project_root,
             name=name,
             session_id=session_id,
             timeout_s=timeout_s,
+            execution_policy=execution_policy,
         )
 
     def reload_module(
@@ -65,10 +69,12 @@ class NotebookOps:
         module_name: str | None = None,
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float = 10.0,
+        execution_policy: HelperExecutionPolicy | None = None,
     ) -> ReloadReport:
         return self.introspection.reload_module(
             project_root=project_root,
             module_name=module_name,
             session_id=session_id,
             timeout_s=timeout_s,
+            execution_policy=execution_policy,
         )

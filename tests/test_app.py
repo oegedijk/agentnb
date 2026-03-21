@@ -26,7 +26,7 @@ from agentnb.errors import AmbiguousSessionError
 from agentnb.execution import ExecutionRecord, ExecutionService, ManagedExecution
 from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.journal import JournalEntry
-from agentnb.runtime import KernelRuntime, RuntimeState
+from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState, SessionResolutionPolicy
 from agentnb.selectors import parse_history_reference, parse_run_reference
 from agentnb.state import CommandLockInfo
 
@@ -290,7 +290,14 @@ def test_app_exec_maps_ambiguous_session_errors_to_response(project_dir) -> None
 def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
-    runtime.wait_for_idle.return_value = KernelStatus(alive=True, pid=123, busy=False)
+    runtime.wait_until_idle.return_value = KernelWaitResult(
+        status=KernelStatus(alive=True, pid=123, busy=False),
+        waited=True,
+        waited_for="idle",
+        runtime_state="ready",
+        waited_ms=12,
+        initial_runtime_state="busy",
+    )
     app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
 
     response = app.status(
@@ -306,9 +313,9 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
     assert response.data["alive"] is True
     assert response.data["waited"] is True
     assert response.data["waited_for"] == "idle"
-    runtime.wait_for_idle.assert_called_once()
+    runtime.wait_until_idle.assert_called_once()
     _assert_called_with_subset(
-        runtime.wait_for_idle,
+        runtime.wait_until_idle,
         project_root=project_dir.resolve(),
         session_id="analysis",
         timeout_s=5.0,
@@ -802,7 +809,7 @@ def test_app_sessions_list_routes_through_handle_command(project_dir) -> None:
     runtime.resolve_session_id.assert_called_once_with(
         project_root=project_dir.resolve(),
         requested_session_id=None,
-        require_live_session=False,
+        policy=SessionResolutionPolicy(require_live_session=False),
     )
     runtime.list_sessions.assert_called_once_with(project_root=project_dir.resolve())
 
@@ -830,7 +837,7 @@ def test_app_sessions_delete_routes_named_session_through_handle_command(project
     runtime.resolve_session_id.assert_called_once_with(
         project_root=project_dir.resolve(),
         requested_session_id="analysis",
-        require_live_session=False,
+        policy=SessionResolutionPolicy(require_live_session=False),
     )
     runtime.delete_session.assert_called_once_with(
         project_root=project_dir.resolve(),

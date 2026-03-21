@@ -166,6 +166,44 @@ def test_response_projector_agent_compacts_exec_success_to_next_step_fields() ->
     }
 
 
+def test_response_projector_agent_keeps_structured_exec_result_preview() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "status": "ok",
+            "execution_id": "run-1",
+            "duration_ms": 12,
+            "result": "large dataframe repr",
+            "result_preview": {
+                "kind": "dataframe-like",
+                "shape": [200, 1],
+                "columns": ["i"],
+            },
+        },
+    )
+
+    projected = ResponseProjector().project(response, profile="agent")
+
+    assert projected == {
+        "ok": True,
+        "command": "exec",
+        "session_id": "default",
+        "data": {
+            "status": "ok",
+            "execution_id": "run-1",
+            "duration_ms": 12,
+            "result": "large dataframe repr",
+            "result_preview": {
+                "kind": "dataframe-like",
+                "shape": [200, 1],
+                "columns": ["i"],
+            },
+        },
+    }
+
+
 def test_response_projector_agent_compacts_runs_cancel_response() -> None:
     response = success_response(
         command="runs-cancel",

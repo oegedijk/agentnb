@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,7 +12,6 @@ from .compact import (
     compact_history_entry,
     compact_inspect_payload,
     compact_run_entry,
-    compact_traceback,
     full_history_entry,
     preview_text,
     strip_ansi_lines,
@@ -23,12 +23,13 @@ from .contracts import (
     error_response,
     success_response,
 )
-from .errors import AgentNBException
+from .errors import AgentNBException, KernelWaitTimedOutError
 from .execution import ExecutionService
 from .execution_invocation import ExecInvocationPolicy, OutputSelector
 from .introspection import HelperExecutionPolicy
 from .ops import NotebookOps
 from .payloads import (
+    BulkDeleteResult,
     CompactExecPayloadInput,
     DoctorPayload,
     ExecPayload,
@@ -50,9 +51,9 @@ from .payloads import (
 )
 from .runtime import (
     KernelRuntime,
+    KernelWaitResult,
     RuntimeState,
     RuntimeStateKind,
-    SessionResolutionPolicy,
 )
 from .selectors import (
     HistoryReference,
@@ -62,43 +63,11 @@ from .selectors import (
     RunSelectorResolver,
 )
 from .session import DEFAULT_SESSION_ID
+from .session_targeting import SessionTargetingPolicy
 from .state import CommandLockInfo
 
 StatusWaitFor = Literal["ready", "idle"]
-StartingSessionBehavior = Literal["allow", "reject"]
-
-
-@dataclass(slots=True, frozen=True)
-class CommandRuntimePolicy:
-    session_resolution: SessionResolutionPolicy
-    remember_session_preference: bool = False
-    starting_session_behavior: StartingSessionBehavior = "allow"
-
-
-_LIVE_SESSION_RESOLUTION = SessionResolutionPolicy(require_live_session=True)
-_STRICT_EXEC_SESSION_RESOLUTION = SessionResolutionPolicy(
-    require_live_session=True,
-    error_on_multiple_live_sessions=True,
-)
-_NONLIVE_SESSION_RESOLUTION = SessionResolutionPolicy(require_live_session=False)
-_DEFAULT_LIVE_COMMAND_POLICY = CommandRuntimePolicy(
-    session_resolution=_LIVE_SESSION_RESOLUTION,
-    remember_session_preference=True,
-)
-_STRICT_EXEC_COMMAND_POLICY = CommandRuntimePolicy(
-    session_resolution=_STRICT_EXEC_SESSION_RESOLUTION,
-    remember_session_preference=True,
-)
-_HELPER_COMMAND_POLICY = CommandRuntimePolicy(
-    session_resolution=_LIVE_SESSION_RESOLUTION,
-    remember_session_preference=True,
-    starting_session_behavior="reject",
-)
-_NONLIVE_COMMAND_POLICY = CommandRuntimePolicy(session_resolution=_NONLIVE_SESSION_RESOLUTION)
-_NONLIVE_REMEMBERING_COMMAND_POLICY = CommandRuntimePolicy(
-    session_resolution=_NONLIVE_SESSION_RESOLUTION,
-    remember_session_preference=True,
-)
+_ACTIVE_RUN_STATUSES = frozenset({"starting", "running"})
 _HELPER_EXECUTION_POLICY = HelperExecutionPolicy(
     ensure_started=True,
     wait_for_usable=True,
@@ -164,6 +133,7 @@ class ReloadRequest(SessionRequest):
 class HistoryRequest(SessionRequest):
     reference: HistoryReference | None = None
     errors: bool = False
+    successes: bool = False
     latest: bool = False
     last: int | None = None
     include_internal: bool = False
@@ -199,6 +169,11 @@ class SessionsListRequest(ProjectRequest):
 @dataclass(slots=True, frozen=True, kw_only=True)
 class SessionsDeleteRequest(ProjectRequest):
     session_name: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SessionsDeleteBulkRequest(ProjectRequest):
+    stale_only: bool = False
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -238,6 +213,7 @@ class AgentNBApp:
         advisor: AdvicePolicy | None = None,
         run_selectors: RunSelectorResolver | None = None,
         history_selectors: HistorySelectorResolver | None = None,
+        session_targeting: SessionTargetingPolicy | None = None,
     ) -> None:
         resolved_runtime = runtime or KernelRuntime()
         resolved_executions = executions or ExecutionService(resolved_runtime)
@@ -247,13 +223,15 @@ class AgentNBApp:
         self.advisor = advisor or AdvicePolicy()
         self.run_selectors = run_selectors or RunSelectorResolver(self.executions)
         self.history_selectors = history_selectors or HistorySelectorResolver()
+        self.session_targeting = session_targeting or SessionTargetingPolicy(resolved_runtime)
 
     def start(self, request: StartRequest) -> CommandResponse:
         return self._handle_command(
             command_name="start",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_NONLIVE_REMEMBERING_COMMAND_POLICY,
+            require_live_session=False,
+            announce_session_switch=True,
             handler=lambda session_id: self._start_payload(request=request, session_id=session_id),
         )
 
@@ -271,7 +249,8 @@ class AgentNBApp:
             command_name="exec",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_STRICT_EXEC_COMMAND_POLICY,
+            require_live_session=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._exec_payload(
                 request=request,
                 session_id=session_id,
@@ -284,7 +263,8 @@ class AgentNBApp:
             command_name="status",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_DEFAULT_LIVE_COMMAND_POLICY,
+            require_live_session=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._status_payload(request=request, session_id=session_id),
         )
 
@@ -293,7 +273,8 @@ class AgentNBApp:
             command_name="wait",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_DEFAULT_LIVE_COMMAND_POLICY,
+            require_live_session=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._wait_payload(request=request, session_id=session_id),
         )
 
@@ -302,7 +283,9 @@ class AgentNBApp:
             command_name="vars",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_HELPER_COMMAND_POLICY,
+            require_live_session=True,
+            project_starting_state=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._vars_payload(request=request, session_id=session_id),
         )
 
@@ -311,7 +294,9 @@ class AgentNBApp:
             command_name="inspect",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_HELPER_COMMAND_POLICY,
+            require_live_session=True,
+            project_starting_state=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._inspect_payload(
                 request=request,
                 session_id=session_id,
@@ -323,7 +308,9 @@ class AgentNBApp:
             command_name="reload",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_HELPER_COMMAND_POLICY,
+            require_live_session=True,
+            project_starting_state=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._reload_payload(request=request, session_id=session_id),
         )
 
@@ -336,7 +323,8 @@ class AgentNBApp:
             command_name="history",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_DEFAULT_LIVE_COMMAND_POLICY,
+            require_live_session=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._history_payload(
                 request=request,
                 session_id=session_id,
@@ -348,7 +336,8 @@ class AgentNBApp:
             command_name="interrupt",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_DEFAULT_LIVE_COMMAND_POLICY,
+            require_live_session=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._interrupt_payload(
                 request=request, session_id=session_id
             ),
@@ -359,7 +348,8 @@ class AgentNBApp:
             command_name="reset",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_DEFAULT_LIVE_COMMAND_POLICY,
+            require_live_session=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._reset_payload(request=request, session_id=session_id),
         )
 
@@ -368,7 +358,8 @@ class AgentNBApp:
             command_name="stop",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_DEFAULT_LIVE_COMMAND_POLICY,
+            require_live_session=True,
+            announce_session_switch=True,
             handler=lambda session_id: self._stop_payload(request=request, session_id=session_id),
         )
 
@@ -377,7 +368,7 @@ class AgentNBApp:
             command_name="doctor",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_NONLIVE_COMMAND_POLICY,
+            require_live_session=False,
             handler=lambda session_id: self._doctor_payload(request=request, session_id=session_id),
         )
 
@@ -386,7 +377,7 @@ class AgentNBApp:
             command_name="sessions-list",
             project_root=request.project_root,
             requested_session_id=None,
-            policy=_NONLIVE_COMMAND_POLICY,
+            require_live_session=False,
             handler=lambda _: _sessions_list_payload(
                 self.runtime.list_sessions(project_root=request.project_root)
             ),
@@ -397,19 +388,44 @@ class AgentNBApp:
             command_name="sessions-delete",
             project_root=request.project_root,
             requested_session_id=request.session_name,
-            policy=_NONLIVE_COMMAND_POLICY,
+            require_live_session=False,
             handler=lambda _: self.runtime.delete_session(
                 project_root=request.project_root,
                 session_id=request.session_name,
             ),
         )
 
+    def sessions_delete_bulk(self, request: SessionsDeleteBulkRequest) -> CommandResponse:
+        return self._handle_command(
+            command_name="sessions-delete-bulk",
+            project_root=request.project_root,
+            requested_session_id=None,
+            require_live_session=False,
+            handler=lambda _: self._sessions_delete_bulk_payload(request),
+        )
+
+    def _sessions_delete_bulk_payload(self, request: SessionsDeleteBulkRequest) -> BulkDeleteResult:
+        sessions = self.runtime.list_sessions(project_root=request.project_root)
+        deleted: list[str] = []
+        for session in sessions:
+            sid = session.get("session_id")
+            if not isinstance(sid, str):
+                continue
+            if request.stale_only and session.get("alive"):
+                continue
+            try:
+                self.runtime.delete_session(project_root=request.project_root, session_id=sid)
+                deleted.append(sid)
+            except Exception:
+                pass
+        return {"deleted": deleted, "count": len(deleted)}
+
     def runs_list(self, request: RunsListRequest) -> CommandResponse:
         return self._handle_command(
             command_name="runs-list",
             project_root=request.project_root,
             requested_session_id=request.session_id,
-            policy=_NONLIVE_COMMAND_POLICY,
+            require_live_session=False,
             handler=lambda _: self._runs_list_payload(request=request),
         )
 
@@ -418,7 +434,7 @@ class AgentNBApp:
             command_name="runs-show",
             project_root=request.project_root,
             requested_session_id=None,
-            policy=_NONLIVE_COMMAND_POLICY,
+            require_live_session=False,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
                 run_reference=request.run_reference,
@@ -433,7 +449,7 @@ class AgentNBApp:
             command_name="runs-wait",
             project_root=request.project_root,
             requested_session_id=None,
-            policy=_NONLIVE_COMMAND_POLICY,
+            require_live_session=False,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
                 run_reference=request.run_reference,
@@ -453,7 +469,7 @@ class AgentNBApp:
             command_name="runs-follow",
             project_root=request.project_root,
             requested_session_id=None,
-            policy=_NONLIVE_COMMAND_POLICY,
+            require_live_session=False,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
                 run_reference=request.run_reference,
@@ -470,14 +486,13 @@ class AgentNBApp:
             command_name="runs-cancel",
             project_root=request.project_root,
             requested_session_id=None,
-            policy=_NONLIVE_COMMAND_POLICY,
+            require_live_session=False,
             handler=lambda _: self.executions.cancel_run(
                 project_root=request.project_root,
                 execution_id=self.run_selectors.resolve_execution_id(
                     project_root=request.project_root,
                     reference=request.run_reference,
-                    current_session_id=_current_session_preference(
-                        self.runtime,
+                    current_session_id=self.session_targeting.current_run_preference(
                         project_root=request.project_root,
                     ),
                     default_behavior="active",
@@ -548,7 +563,7 @@ class AgentNBApp:
 
     def _status_payload(self, *, request: StatusRequest, session_id: str) -> StatusPayload:
         if request.wait_for == "idle":
-            wait_result = self.runtime.wait_until_idle(
+            wait_result = self._wait_for_idle_status(
                 project_root=request.project_root,
                 session_id=session_id,
                 timeout_s=request.timeout_s,
@@ -591,6 +606,76 @@ class AgentNBApp:
                 session_id=session_id,
             )
         )
+
+    def _wait_for_idle_status(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        timeout_s: float,
+    ) -> KernelWaitResult:
+        started_at = time.monotonic()
+        waited_for_run = False
+        initial_runtime_state: RuntimeStateKind | None = None
+        deadline = time.monotonic() + timeout_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise KernelWaitTimedOutError(timeout_s, waiting_for="idle")
+            wait_result = self.runtime.wait_until_idle(
+                project_root=project_root,
+                session_id=session_id,
+                timeout_s=remaining,
+            )
+            if initial_runtime_state is None:
+                initial_runtime_state = (
+                    wait_result.initial_runtime_state or wait_result.runtime_state
+                )
+            active_execution_id = self._active_execution_id_for_session(
+                project_root=project_root,
+                session_id=session_id,
+            )
+            if active_execution_id is None:
+                if waited_for_run:
+                    waited_ms = max(
+                        wait_result.waited_ms,
+                        int((time.monotonic() - started_at) * 1000),
+                    )
+                    return KernelWaitResult(
+                        status=wait_result.status,
+                        waited=True,
+                        waited_for=wait_result.waited_for or "idle",
+                        runtime_state=wait_result.runtime_state,
+                        waited_ms=waited_ms,
+                        initial_runtime_state=initial_runtime_state,
+                    )
+                return wait_result
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise KernelWaitTimedOutError(timeout_s, waiting_for="idle")
+            self.executions.wait_for_run(
+                project_root=project_root,
+                execution_id=active_execution_id,
+                timeout_s=remaining,
+            )
+            waited_for_run = True
+
+    def _active_execution_id_for_session(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+    ) -> str | None:
+        runs = self.executions.list_runs(
+            project_root=project_root,
+            session_id=session_id,
+        )
+        for run in reversed(runs):
+            status = run.get("status")
+            execution_id = run.get("execution_id")
+            if status in _ACTIVE_RUN_STATUSES and isinstance(execution_id, str) and execution_id:
+                return execution_id
+        return None
 
     def _wait_payload(self, *, request: WaitRequest, session_id: str) -> StatusPayload:
         wait_result = self.runtime.wait_for_usable(
@@ -670,6 +755,7 @@ class AgentNBApp:
                 session_id=session_id,
                 include_internal=request.include_internal,
                 errors_only=request.errors,
+                success_only=request.successes,
                 latest=request.latest,
                 last=request.last,
                 reference=request.reference,
@@ -740,7 +826,9 @@ class AgentNBApp:
         execution_id = self.run_selectors.resolve_execution_id(
             project_root=project_root,
             reference=run_reference,
-            current_session_id=_current_session_preference(self.runtime, project_root=project_root),
+            current_session_id=self.session_targeting.current_run_preference(
+                project_root=project_root
+            ),
             default_behavior=default_behavior,
         )
         if event_sink is not None:
@@ -781,6 +869,7 @@ class AgentNBApp:
                 session_id=request.session_id,
                 include_internal=request.include_internal,
                 errors_only=request.errors,
+                success_only=request.successes,
                 latest=request.latest,
                 last=request.last,
                 reference=request.reference,
@@ -832,29 +921,27 @@ class AgentNBApp:
         command_name: str,
         project_root: Path,
         requested_session_id: str | None,
-        policy: CommandRuntimePolicy,
+        require_live_session: bool,
         handler: Callable[[str], Mapping[str, object]],
+        project_starting_state: bool = False,
+        announce_session_switch: bool = False,
         response_session_id_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
     ) -> CommandResponse:
         response_session_id = requested_session_id or DEFAULT_SESSION_ID
 
         try:
-            resolved_session_id = self.runtime.resolve_session_id(
+            decision = self.session_targeting.resolve_command_target(
                 project_root=project_root,
                 requested_session_id=requested_session_id,
-                policy=policy.session_resolution,
+                require_live_session=require_live_session,
+                persist_explicit_preference=_should_persist_explicit_session_preference(
+                    command_name
+                ),
+                announce_switch=announce_session_switch,
             )
+            resolved_session_id = decision.session_id
             response_session_id = resolved_session_id
-            switched_session: str | None = None
-            if policy.remember_session_preference:
-                previous = _current_session_preference(self.runtime, project_root=project_root)
-                self.runtime.remember_current_session(
-                    project_root=project_root,
-                    session_id=resolved_session_id,
-                )
-                if previous is not None and previous != resolved_session_id:
-                    switched_session = resolved_session_id
-            if policy.starting_session_behavior == "reject":
+            if project_starting_state:
                 state = self.runtime.runtime_state(
                     project_root=project_root,
                     session_id=resolved_session_id,
@@ -875,7 +962,7 @@ class AgentNBApp:
                         message=error.message,
                         ename=error.ename,
                         evalue=error.evalue,
-                        traceback=compact_traceback(error.traceback),
+                        traceback=error.traceback,
                         data=error.data,
                         suggestions=self.advisor.suggestions(
                             AdviceContext(
@@ -901,9 +988,9 @@ class AgentNBApp:
                         ),
                     )
             data = handler(resolved_session_id)
-            if switched_session is not None:
+            if decision.switched_session is not None:
                 data = dict(data)
-                data["switched_session"] = switched_session
+                data["switched_session"] = decision.switched_session
             if response_session_id_resolver is not None:
                 response_session_id = response_session_id_resolver(response_session_id, data)
             return success_response(
@@ -937,7 +1024,7 @@ class AgentNBApp:
                 message=exc.message,
                 ename=exc.ename,
                 evalue=exc.evalue,
-                traceback=compact_traceback(exc.traceback),
+                traceback=exc.traceback,
                 data=exc.data,
                 suggestions=self.advisor.suggestions(
                     AdviceContext(
@@ -1006,11 +1093,20 @@ def _run_response_session_id(current_session_id: str, data: Mapping[str, object]
     return current_session_id
 
 
-def _current_session_preference(runtime: KernelRuntime, *, project_root: Path) -> str | None:
-    session_id = runtime.current_session_id(project_root=project_root)
-    if isinstance(session_id, str) and session_id:
-        return session_id
-    return None
+def _should_persist_explicit_session_preference(command_name: str) -> bool:
+    return command_name in {
+        "start",
+        "exec",
+        "status",
+        "wait",
+        "vars",
+        "inspect",
+        "reload",
+        "history",
+        "interrupt",
+        "reset",
+        "stop",
+    }
 
 
 def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:

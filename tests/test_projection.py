@@ -102,6 +102,41 @@ def test_response_projector_agent_compacts_error_shape() -> None:
     }
 
 
+def test_response_projector_uses_normalized_error_shape_for_full_json_and_agent() -> None:
+    response = error_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        code="EXECUTION_ERROR",
+        message="Execution failed.",
+        ename="ZeroDivisionError",
+        evalue="division by zero",
+        traceback=[
+            "\x1b[31mTraceback (most recent call last):\x1b[0m",
+            '  File "main.py", line 1, in <module>',
+            "line 3",
+            "line 4",
+            "line 5",
+            "ZeroDivisionError: division by zero",
+        ],
+        data={"status": "error"},
+    )
+
+    full_payload = ResponseProjector().project(response, profile="full-json")
+    agent_payload = ResponseProjector().project(response, profile="agent")
+
+    expected_traceback = [
+        "Traceback (most recent call last):",
+        '  File "main.py", line 1, in <module>',
+        "...",
+        "line 4",
+        "line 5",
+        "ZeroDivisionError: division by zero",
+    ]
+    assert full_payload["error"]["traceback"] == expected_traceback
+    assert agent_payload["error"]["traceback"] == expected_traceback
+
+
 def test_response_projector_agent_keeps_suggestion_actions() -> None:
     response = error_response(
         command="exec",
@@ -240,6 +275,37 @@ def test_response_projector_agent_keeps_structured_exec_result_preview() -> None
                 "columns": ["i"],
             },
         },
+    }
+
+
+def test_response_projector_agent_derives_exec_result_preview_from_result_text() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "status": "ok",
+            "execution_id": "run-1",
+            "duration_ms": 12,
+            "result": "[{'id': 1, 'name': 'alpha'}, {'id': 2, 'name': 'beta'}]",
+            "result_preview": {
+                "kind": "sequence-like",
+                "length": 2,
+                "item_type": "dict",
+                "sample_keys": ["id", "name"],
+                "sample": [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}],
+            },
+        },
+    )
+
+    projected = ResponseProjector().project(response, profile="agent")
+
+    assert projected["data"]["result_preview"] == {
+        "kind": "sequence-like",
+        "length": 2,
+        "item_type": "dict",
+        "sample_keys": ["id", "name"],
+        "sample": [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}],
     }
 
 

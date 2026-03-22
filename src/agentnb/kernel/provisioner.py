@@ -120,7 +120,8 @@ class KernelProvisioner:
 
         if not auto_install:
             raise ProvisioningError(
-                f"Selected interpreter is missing ipykernel. Install it with: {install_cmd_text}"
+                f"Selected interpreter is missing ipykernel. Run manually: {install_cmd_text}",
+                recovery_command=install_cmd_text,
             )
 
         result = subprocess.run(
@@ -135,18 +136,24 @@ class KernelProvisioner:
             stderr_text = result.stderr or ""
             if "No module named pip" in stderr_text:
                 uv_cmd = self._uv_install_cmd_text(selected.executable)
-                raise ProvisioningError(f"pip is not available in this environment. Try: {uv_cmd}")
+                raise ProvisioningError(
+                    "Failed to auto-install ipykernel because pip is not available in this "
+                    f"interpreter. Run manually: {uv_cmd}",
+                    recovery_command=uv_cmd,
+                )
             detail = _tail_text(stderr_text or result.stdout)
             raise ProvisioningError(
                 "Failed to auto-install ipykernel. "
-                f"Try running manually: {install_cmd_text}. "
-                f"Installer output: {detail}"
+                f"Run manually: {install_cmd_text}. "
+                f"Installer output: {detail}",
+                recovery_command=install_cmd_text,
             )
 
         if not _python_supports_module(Path(selected.executable), "ipykernel_launcher"):
             raise ProvisioningError(
-                "ipykernel install completed but module is still unavailable. "
-                f"Try running manually: {install_cmd_text}"
+                "ipykernel install completed but the module is still unavailable. "
+                f"Run manually: {install_cmd_text}",
+                recovery_command=install_cmd_text,
             )
 
         return True
@@ -219,7 +226,11 @@ class KernelProvisioner:
                             name="ipykernel",
                             status="error",
                             message=exc.message,
-                            fix_hint=f"Run manually: {install_cmd}",
+                            fix_hint=(
+                                f"Run manually: {exc.recovery_command}"
+                                if exc.recovery_command
+                                else f"Run manually: {install_cmd}"
+                            ),
                         )
                     )
             else:

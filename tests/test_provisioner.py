@@ -300,6 +300,49 @@ def test_ensure_ipykernel_no_pip_error_message_suggests_uv(
         provisioner.ensure_ipykernel(selected, auto_install=True)
 
 
+def test_provisioning_error_keeps_recovery_command_for_doctor_fix_hint(
+    project_dir: Path, mocker: MockerFixture
+) -> None:
+    provisioner = KernelProvisioner(project_dir)
+    selected = InterpreterSelection(
+        executable=str(Path(sys.executable).absolute()),
+        source="explicit",
+        ipykernel_available=False,
+    )
+    mocker.patch.object(
+        provisioner,
+        "select_interpreter",
+        return_value=selected,
+    )
+    mocker.patch.object(
+        provisioner,
+        "ensure_ipykernel",
+        side_effect=ProvisioningError(
+            "Failed to auto-install ipykernel because pip is not available in this interpreter. "
+            "Run manually: uv pip install --python /python ipykernel>=6.0",
+            recovery_command="uv pip install --python /python ipykernel>=6.0",
+        ),
+    )
+    mocker.patch.object(
+        provisioner,
+        "_check_state_directory",
+        return_value=DoctorCheck(name="state_dir", status="ok", message="ok"),
+    )
+    mocker.patch.object(
+        provisioner,
+        "_check_socket_bind",
+        return_value=DoctorCheck(name="socket", status="ok", message="ok"),
+    )
+
+    report = provisioner.doctor(auto_fix=True)
+
+    ipykernel_check = next(check for check in report.checks if check.name == "ipykernel")
+    assert ipykernel_check.status == "error"
+    assert ipykernel_check.fix_hint == (
+        "Run manually: uv pip install --python /python ipykernel>=6.0"
+    )
+
+
 def test_doctor_reports_python_selection_errors(project_dir: Path, mocker: MockerFixture) -> None:
     provisioner = KernelProvisioner(project_dir)
     mocker.patch.object(

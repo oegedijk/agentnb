@@ -212,6 +212,7 @@ def test_history_selector_resolver_uses_plain_query_without_reference() -> None:
         session_id="analysis",
         include_internal=True,
         errors_only=False,
+        success_only=False,
         latest=False,
         last=2,
         reference=None,
@@ -272,6 +273,7 @@ def test_history_selector_resolver_maps_references_to_queries(
         session_id="default",
         include_internal=False,
         errors_only=False,
+        success_only=False,
         latest=False,
         last=None,
         reference=reference,
@@ -280,18 +282,111 @@ def test_history_selector_resolver_maps_references_to_queries(
     assert query == expected
 
 
-def test_history_selector_resolver_rejects_reference_and_filters_together() -> None:
+def test_history_selector_resolver_allows_equivalent_selector_flag_combinations() -> None:
     resolver = HistorySelectorResolver()
 
-    with pytest.raises(
-        ValueError,
-        match=(r"Use either a history selector or --errors/--latest/--last filters, not both\."),
-    ):
+    latest_query = resolver.resolve_query(
+        session_id="default",
+        include_internal=False,
+        errors_only=False,
+        success_only=False,
+        latest=True,
+        last=None,
+        reference=parse_history_reference("@latest"),
+    )
+    error_query = resolver.resolve_query(
+        session_id="default",
+        include_internal=False,
+        errors_only=True,
+        success_only=False,
+        latest=True,
+        last=None,
+        reference=parse_history_reference("@last-error"),
+    )
+    success_query = resolver.resolve_query(
+        session_id="default",
+        include_internal=False,
+        errors_only=False,
+        success_only=True,
+        latest=True,
+        last=None,
+        reference=parse_history_reference("@last-success"),
+    )
+
+    assert latest_query == JournalQuery(
+        session_id="default",
+        include_internal=False,
+        latest=True,
+    )
+    assert error_query == JournalQuery(
+        session_id="default",
+        include_internal=False,
+        errors_only=True,
+        latest=True,
+        prefer_execution_errors=True,
+    )
+    assert success_query == JournalQuery(
+        session_id="default",
+        include_internal=False,
+        success_only=True,
+        latest=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("reference", "errors_only", "success_only", "latest", "last", "message"),
+    [
+        (
+            parse_history_reference("@latest"),
+            True,
+            False,
+            False,
+            None,
+            "History selectors can only be combined with equivalent",
+        ),
+        (
+            parse_history_reference("@last-error"),
+            False,
+            True,
+            True,
+            None,
+            "History selectors can only be combined with equivalent",
+        ),
+        (
+            parse_history_reference("@last-success"),
+            True,
+            False,
+            True,
+            None,
+            "History selectors can only be combined with equivalent",
+        ),
+        (
+            parse_history_reference("run-123"),
+            False,
+            False,
+            True,
+            None,
+            "Execution-id history references cannot be combined",
+        ),
+    ],
+)
+def test_history_selector_resolver_rejects_contradictory_selector_flag_combinations(
+    reference: HistoryReference | None,
+    errors_only: bool,
+    success_only: bool,
+    latest: bool,
+    last: int | None,
+    message: str,
+) -> None:
+    resolver = HistorySelectorResolver()
+
+    with pytest.raises(ValueError, match=message):
         resolver.resolve_query(
             session_id="default",
             include_internal=False,
-            errors_only=True,
-            latest=False,
-            last=None,
-            reference=parse_history_reference("@latest"),
+            errors_only=errors_only,
+            success_only=success_only,
+            latest=latest,
+            last=last,
+            reference=reference,
         )

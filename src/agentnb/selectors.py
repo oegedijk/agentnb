@@ -210,6 +210,7 @@ class HistorySelectorResolver:
         session_id: str | None,
         include_internal: bool,
         errors_only: bool,
+        success_only: bool,
         latest: bool,
         last: int | None,
         reference: HistoryReference | None,
@@ -219,16 +220,17 @@ class HistorySelectorResolver:
                 session_id=session_id,
                 include_internal=include_internal,
                 errors_only=errors_only,
+                success_only=success_only,
                 latest=latest,
                 last=last,
             )
 
-        if errors_only or latest or last is not None:
-            raise ValueError(
-                "Use either a history selector or --errors/--latest/--last filters, not both."
-            )
-
         if reference.kind == "execution_id":
+            if errors_only or success_only or latest or last is not None:
+                raise ValueError(
+                    "Execution-id history references cannot be combined with "
+                    "--errors/--successes/--latest/--last filters."
+                )
             assert reference.value is not None
             return JournalQuery(
                 session_id=session_id,
@@ -236,18 +238,33 @@ class HistorySelectorResolver:
                 execution_id=reference.value,
             )
         if reference.kind == "latest":
+            if errors_only or success_only or last is not None:
+                raise ValueError(
+                    "History selectors can only be combined with equivalent "
+                    "--errors/--successes/--latest filters."
+                )
             return JournalQuery(
                 session_id=session_id,
                 include_internal=include_internal,
                 latest=True,
             )
         if reference.kind == "last_error":
+            if success_only or last is not None:
+                raise ValueError(
+                    "History selectors can only be combined with equivalent "
+                    "--errors/--successes/--latest filters."
+                )
             return JournalQuery(
                 session_id=session_id,
                 include_internal=include_internal,
                 errors_only=True,
                 latest=True,
                 prefer_execution_errors=True,
+            )
+        if errors_only or last is not None:
+            raise ValueError(
+                "History selectors can only be combined with equivalent "
+                "--errors/--successes/--latest filters."
             )
         return JournalQuery(
             session_id=session_id,

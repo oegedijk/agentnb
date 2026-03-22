@@ -258,8 +258,17 @@ class KernelRuntime:
         project_root: Path,
         requested_session_id: str | None,
         *,
-        policy: SessionResolutionPolicy,
+        policy: SessionResolutionPolicy | None = None,
+        require_live_session: bool | None = None,
     ) -> str:
+        if policy is None:
+            if require_live_session is None:
+                raise TypeError("resolve_session_id requires either policy or require_live_session")
+            policy = SessionResolutionPolicy(
+                require_live_session=require_live_session,
+                prefer_current_session=not require_live_session,
+                error_on_multiple_live_sessions=require_live_session,
+            )
         if requested_session_id is not None:
             self._check_session_prefix_collision(
                 project_root=project_root,
@@ -287,6 +296,8 @@ class KernelRuntime:
             if preferred_session_id in live_session_ids:
                 return preferred_session_id
         if not live_session_ids:
+            if preferred_session_id is not None:
+                return preferred_session_id
             return DEFAULT_SESSION_ID
         if len(live_session_ids) == 1:
             return live_session_ids[0]

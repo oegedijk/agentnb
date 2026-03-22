@@ -35,6 +35,11 @@ class AgentNBError:
     evalue: str | None = None
     traceback: list[str] | None = None
 
+    def __post_init__(self) -> None:
+        from .compact import compact_traceback
+
+        self.traceback = compact_traceback(self.traceback)
+
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "code": self.code,
@@ -43,6 +48,19 @@ class AgentNBError:
             "evalue": self.evalue,
             "traceback": self.traceback,
         }
+        return payload
+
+    def to_agent_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "code": self.code,
+            "message": self.message,
+        }
+        if self.ename is not None:
+            payload["ename"] = self.ename
+        if self.evalue is not None:
+            payload["evalue"] = self.evalue
+        if self.traceback:
+            payload["traceback"] = list(self.traceback)
         return payload
 
 

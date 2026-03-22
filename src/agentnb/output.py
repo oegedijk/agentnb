@@ -223,6 +223,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             else:
                 lines = [_render_var_entry(item) for item in vars_data]
                 body = "\n".join(lines)
+            body = _prepend_session_identity(body, response.session_id)
             body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
         elif command == "inspect":
@@ -256,6 +257,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 ]
                 lines.append(f"members: {members_text}")
             body = "\n".join(lines)
+            body = _prepend_session_identity(body, response.session_id)
             body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
         elif command == "reload":
@@ -317,6 +319,12 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         elif command == "sessions-delete":
             stopped = " and stopped its kernel" if data.get("stopped_running_kernel") else ""
             body = f"Deleted session {data.get('session_id')}{stopped}."
+        elif command == "sessions-delete-bulk":
+            deleted = data.get("deleted", [])
+            if isinstance(deleted, list) and deleted:
+                body = f"Deleted {len(deleted)} session(s): {', '.join(str(s) for s in deleted)}"
+            else:
+                body = "No sessions to delete."
         elif command == "runs-list":
             runs = cast(RunsListPayload, data).get("runs", [])
             if not runs:
@@ -394,6 +402,12 @@ def _render_exec_like(data: ExecPayload) -> str:
     return "\n".join(lines)
 
 
+def _prepend_session_identity(body: str, session_id: str | None) -> str:
+    if not session_id:
+        return body
+    return f"session: {session_id}\n{body}"
+
+
 def _render_var_entry(item: VarDisplayEntry) -> str:
     name = item.get("name")
     repr_text = item.get("repr")
@@ -457,13 +471,17 @@ def _wait_note(data: Mapping[str, object]) -> str | None:
     waited_ms = data.get("waited_ms")
     waited_for = data.get("waited_for")
     initial_runtime_state = data.get("initial_runtime_state")
-    if not isinstance(waited_ms, int) and not isinstance(initial_runtime_state, str):
+    if (
+        not isinstance(waited_ms, int)
+        and not isinstance(waited_for, str)
+        and not isinstance(initial_runtime_state, str)
+    ):
         return None
     parts: list[str] = []
     if isinstance(waited_ms, int):
-        parts.append(f"waited {_format_duration_ms(waited_ms)}")
+        parts.append(f"after waiting {_format_duration_ms(waited_ms)}")
     else:
-        parts.append("waited")
+        parts.append("after waiting")
     if isinstance(waited_for, str) and waited_for:
         parts.append(f"for {waited_for}")
     if isinstance(initial_runtime_state, str) and initial_runtime_state:

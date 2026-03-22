@@ -14,7 +14,7 @@ from agentnb.advice import AdviceContext, AdvicePolicy, _extract_module_name
                 response_status="ok",
                 data={"alive": True, "busy": True},
             ),
-            ["Run `agentnb wait --json` to wait until the session is ready."],
+            ["Run `agentnb wait --json` to wait until the session is usable."],
         ),
         (
             AdviceContext(

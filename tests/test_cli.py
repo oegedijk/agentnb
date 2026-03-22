@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 from pytest_mock import MockerFixture
 
+from agentnb import __version__
 from agentnb.cli import main
 from agentnb.contracts import (
     ExecutionEvent,
@@ -198,6 +199,13 @@ def test_cli_json_envelope_for_exec_roundtrip(cli_runner: CliRunner, project_dir
     assert payload["data"]["result"] == "2"
     assert isinstance(payload["data"]["execution_id"], str)
     assert "events" not in payload["data"]
+
+
+def test_cli_root_version_flag_reports_package_version(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(main, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == f"agentnb, version {__version__}"
 
 
 @pytest.mark.parametrize(
@@ -614,6 +622,8 @@ def test_cli_agent_exec_ambiguity_keeps_suggestion_actions(
         {"session_id": "analysis"},
     ]
 
+    cli.runtime.current_session_id = lambda **_: "analysis"  # type: ignore[method-assign]
+
     result = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--agent", "1 + 1"])
 
     assert result.exit_code == 1
@@ -633,6 +643,26 @@ def test_cli_agent_exec_ambiguity_keeps_suggestion_actions(
             "args": ["exec", "--session", "NAME", "--json"],
         },
     ]
+
+
+def test_cli_omitted_session_ignores_remembered_preference_when_multiple_live_sessions_exist(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.current_session_id = lambda **_: "analysis"  # type: ignore[method-assign]
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        {"session_id": "default"},
+        {"session_id": "analysis"},
+    ]
+
+    result = cli_runner.invoke(main, ["status", "--project", str(project_dir), "--json"])
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert _error(payload)["code"] == "AMBIGUOUS_SESSION"
+    assert payload["data"]["available_sessions"] == ["default", "analysis"]
 
 
 def test_cli_status_uses_only_live_session_when_implicit(
@@ -718,6 +748,7 @@ def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
         )
 
     cli.runtime.wait_until_idle = wait_stub  # type: ignore[method-assign]
+    cli.executions.list_runs = lambda **_: []  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -731,7 +762,55 @@ def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
     assert payload["data"]["waited_for"] == "idle"
     assert payload["data"]["waited_ms"] == 10
     assert payload["data"]["initial_runtime_state"] == "busy"
-    assert wait_calls[0]["timeout_s"] == 5.0
+    assert 0 < cast(float, wait_calls[0]["timeout_s"]) <= 5.0
+
+
+def test_cli_status_wait_idle_waits_for_active_run_before_returning(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    wait_calls: list[dict[str, object]] = []
+    run_wait_calls: list[dict[str, object]] = []
+    list_runs_responses = iter(
+        [
+            [{"execution_id": "run-1", "status": "running"}],
+            [],
+        ]
+    )
+
+    def wait_stub(**kwargs: object) -> object:
+        wait_calls.append(dict(kwargs))
+        return KernelWaitResult(
+            status=KernelStatus(alive=True, pid=321, busy=False),
+            waited=True,
+            waited_for="idle",
+            runtime_state="ready",
+        )
+
+    def list_runs_stub(**kwargs: object) -> object:
+        del kwargs
+        return next(list_runs_responses)
+
+    def wait_for_run_stub(**kwargs: object) -> object:
+        run_wait_calls.append(dict(kwargs))
+        return {"execution_id": "run-1", "status": "ok", "session_id": "default"}
+
+    cli.runtime.wait_until_idle = wait_stub  # type: ignore[method-assign]
+    cli.executions.list_runs = list_runs_stub  # type: ignore[method-assign]
+    cli.executions.wait_for_run = wait_for_run_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["status", "--project", str(project_dir), "--wait-idle", "--timeout", "5", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["waited_for"] == "idle"
+    assert len(wait_calls) == 2
+    assert run_wait_calls[0]["execution_id"] == "run-1"
 
 
 def test_cli_wait_uses_runtime_wait_for_usable(
@@ -905,7 +984,8 @@ def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "Persistent project-scoped Python REPL for agent workflows." in result.output
     assert 'agentnb "import json"' in result.output
-    assert "`--session NAME` and `--background`" in result.output
+    assert "Canonical grammar:" in result.output
+    assert "`status --wait` and `status --wait-idle` remain compatibility" in result.output
     assert "runs show @latest" in result.output
     assert "@last-error" in result.output
     assert "--quiet" in result.output
@@ -1153,6 +1233,22 @@ def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: 
     payload = _payload(vars_res.output)
     assert payload["data"]["vars"][0]["name"] == "value"
     assert payload["data"]["vars"][0]["type"] == "int"
+
+
+def test_cli_vars_human_output_includes_session_identity(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [{"session_id": "analysis"}]  # type: ignore[method-assign]
+    cli.ops.list_vars = lambda **_: [{"name": "value", "type": "int", "repr": "42"}]  # type: ignore[method-assign]
+
+    vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir)])
+
+    assert vars_res.exit_code == 0
+    assert "session: analysis" in vars_res.output
+    assert "value: 42 (int)" in vars_res.output
 
 
 def test_cli_vars_reports_helper_wait_metadata(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -1516,6 +1612,88 @@ def test_cli_history_last_error_selector_uses_history_reference(
     assert queries[0].latest is True
     assert queries[0].errors_only is True
     assert queries[0].prefer_execution_errors is True
+
+
+def test_cli_history_successes_flag_filters_successes(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    queries: list[JournalQuery] = []
+
+    def select_history_stub(**kwargs: object) -> SimpleNamespace:
+        queries.append(cast(JournalQuery, kwargs["query"]))
+        return _history_selection([_journal_entry(command_type="exec", label="exec")])
+
+    cli.runtime.select_history = select_history_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["history", "--project", str(project_dir), "--successes", "--latest", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["entries"][0]["label"] == "exec"
+    assert queries[0].success_only is True
+    assert queries[0].latest is True
+
+
+def test_cli_history_accepts_equivalent_selector_flag_combinations(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    queries: list[JournalQuery] = []
+
+    def select_history_stub(**kwargs: object) -> SimpleNamespace:
+        queries.append(cast(JournalQuery, kwargs["query"]))
+        return _history_selection([_journal_entry(command_type="exec", label="exec")])
+
+    cli.runtime.select_history = select_history_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        [
+            "history",
+            "@last-success",
+            "--successes",
+            "--latest",
+            "--project",
+            str(project_dir),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["entries"][0]["label"] == "exec"
+    assert queries[0].success_only is True
+    assert queries[0].latest is True
+
+
+def test_cli_history_rejects_contradictory_selector_flag_combinations(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    result = cli_runner.invoke(
+        main,
+        [
+            "history",
+            "@last-error",
+            "--successes",
+            "--project",
+            str(project_dir),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert _error(payload)["code"] == "INVALID_INPUT"
+    assert "equivalent --errors/--successes/--latest filters" in _error(payload)["message"]
 
 
 def test_cli_sessions_list_returns_runtime_entries(
@@ -2319,6 +2497,27 @@ def test_cli_inspect_compacts_dataframe_payload(cli_runner: CliRunner, project_d
     assert "repr" not in inspect_payload
     assert "members" not in inspect_payload
     assert len(inspect_payload["preview"]["head"]) == 3
+
+
+def test_cli_inspect_human_output_includes_session_identity(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.list_sessions = lambda **_: [{"session_id": "analysis"}]  # type: ignore[method-assign]
+    cli.ops.inspect_var = lambda **_: {  # type: ignore[method-assign]
+        "name": "thing",
+        "type": "Thing",
+        "repr": "Thing(value=1)",
+        "members": ["alpha", "beta"],
+    }
+
+    inspect_res = cli_runner.invoke(main, ["inspect", "--project", str(project_dir), "thing"])
+
+    assert inspect_res.exit_code == 0
+    assert "session: analysis" in inspect_res.output
+    assert "name: thing" in inspect_res.output
 
 
 def test_cli_inspect_compacts_sequence_payload(cli_runner: CliRunner, project_dir: Path) -> None:

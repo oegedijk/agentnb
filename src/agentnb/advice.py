@@ -64,7 +64,7 @@ class AdvicePolicy:
             if data.get("alive"):
                 if data.get("busy"):
                     return [
-                        "Run `agentnb wait --json` to wait until the session is ready.",
+                        "Run `agentnb wait --json` to wait until the session is usable.",
                     ]
                 return []
             return [

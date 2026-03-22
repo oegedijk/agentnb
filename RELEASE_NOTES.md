@@ -1,3 +1,31 @@
+# v0.3.6 — Command Surface Simplification And Release Cut
+
+## Improvements
+
+**Structured exec summaries now flow through one bounded seam** — Exec-like
+payloads now consistently preserve `result_preview` for sequence-like,
+mapping-like, and dataframe-like values when a bounded summary can be derived.
+This keeps `result` as the compatibility field while making container-shaped
+results more decision-useful in both full JSON and compact agent projections.
+
+**Error envelopes now normalize through one shared contract** — Traceback
+cleanup now happens once in the shared error contract instead of being decided
+ad hoc in app and projection layers. Human output, full `--json`, and
+`--agent` all now see the same sanitized traceback and top-level error facts.
+
+**Wait-state messaging is clearer in human mode** — `wait`,
+`status --wait`, and `status --wait-idle` now make it explicit when the
+command waited, what condition it waited for, and the starting runtime state
+when that context is available.
+
+**Pip-less recovery is aligned across `start` and `doctor`** — Provisioning
+errors now carry one concrete manual recovery command, and `doctor --fix`
+reuses the same command that `start --auto-install` would surface for the
+same interpreter state.
+
+**Release metadata now matches the shipped 0.3.6 surface** — Versioned
+artifacts, roadmap notes, and release notes now agree on `0.3.6`.
+
 # v0.3.5 — Helper Access And Agent Contract Fixes
 
 ## Bug fixes

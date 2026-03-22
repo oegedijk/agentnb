@@ -309,7 +309,9 @@ def test_runtime_resolve_session_id_uses_only_live_session(project_dir: Path) ->
     assert resolved == "analysis"
 
 
-def test_runtime_resolve_session_id_prefers_current_session_preference(project_dir: Path) -> None:
+def test_runtime_resolve_session_id_ignores_current_session_preference_with_multiple_live_sessions(
+    project_dir: Path,
+) -> None:
     default_store = SessionStore(project_dir, session_id="default")
     analysis_store = SessionStore(project_dir, session_id="analysis")
     default_store.ensure_state_dir()

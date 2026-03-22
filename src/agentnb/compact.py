@@ -4,6 +4,7 @@ import re
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+from .execution_output import preview_from_result_text
 from .history import summarize_history_text
 from .journal import JournalEntry
 from .payloads import (
@@ -102,9 +103,12 @@ def compact_execution_payload(
             if summary is not None:
                 compacted["result"] = summary
 
-    result_preview = payload.get("result_preview")
-    if isinstance(result_preview, dict):
-        compacted["result_preview"] = compact_preview(cast(InspectPreview, result_preview))
+    result_preview = compact_result_preview(
+        result_preview=payload.get("result_preview"),
+        result=result,
+    )
+    if result_preview is not None:
+        compacted["result_preview"] = result_preview
 
     ename = payload.get("ename")
     if isinstance(ename, str):
@@ -120,6 +124,20 @@ def compact_execution_payload(
         compacted["selected_text"] = str(payload.get("selected_text", ""))
 
     return compacted
+
+
+def compact_result_preview(
+    *,
+    result_preview: object,
+    result: object,
+) -> InspectPreview | None:
+    if isinstance(result_preview, dict):
+        return compact_preview(cast(InspectPreview, result_preview))
+    if isinstance(result, str):
+        derived_preview = preview_from_result_text(result)
+        if isinstance(derived_preview, dict):
+            return compact_preview(derived_preview)
+    return None
 
 
 def compact_inspect_payload(payload: InspectPayload) -> InspectPayload:
@@ -327,11 +345,18 @@ def compact_run_entry(entry: RunSnapshot) -> RunListEntryPayload:
     if "cancel_requested" in entry:
         compacted["cancel_requested"] = bool(entry.get("cancel_requested"))
 
-    result = entry.get("result")
-    if isinstance(result, str) and result:
-        summary = summarize_history_text(result, limit=_RESULT_LIMIT)
-        if summary is not None:
-            compacted["result_preview"] = summary
+    result_preview = compact_result_preview(
+        result_preview=entry.get("result_preview"),
+        result=entry.get("result"),
+    )
+    if result_preview is not None:
+        compacted["result_preview"] = result_preview
+    else:
+        result = entry.get("result")
+        if isinstance(result, str) and result:
+            summary = summarize_history_text(result, limit=_RESULT_LIMIT)
+            if summary is not None:
+                compacted["result_preview"] = summary
 
     stdout = entry.get("stdout")
     if isinstance(stdout, str) and stdout:

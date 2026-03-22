@@ -113,6 +113,61 @@ def test_compact_execution_payload_preserves_structured_result_preview() -> None
     assert len(head) == 3
 
 
+def test_compact_execution_payload_derives_structured_result_preview_from_result_text() -> None:
+    payload: CompactExecPayloadInput = {
+        "status": "ok",
+        "duration_ms": 5,
+        "result": "[{'id': 1, 'name': 'alpha'}, {'id': 2, 'name': 'beta'}]",
+    }
+
+    compacted = compact_execution_payload(payload)
+
+    assert compacted["result"] == "[{'id': 1, 'name': 'alpha'}, {'id': 2, 'name': 'beta'}]"
+    assert compacted["result_preview"] == {
+        "kind": "sequence-like",
+        "length": 2,
+        "item_type": "dict",
+        "sample_keys": ["id", "name"],
+        "sample": [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}],
+    }
+
+
+def test_compact_execution_payload_does_not_invent_structured_preview_for_scalars() -> None:
+    payload: CompactExecPayloadInput = {
+        "status": "ok",
+        "duration_ms": 5,
+        "result": "42",
+    }
+
+    compacted = compact_execution_payload(payload)
+
+    assert compacted["result"] == "42"
+    assert "result_preview" not in compacted
+
+
+def test_compact_run_entry_prefers_structured_result_preview_when_available() -> None:
+    compacted = compact_run_entry(
+        {
+            "execution_id": "run-1",
+            "status": "ok",
+            "result": "large mapping repr",
+            "result_preview": {
+                "kind": "mapping-like",
+                "length": 2,
+                "keys": ["alpha", "beta"],
+                "sample": {"alpha": 1, "beta": 2},
+            },
+        }
+    )
+
+    assert compacted["result_preview"] == {
+        "kind": "mapping-like",
+        "length": 2,
+        "keys": ["alpha", "beta"],
+        "sample": {"alpha": 1, "beta": 2},
+    }
+
+
 def test_compact_collection_preview_limits_nested_values() -> None:
     preview: SequencePreview = {
         "kind": "sequence-like",

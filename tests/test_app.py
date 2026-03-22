@@ -409,6 +409,51 @@ def test_app_status_wait_idle_waits_for_active_run_before_returning(project_dir)
     )
 
 
+def test_app_status_wait_idle_marks_waited_when_only_run_completion_blocked(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.wait_until_idle.side_effect = [
+        KernelWaitResult(
+            status=KernelStatus(alive=True, pid=123, busy=False),
+            waited=False,
+            waited_for="idle",
+            runtime_state="ready",
+            initial_runtime_state="ready",
+        ),
+        KernelWaitResult(
+            status=KernelStatus(alive=True, pid=123, busy=False),
+            waited=False,
+            waited_for="idle",
+            runtime_state="ready",
+            initial_runtime_state="ready",
+        ),
+    ]
+    executions = Mock(spec=ExecutionService)
+    executions.list_runs.side_effect = [
+        [{"execution_id": "run-1", "status": "running"}],
+        [],
+    ]
+    executions.wait_for_run.return_value = {
+        "execution_id": "run-1",
+        "session_id": "analysis",
+        "status": "ok",
+    }
+    app = AgentNBApp(runtime=runtime, executions=executions)
+
+    response = app.status(
+        StatusRequest(
+            project_root=project_dir,
+            wait_for="idle",
+            timeout_s=5.0,
+        )
+    )
+
+    assert response.status == "ok"
+    assert response.data["waited"] is True
+    assert response.data["waited_for"] == "idle"
+    assert response.data["initial_runtime_state"] == "ready"
+
+
 def test_app_status_projects_runtime_state_for_starting_session(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"

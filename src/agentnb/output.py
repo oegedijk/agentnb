@@ -471,13 +471,17 @@ def _wait_note(data: Mapping[str, object]) -> str | None:
     waited_ms = data.get("waited_ms")
     waited_for = data.get("waited_for")
     initial_runtime_state = data.get("initial_runtime_state")
-    if not isinstance(waited_ms, int) and not isinstance(initial_runtime_state, str):
+    if (
+        not isinstance(waited_ms, int)
+        and not isinstance(waited_for, str)
+        and not isinstance(initial_runtime_state, str)
+    ):
         return None
     parts: list[str] = []
     if isinstance(waited_ms, int):
-        parts.append(f"waited {_format_duration_ms(waited_ms)}")
+        parts.append(f"after waiting {_format_duration_ms(waited_ms)}")
     else:
-        parts.append("waited")
+        parts.append("after waiting")
     if isinstance(waited_for, str) and waited_for:
         parts.append(f"for {waited_for}")
     if isinstance(initial_runtime_state, str) and initial_runtime_state:

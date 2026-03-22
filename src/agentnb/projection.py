@@ -5,9 +5,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
-from .compact import compact_run_entry, compact_traceback
+from .compact import compact_run_entry
 from .contracts import CommandResponse
-from .payloads import InspectPreview, RunSnapshot
+from .payloads import RunSnapshot
 
 ProjectionProfile = str
 
@@ -106,12 +106,6 @@ class ResponseProjector:
                 run_snapshot = cast(RunSnapshot, run)
                 compacted = compact_run_entry(run_snapshot)
                 compacted["status"] = run_snapshot.get("status")
-                result_preview = run_snapshot.get("result_preview")
-                if isinstance(result_preview, dict):
-                    compacted["result_preview"] = cast(InspectPreview, dict(result_preview))
-                result = run_snapshot.get("result")
-                if "result_preview" not in compacted and isinstance(result, str):
-                    compacted["result_preview"] = result
                 return {"run": compacted}
             return {}
         if command_name == "runs-cancel":
@@ -128,18 +122,7 @@ class ResponseProjector:
 
     def _project_agent_error(self, response: CommandResponse) -> dict[str, Any]:
         assert response.error is not None
-        payload: dict[str, Any] = {
-            "code": response.error.code,
-            "message": response.error.message,
-        }
-        if response.error.ename is not None:
-            payload["ename"] = response.error.ename
-        if response.error.evalue is not None:
-            payload["evalue"] = response.error.evalue
-        traceback = compact_traceback(response.error.traceback)
-        if traceback:
-            payload["traceback"] = traceback
-        return payload
+        return response.error.to_agent_dict()
 
 
 _SENTINEL = object()

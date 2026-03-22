@@ -144,6 +144,19 @@ def test_execution_output_result_preview_extracts_container_summary() -> None:
     assert preview["sample_keys"] == ["id"]
 
 
+def test_execution_output_result_preview_extracts_mapping_summary() -> None:
+    output = ExecutionOutput(
+        items=[OutputItem.result(text="{'alpha': [1, 2, 3], 'beta': {'nested': 'value'}}")]
+    )
+
+    preview = output.result_preview()
+
+    assert preview is not None
+    assert preview["kind"] == "mapping-like"
+    assert preview["length"] == 2
+    assert preview["keys"] == ["alpha", "beta"]
+
+
 def test_accumulator_build_projects_legacy_text_without_losing_display_order() -> None:
     accumulator = ExecutionResultAccumulator()
     messages: list[tuple[str, dict[str, object]]] = [

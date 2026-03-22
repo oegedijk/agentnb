@@ -145,8 +145,9 @@ class BackendOperationError(AgentNBException):
 
 
 class ProvisioningError(AgentNBException):
-    def __init__(self, message: str) -> None:
+    def __init__(self, message: str, *, recovery_command: str | None = None) -> None:
         super().__init__(code="PROVISIONING_ERROR", message=message)
+        self.recovery_command = recovery_command
 
 
 class StateCompatibilityError(AgentNBException):

@@ -12,7 +12,6 @@ from .compact import (
     compact_history_entry,
     compact_inspect_payload,
     compact_run_entry,
-    compact_traceback,
     full_history_entry,
     preview_text,
     strip_ansi_lines,
@@ -615,6 +614,9 @@ class AgentNBApp:
         session_id: str,
         timeout_s: float,
     ) -> KernelWaitResult:
+        started_at = time.monotonic()
+        waited_for_run = False
+        initial_runtime_state: RuntimeStateKind | None = None
         deadline = time.monotonic() + timeout_s
         while True:
             remaining = deadline - time.monotonic()
@@ -625,11 +627,28 @@ class AgentNBApp:
                 session_id=session_id,
                 timeout_s=remaining,
             )
+            if initial_runtime_state is None:
+                initial_runtime_state = (
+                    wait_result.initial_runtime_state or wait_result.runtime_state
+                )
             active_execution_id = self._active_execution_id_for_session(
                 project_root=project_root,
                 session_id=session_id,
             )
             if active_execution_id is None:
+                if waited_for_run:
+                    waited_ms = max(
+                        wait_result.waited_ms,
+                        int((time.monotonic() - started_at) * 1000),
+                    )
+                    return KernelWaitResult(
+                        status=wait_result.status,
+                        waited=True,
+                        waited_for=wait_result.waited_for or "idle",
+                        runtime_state=wait_result.runtime_state,
+                        waited_ms=waited_ms,
+                        initial_runtime_state=initial_runtime_state,
+                    )
                 return wait_result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -639,6 +658,7 @@ class AgentNBApp:
                 execution_id=active_execution_id,
                 timeout_s=remaining,
             )
+            waited_for_run = True
 
     def _active_execution_id_for_session(
         self,
@@ -942,7 +962,7 @@ class AgentNBApp:
                         message=error.message,
                         ename=error.ename,
                         evalue=error.evalue,
-                        traceback=compact_traceback(error.traceback),
+                        traceback=error.traceback,
                         data=error.data,
                         suggestions=self.advisor.suggestions(
                             AdviceContext(
@@ -1004,7 +1024,7 @@ class AgentNBApp:
                 message=exc.message,
                 ename=exc.ename,
                 evalue=exc.evalue,
-                traceback=compact_traceback(exc.traceback),
+                traceback=exc.traceback,
                 data=exc.data,
                 suggestions=self.advisor.suggestions(
                     AdviceContext(

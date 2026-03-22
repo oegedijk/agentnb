@@ -431,6 +431,10 @@ def _preview_from_text(text: str | None) -> InspectPreview | None:
     return _preview_from_value(value)
 
 
+def preview_from_result_text(text: str | None) -> InspectPreview | None:
+    return _preview_from_text(text)
+
+
 def _preview_from_value(value: object) -> InspectPreview | None:
     if isinstance(value, dict):
         return _mapping_preview_from_value(cast(Mapping[object, object], value))

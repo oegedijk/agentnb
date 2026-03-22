@@ -211,64 +211,59 @@ v0.3.5 closed the highest-friction agent issues around helper reads, session amb
   - validation:
     - unit tests for pip-missing interpreter selection/install failure branches
     - smoke against a controlled pip-less interpreter or a stubbed provisioner path to verify `doctor` / `start` suggestions are actionable
-- JSON cleanup beyond structured suggestion actions, including traceback hygiene, remains future work.
-- Wait-state visibility for `status --wait-idle` can still get clearer in human output.
-- Missing-dependency recovery inside fresh pip-less interpreters remains future work.
 
-## v0.3.6 - Command Surface Simplification And Footgun Removal
+## v0.3.6 - Command Surface Simplification And Footgun Removal (shipped)
 
-v0.3.6 should remove the remaining agent-confusing behaviors without expanding major feature surface. The focus is a smaller public grammar, fewer hidden state changes, and clearer canonical command forms.
+v0.3.6 shipped the command-surface simplification pass for the remaining
+agent-confusing behaviors. The release kept the major feature surface stable
+while making the public grammar smaller, the canonical forms clearer, and the
+default recovery paths more reliable.
 
-### Planned Simplifications
+### Shipped
 
-- Narrow current-session preference updates:
-  - only explicit `--session`, `start`, and successful `exec` mutate remembered current session
-  - implicitly resolved read/control commands no longer rewrite remembered session
+- Narrowed omitted-session command targeting: bare session-bound commands now raise `AMBIGUOUS_SESSION` when multiple live sessions exist, and implicitly resolved read/control commands no longer rewrite remembered current-session preference.
 
-- Make `wait` the primary documented blocking readiness command:
-  - keep `status --wait` and `status --wait-idle` for compatibility in `0.3.x`
-  - demote those `status` wait modes in help and README so `wait` is the obvious primary path
+- Made `wait` the primary documented blocking readiness command: `status --wait` and `status --wait-idle` remain supported compatibility forms, but help, README, and recovery wording now steer agents toward `wait`.
 
-- Keep history selectors first-class and add `--successes`:
-  - `history @latest`, `@last-error`, and `@last-success` stay
-  - add `history --successes --latest` as the flag equivalent of `history @last-success`
+- Kept history selectors first-class and added `--successes`: `history --successes --latest` now matches `history @last-success`, and equivalent selector/flag combinations normalize while contradictory combinations fail.
 
-- Normalize equivalent history selector/flag combinations:
-  - accept redundant equivalent combinations and resolve them to the same query
-  - reject only contradictory combinations
+- Made `sessions list` the canonical documented form while keeping bare `sessions` as a supported alias.
 
-- Make `sessions list` the canonical documented form:
-  - change bare `sessions` back to help-only behavior for consistency with other groups
-  - keep `sessions list` as the one documented listing command
+- Documented one canonical CLI grammar for subcommands and added standard top-level affordances including root `--version`.
 
-- Document one canonical CLI grammar:
-  - `agentnb <command> [subcommand] [options]`
-  - keep root output flags globally placeable, but stop teaching command-local option shuffling as part of the public model
+- Fixed human-mode ambiguity for read helpers in multi-session contexts by including stable session identity in `vars` and `inspect` output.
 
-- Reframe the Python import API:
-  - describe the import-level helpers as low-level wrappers around runtime operations
-  - do not present them as the primary ergonomic agent surface
+- Fixed `status --wait-idle` as a readiness gate for background work: it now waits for both runtime idleness and any active persisted run on the target session before reporting ready.
+
+- Deepened `SessionTargetingPolicy` as the owning seam for command-target provenance, explicit-preference persistence, run-scope preference reads, and switch-notice decisions.
+
+### Remaining
+
+- No additional `0.3.6` implementation work remains.
 
 ### API / Contract Notes
 
-- Read/control commands no longer rewrite remembered current session when they resolve implicitly.
+- Implicitly resolved read/control commands do not rewrite remembered current-session preference.
 - `wait` is the primary blocking command, while `status --wait` and `status --wait-idle` remain compatibility surface.
 - `history @latest`, `@last-error`, and `@last-success` stay, and `--successes --latest` is the flag equivalent of `@last-success`.
-- Bare `sessions` returns to help-only behavior, and `sessions list` is the canonical form.
+- Bare `sessions` remains a supported alias, while `sessions list` is the canonical documented form.
 
 ### Acceptance Notes
 
 - Tests proving implicit read/control commands do not mutate current-session preference.
 - Tests for `history @last-success` parity with `history --successes --latest`.
-- Docs/help parity tests for `sessions`, `wait`, and canonical command shapes.
+- Docs/help parity tests for `sessions`, `wait`, canonical command shapes, and root `--version`.
 
 ### Implementation Seams
 
+- `SessionTargetingPolicy`:
+  - owns command-target provenance, explicit-preference persistence, run-scope preference reads, and switch-notice decisions
+
 - `StateRepository` + `KernelRuntime`:
-  - own current-session preference mutation policy and multi-session targeting rules that remain after `0.3.5`
+  - own persisted preference storage, low-level session resolution facts, and actual runtime busy/idle truth
 
 - `AgentNBApp`:
-  - own command-level blocking semantics and the demoted `status --wait*` documentation path
+  - owns command-level blocking semantics, background follow-up guidance, and the demoted `status --wait*` documentation path
 
 - Selector resolvers and history query validation:
   - own selector/flag equivalence, contradiction checks, and the `--successes` addition
@@ -281,6 +276,7 @@ v0.3.6 should remove the remaining agent-confusing behaviors without expanding m
 
 - Docs/help parity tests:
   - ensure README, `--help`, and agent skill examples stay aligned with the actual surface and the intended primary command paths
+
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 
 ### Goals

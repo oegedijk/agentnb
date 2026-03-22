@@ -76,6 +76,11 @@ class DeleteSessionResult(TypedDict):
     stopped_running_kernel: bool
 
 
+class BulkDeleteResult(TypedDict):
+    deleted: list[str]
+    count: int
+
+
 class VarEntry(TypedDict):
     name: str
     type: str

@@ -784,7 +784,7 @@ for _name, _value in list(_user_ns.items()):
         _repr_text = _truncate_repr(_value, _max_len)
     _items.append({"name": _name, "type": type(_value).__name__, "repr": _repr_text})
 
-print(json.dumps(_items))
+print(json.dumps(_items, default=str))
 """,
     )
 
@@ -1022,7 +1022,7 @@ _payload = {{
     "doc": _doc,
     "preview": _preview,
 }}
-print(json.dumps(_payload))
+print(json.dumps(_payload, default=str))
 """,
     )
 
@@ -1233,6 +1233,6 @@ if _stale_names:
 
 _report["rebound_names"] = sorted(_rebound_names)
 _report["stale_names"] = sorted(_stale_names)
-print(json.dumps(_report))
+print(json.dumps(_report, default=str))
 """,
     )

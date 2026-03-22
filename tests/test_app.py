@@ -28,7 +28,7 @@ from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry
 from agentnb.ops import NotebookOps
-from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState, SessionResolutionPolicy
+from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
 from agentnb.selectors import parse_history_reference, parse_run_reference
 from agentnb.state import CommandLockInfo
 
@@ -313,16 +313,14 @@ def test_app_exec_uses_strict_implicit_session_resolution(project_dir) -> None:
     runtime.resolve_session_id.assert_called_once_with(
         project_root=project_dir.resolve(),
         requested_session_id=None,
-        policy=SessionResolutionPolicy(
-            require_live_session=True,
-            error_on_multiple_live_sessions=True,
-        ),
+        require_live_session=True,
     )
 
 
 def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
+    executions = Mock(spec=ExecutionService)
     runtime.wait_until_idle.return_value = KernelWaitResult(
         status=KernelStatus(alive=True, pid=123, busy=False),
         waited=True,
@@ -331,7 +329,8 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
         waited_ms=12,
         initial_runtime_state="busy",
     )
-    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
+    executions.list_runs.return_value = []
+    app = AgentNBApp(runtime=runtime, executions=executions)
 
     response = app.status(
         StatusRequest(
@@ -348,14 +347,66 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
     assert response.data["waited_for"] == "idle"
     assert response.data["waited_ms"] == 12
     assert response.data["initial_runtime_state"] == "busy"
-    runtime.wait_until_idle.assert_called_once()
     _assert_called_with_subset(
         runtime.wait_until_idle,
         project_root=project_dir.resolve(),
         session_id="analysis",
-        timeout_s=5.0,
     )
+    executions.wait_for_run.assert_not_called()
+    wait_kwargs = runtime.wait_until_idle.call_args.kwargs
+    assert wait_kwargs["project_root"] == project_dir.resolve()
+    assert wait_kwargs["session_id"] == "analysis"
+    assert 0 < wait_kwargs["timeout_s"] <= 5.0
     runtime.status.assert_not_called()
+
+
+def test_app_status_wait_idle_waits_for_active_run_before_returning(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "analysis"
+    runtime.wait_until_idle.side_effect = [
+        KernelWaitResult(
+            status=KernelStatus(alive=True, pid=123, busy=False),
+            waited=True,
+            waited_for="idle",
+            runtime_state="ready",
+        ),
+        KernelWaitResult(
+            status=KernelStatus(alive=True, pid=123, busy=False),
+            waited=True,
+            waited_for="idle",
+            runtime_state="ready",
+        ),
+    ]
+    executions = Mock(spec=ExecutionService)
+    executions.list_runs.side_effect = [
+        [{"execution_id": "run-1", "status": "running"}],
+        [],
+    ]
+    executions.wait_for_run.return_value = {
+        "execution_id": "run-1",
+        "session_id": "analysis",
+        "status": "ok",
+    }
+    app = AgentNBApp(runtime=runtime, executions=executions)
+
+    response = app.status(
+        StatusRequest(
+            project_root=project_dir,
+            wait_for="idle",
+            timeout_s=5.0,
+        )
+    )
+
+    assert response.status == "ok"
+    assert response.data["waited"] is True
+    assert response.data["waited_for"] == "idle"
+    assert runtime.wait_until_idle.call_count == 2
+    executions.wait_for_run.assert_called_once()
+    _assert_called_with_subset(
+        executions.wait_for_run,
+        project_root=project_dir.resolve(),
+        execution_id="run-1",
+    )
 
 
 def test_app_status_projects_runtime_state_for_starting_session(project_dir) -> None:
@@ -852,7 +903,7 @@ def test_app_sessions_list_routes_through_handle_command(project_dir) -> None:
     runtime.resolve_session_id.assert_called_once_with(
         project_root=project_dir.resolve(),
         requested_session_id=None,
-        policy=SessionResolutionPolicy(require_live_session=False),
+        require_live_session=False,
     )
     runtime.list_sessions.assert_called_once_with(project_root=project_dir.resolve())
 
@@ -880,7 +931,7 @@ def test_app_sessions_delete_routes_named_session_through_handle_command(project
     runtime.resolve_session_id.assert_called_once_with(
         project_root=project_dir.resolve(),
         requested_session_id="analysis",
-        policy=SessionResolutionPolicy(require_live_session=False),
+        require_live_session=False,
     )
     runtime.delete_session.assert_called_once_with(
         project_root=project_dir.resolve(),
@@ -956,10 +1007,7 @@ def test_app_status_remembers_implicit_session_selection(project_dir) -> None:
     response = app.status(StatusRequest(project_root=project_dir))
 
     assert response.status == "ok"
-    runtime.remember_current_session.assert_called_once_with(
-        project_root=project_dir.resolve(),
-        session_id="analysis",
-    )
+    runtime.remember_current_session.assert_not_called()
     assert response.data["switched_session"] == "analysis"
 
 

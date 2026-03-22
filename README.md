@@ -58,15 +58,21 @@ agentnb analysis.py
 agentnb "print(final_result)"
 ```
 
-`--session` and `--background` work in prefix position for inline code, file
-execution, and most subcommands. Putting them after the subcommand name always
-works:
+Canonical grammar is:
+
+```bash
+agentnb <command> [subcommand] [options]
+```
+
+For subcommands, put `--session` and `--project` after the command name. That
+is the documented always-works form:
 
 ```bash
 agentnb --session myenv "df.head()"     # prefix works for inline exec
 agentnb --background "long_task()"
 agentnb history --session myenv
 agentnb runs list --session myenv
+agentnb vars --project /path/to/project
 ```
 
 The default execution timeout is 30 seconds. Use `--timeout` for long-running
@@ -138,17 +144,18 @@ try out local functions as you improve them and reload them.
 
 ## Background Runs And History
 
-Use `wait` to just wait for the last command to finish:
+Use `wait` as the primary blocking readiness command:
 
 ```bash
 agentnb wait
 ```
 
-You can also check status with built-in wait modes:
+`status --wait` and `status --wait-idle` remain available as compatibility
+forms:
 
 ```bash
 agentnb status --wait         # wait until the session is ready
-agentnb status --wait-idle    # wait until idle (not executing)
+agentnb status --wait-idle    # compatibility form; prefer `agentnb wait`
 ```
 
 Use `--background` when you want to start work and come back to it later:
@@ -159,7 +166,15 @@ agentnb --background "long_task()"
 
 That command returns quickly with an `execution_id`. `agentnb` also records a
 durable run record for that execution, so you can look it up again even after
-the original command has finished printing output.
+the original command has finished printing output. After background launch,
+prefer explicit `execution_id` follow-up:
+
+```bash
+agentnb runs wait RUN_ID
+agentnb runs show RUN_ID
+agentnb runs follow RUN_ID
+agentnb runs cancel RUN_ID
+```
 
 Use `runs` when the question is about one specific execution:
 - "What is the latest stored state of this run?"
@@ -216,6 +231,7 @@ steps such as `exec`, `vars`, `inspect`, `reload`, and `reset`:
 agentnb history
 agentnb history --last 5
 agentnb history --errors
+agentnb history --successes --latest
 agentnb history --latest
 agentnb history @last-error
 agentnb history @last-success
@@ -391,7 +407,7 @@ some other working directory:
 
 ```bash
 uv run agentnb --project /path/to/project "from myapp.models import User"
-uv run agentnb --project /path/to/project runs follow --agent
+uv run agentnb runs follow --project /path/to/project --agent RUN_ID
 ```
 
 Use `--session` when you want more than one live kernel for the same project:
@@ -399,7 +415,8 @@ Use `--session` when you want more than one live kernel for the same project:
 ```bash
 agentnb --session analysis "1 + 1"
 agentnb start --session analysis
-agentnb sessions             # same as `agentnb sessions list`
+agentnb sessions list
+agentnb sessions             # supported alias for `sessions list`
 agentnb sessions delete analysis
 agentnb sessions delete --stale      # delete sessions with dead kernels
 agentnb sessions delete --all        # delete all sessions

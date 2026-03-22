@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tomllib
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from .contracts import CommandResponse, ExecutionResult, KernelStatus
@@ -8,7 +10,28 @@ from .payloads import DoctorPayload
 from .runtime import KernelRuntime
 from .session import DEFAULT_SESSION_ID, resolve_project_root
 
-__version__ = "0.1.1"
+
+def _read_version_from_pyproject() -> str:
+    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    if not pyproject_path.exists():
+        return "0.0.0"
+    payload = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    project = payload.get("project")
+    if isinstance(project, dict):
+        project_version = project.get("version")
+        if isinstance(project_version, str) and project_version:
+            return project_version
+    return "0.0.0"
+
+
+def _resolve_version() -> str:
+    try:
+        return version("agentnb")
+    except PackageNotFoundError:
+        return _read_version_from_pyproject()
+
+
+__version__ = _resolve_version()
 
 __all__ = [
     "CommandResponse",

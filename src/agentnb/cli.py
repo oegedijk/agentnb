@@ -8,6 +8,7 @@ from typing import Any
 
 import click
 
+from . import __version__
 from .advice import AdviceContext
 from .app import (
     AgentNBApp,
@@ -23,6 +24,7 @@ from .app import (
     RunsFollowRequest,
     RunsListRequest,
     RunsWaitRequest,
+    SessionsDeleteBulkRequest,
     SessionsDeleteRequest,
     SessionsListRequest,
     StartRequest,
@@ -120,6 +122,7 @@ def root_options(func):
     invoke_without_command=True,
     context_settings={"help_option_names": ["--help", "-h"]},
 )
+@click.version_option(version=__version__, prog_name="agentnb")
 @root_options
 @click.pass_context
 def main(
@@ -136,6 +139,7 @@ def main(
       agentnb "import json"
       agentnb "payload.keys()"
       agentnb analysis.py
+      agentnb wait
       agentnb --background "long_task()"
       agentnb --session myenv "df.head()"
       agentnb --timeout 120 "train_model()"
@@ -153,7 +157,7 @@ def main(
       agentnb vars                  agentnb inspect df
       agentnb history --last 5      agentnb history @last-error
       agentnb runs show @latest     agentnb runs list --last 10
-      agentnb wait                  agentnb interrupt
+      agentnb wait                  agentnb sessions list
       agentnb reset                 agentnb reload
 
     \b
@@ -169,11 +173,13 @@ def main(
     use `agentnb wait`, `agentnb status --wait-idle`, or `agentnb runs
     wait/show` when you want explicit control over sequencing.
 
-    `--session NAME` and `--background` work in prefix position for inline
-    exec and for most subcommands. Putting them after the subcommand name is
-    the safest form and always works. When code contains braces or quotes,
-    prefer heredoc or --file over inline strings. Do not use `\\n` to embed
-    newlines in an inline string; use heredoc instead.
+    Canonical grammar: `agentnb <command> [subcommand] [options]`. For
+    subcommands, put `--session` and `--project` after the command name; that
+    is the always-works documented form. `wait` is the primary blocking
+    command. `status --wait` and `status --wait-idle` remain compatibility
+    forms. When code contains braces or quotes, prefer heredoc or --file over
+    inline strings. Do not use `\\n` to embed newlines in an inline string;
+    use heredoc instead.
 
     `--agent` returns compact JSON. `--json` returns the full stable envelope.
     The `result` field is the Python repr of the return value; when valid
@@ -641,12 +647,12 @@ def reload_cmd(
 @click.option(
     "--wait",
     is_flag=True,
-    help="Wait until the target session is alive and ready to answer status checks.",
+    help="Compatibility: wait until the target session is ready. Prefer `agentnb wait`.",
 )
 @click.option(
     "--wait-idle",
     is_flag=True,
-    help="Wait until the target session is alive and not executing another command.",
+    help="Compatibility: wait until the target session is idle. Prefer `agentnb wait`.",
 )
 @click.option(
     "--timeout",
@@ -666,11 +672,10 @@ def status(
     session_id: str | None,
     as_json: bool,
 ) -> None:
-    """Check whether the project's kernel is currently running.
+    """Inspect the current kernel state.
 
-    Use --wait when you want to block until a starting session becomes alive.
-    Use --wait-idle when you want to block until the session is alive and free
-    for the next command.
+    Use `agentnb wait` for the primary blocking readiness path. `status --wait`
+    and `status --wait-idle` remain compatibility modes.
     """
 
     if wait and wait_idle:
@@ -706,10 +711,9 @@ def wait(
     """Wait until the target session is usable for the next command.
 
     If the session is starting, wait until it is ready. If it is busy, wait
-    until it is idle. If it is already usable, return immediately with the
-    current status payload. Use this when the question is simply "can I send
-    the next command yet?"; use `status --wait-idle` when you also want an
-    explicit status check surface.
+    until it is idle. If a background run is still active for the session,
+    wait for that run to finish too. If it is already usable, return
+    immediately with the current status payload.
     """
 
     request = WaitRequest(
@@ -723,6 +727,7 @@ def wait(
 @main.command()
 @click.argument("reference", required=False, callback=_history_reference_callback)
 @click.option("--errors", is_flag=True, help="Only show failed executions")
+@click.option("--successes", is_flag=True, help="Only show successful executions")
 @click.option("--latest", is_flag=True, help="Show only the most recent history entry")
 @click.option("--last", type=click.IntRange(min=1), default=None, help="Show the last N entries")
 @click.option("--all", "include_internal", is_flag=True, help="Include internal kernel executions")
@@ -733,6 +738,7 @@ def wait(
 def history(
     reference: HistoryReference | None,
     errors: bool,
+    successes: bool,
     latest: bool,
     last: int | None,
     include_internal: bool,
@@ -755,6 +761,7 @@ def history(
         session_id=session_id,
         reference=reference,
         errors=errors,
+        successes=successes,
         latest=latest,
         last=last,
         include_internal=include_internal,
@@ -843,7 +850,8 @@ def doctor(
 def sessions_group(ctx: click.Context, project: Path | None, as_json: bool) -> None:
     """Inspect and manage named sessions for the current project.
 
-    Bare `agentnb sessions` lists all live sessions (same as `sessions list`).
+    Use `agentnb sessions list` as the canonical listing form. Bare
+    `agentnb sessions` remains a supported alias.
     """
     if ctx.invoked_subcommand is None:
         ctx.invoke(sessions_list, project=project, as_json=as_json)
@@ -898,34 +906,22 @@ def sessions_delete(
         _emit(application.sessions_delete(request), as_json=as_json)
         return
 
-    sessions = runtime.list_sessions(project_root=project_root)
-    deleted: list[str] = []
-    for session in sessions:
-        sid = session.get("session_id")
-        if not isinstance(sid, str):
-            continue
-        if delete_stale and session.get("alive"):
-            continue
-        try:
-            runtime.delete_session(project_root=project_root, session_id=sid)
-            deleted.append(sid)
-        except Exception:
-            pass
-    options = _current_render_options(local_as_json=as_json)
-    if options.as_json:
-        import json as _json
-
-        click.echo(_json.dumps({"ok": True, "deleted": deleted, "count": len(deleted)}))
-    else:
-        if deleted:
-            click.echo(f"Deleted {len(deleted)} session(s): {', '.join(deleted)}")
-        else:
-            click.echo("No sessions to delete.")
+    bulk_request = SessionsDeleteBulkRequest(
+        project_root=project_root,
+        stale_only=delete_stale,
+    )
+    _emit(application.sessions_delete_bulk(bulk_request), as_json=as_json)
 
 
-@main.group("runs")
-def runs_group() -> None:
-    """Inspect persisted execution records for exec and reset commands."""
+@main.group("runs", invoke_without_command=True)
+@click.pass_context
+def runs_group(ctx: click.Context) -> None:
+    """Inspect persisted execution records for exec and reset commands.
+
+    Bare `agentnb runs` lists recent runs (same as `runs list`).
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(runs_list)
 
 
 @runs_group.command("list")

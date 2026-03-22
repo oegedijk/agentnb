@@ -223,6 +223,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             else:
                 lines = [_render_var_entry(item) for item in vars_data]
                 body = "\n".join(lines)
+            body = _prepend_session_identity(body, response.session_id)
             body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
         elif command == "inspect":
@@ -256,6 +257,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 ]
                 lines.append(f"members: {members_text}")
             body = "\n".join(lines)
+            body = _prepend_session_identity(body, response.session_id)
             body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
         elif command == "reload":
@@ -317,6 +319,12 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         elif command == "sessions-delete":
             stopped = " and stopped its kernel" if data.get("stopped_running_kernel") else ""
             body = f"Deleted session {data.get('session_id')}{stopped}."
+        elif command == "sessions-delete-bulk":
+            deleted = data.get("deleted", [])
+            if isinstance(deleted, list) and deleted:
+                body = f"Deleted {len(deleted)} session(s): {', '.join(str(s) for s in deleted)}"
+            else:
+                body = "No sessions to delete."
         elif command == "runs-list":
             runs = cast(RunsListPayload, data).get("runs", [])
             if not runs:
@@ -392,6 +400,12 @@ def _render_exec_like(data: ExecPayload) -> str:
             return f"Background execution started ({execution_id})."
         lines.append("Execution completed.")
     return "\n".join(lines)
+
+
+def _prepend_session_identity(body: str, session_id: str | None) -> str:
+    if not session_id:
+        return body
+    return f"session: {session_id}\n{body}"
 
 
 def _render_var_entry(item: VarDisplayEntry) -> str:

@@ -367,7 +367,9 @@ def test_render_human_vars_and_empty_history() -> None:
         data={"entries": []},
     )
 
-    assert render_human(vars_response, options=RenderOptions()) == "value: 42 (int)"
+    assert (
+        render_human(vars_response, options=RenderOptions()) == "session: default\nvalue: 42 (int)"
+    )
     assert render_human(history_response, options=RenderOptions()) == "No history entries."
 
 
@@ -387,7 +389,7 @@ def test_render_human_vars_appends_helper_access_note() -> None:
     )
 
     assert render_human(response, options=RenderOptions()) == (
-        "value: 42 (int)\n(auto-started session; waited 25ms for idle from busy)"
+        "session: default\nvalue: 42 (int)\n(auto-started session; waited 25ms for idle from busy)"
     )
 
 
@@ -407,7 +409,7 @@ def test_render_human_inspect_generic_shape() -> None:
     )
 
     assert render_human(response, options=RenderOptions()) == (
-        "name: thing\ntype: Thing\nrepr: Thing(value=1)\nmembers: alpha, beta"
+        "session: default\nname: thing\ntype: Thing\nrepr: Thing(value=1)\nmembers: alpha, beta"
     )
 
 
@@ -431,7 +433,8 @@ def test_render_human_inspect_mapping_preview() -> None:
     )
 
     assert render_human(response, options=RenderOptions()) == (
-        'name: payload\ntype: dict\nlength: 2\nkeys: alpha, beta\nsample: {"alpha": 1, "beta": 2}'
+        "session: default\nname: payload\ntype: dict\nlength: 2\nkeys: alpha, beta\n"
+        'sample: {"alpha": 1, "beta": 2}'
     )
 
 

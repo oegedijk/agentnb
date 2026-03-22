@@ -152,6 +152,65 @@ v0.3.5 closed the highest-friction agent issues around helper reads, session amb
 ### Remaining
 
 - Large-value exec output still leans on repr strings; bounded structured exec summaries remain future work.
+  - problem:
+    - `exec` still mostly surfaces the backend result as a compacted string repr
+    - this is acceptable for scalars but weak for lists, dicts, dataframe-like values, and nested structures where agents need a quick shape summary rather than a long opaque repr
+  - owning seams:
+    - [execution_output.py](/Users/oege/projects/agentnb/src/agentnb/execution_output.py) for stable output modeling
+    - [compact.py](/Users/oege/projects/agentnb/src/agentnb/compact.py) for bounded summary logic
+    - [app.py](/Users/oege/projects/agentnb/src/agentnb/app.py), [projection.py](/Users/oege/projects/agentnb/src/agentnb/projection.py), and [output.py](/Users/oege/projects/agentnb/src/agentnb/output.py) only as consumers of the summary
+  - minimal implementation guidance:
+    - keep `result` as the compatibility field
+    - add a bounded structured summary for common container-like results instead of pushing more repr truncation into each caller
+    - prefer a narrow exec-summary seam over a broad response refactor
+  - validation:
+    - unit tests around compact summaries for sequence-like, mapping-like, and dataframe-like exec results
+    - CLI smoke with `uv run agentnb exec --json` on a large list/dict/dataframe-like value to confirm the response stays compact and decision-useful
+
+- JSON cleanup beyond structured suggestion actions, including traceback hygiene, remains future work.
+  - problem:
+    - error details are cleaner than before, but `exec` and agent-mode responses still mix compact payload fields, top-level error envelopes, and traceback cleanup in more than one place
+    - this makes the machine contract harder to reason about and encourages ad hoc shaping
+  - owning seams:
+    - [compact.py](/Users/oege/projects/agentnb/src/agentnb/compact.py) for traceback cleanup and bounded error text
+    - [projection.py](/Users/oege/projects/agentnb/src/agentnb/projection.py) for compact agent projection
+    - [contracts.py](/Users/oege/projects/agentnb/src/agentnb/contracts.py) as the stable envelope boundary
+  - minimal implementation guidance:
+    - keep one canonical traceback-cleaning path
+    - keep machine-oriented detail opt-in and compact by default
+    - do not add more command-local shaping branches in `app.py`; prefer cleaning once and projecting many times
+  - validation:
+    - contract-focused tests for `--json` and `--agent` parity on representative execution failures
+    - smoke with `uv run agentnb exec --json "1/0"` and `uv run agentnb exec --agent "1/0"` to verify stable top-level error fields and compact tracebacks
+
+- Wait-state visibility for `status --wait-idle` can still get clearer in human output.
+  - problem:
+    - `status --wait-idle` is now a more reliable readiness gate, but human output is still terse and does not clearly explain that it waited, or what condition it satisfied before returning
+  - owning seams:
+    - [app.py](/Users/oege/projects/agentnb/src/agentnb/app.py) for the wait payload facts already emitted (`waited`, `waited_for`)
+    - [output.py](/Users/oege/projects/agentnb/src/agentnb/output.py) for the actual user-facing clarity improvement
+  - minimal implementation guidance:
+    - treat this as a presentation problem, not another runtime/race fix
+    - make human output explicitly mention that the command waited for the session to become idle when that happened
+    - only add new payload fields if the existing `waited` / `waited_for` facts are insufficient
+  - validation:
+    - renderer tests proving waited status is visible in human mode
+    - smoke with a short background run followed immediately by `uv run agentnb status --wait-idle`
+
+- Missing-dependency recovery inside fresh pip-less interpreters remains future work.
+  - problem:
+    - the interpreter selection and install path in `doctor` / `start` is better than before, but pip-less environments still need clearer recovery and cleaner fallback behavior
+    - the rough edge is not just install failure; it is making the next working command obvious when `pip` is absent
+  - owning seams:
+    - [kernel/provisioner.py](/Users/oege/projects/agentnb/src/agentnb/kernel/provisioner.py) for interpreter selection, install fallback, and doctor reporting
+    - advice/help call sites only for messaging consistency, not provisioning logic
+  - minimal implementation guidance:
+    - make `ProvisioningError` messages explicit about the exact manual recovery command in pip-less environments
+    - keep `doctor` and `start` aligned on the same recovery wording
+    - degrade cleanly when `pip` is unavailable rather than implying the normal `python -m pip install ...` path will work
+  - validation:
+    - unit tests for pip-missing interpreter selection/install failure branches
+    - smoke against a controlled pip-less interpreter or a stubbed provisioner path to verify `doctor` / `start` suggestions are actionable
 - JSON cleanup beyond structured suggestion actions, including traceback hygiene, remains future work.
 - Wait-state visibility for `status --wait-idle` can still get clearer in human output.
 - Missing-dependency recovery inside fresh pip-less interpreters remains future work.
@@ -215,11 +274,13 @@ v0.3.6 should remove the remaining agent-confusing behaviors without expanding m
   - own selector/flag equivalence, contradiction checks, and the `--successes` addition
 
 - `InvocationResolver` plus CLI help and docs:
-  - own canonical command grammar, root-flag placement guidance, and the return to help-only bare `sessions`
+  - own canonical command grammar, root-flag placement guidance, support for compatibility aliases, and the top-level `--version` / help wording cleanup
+
+- `ResponseProjector` / output rendering:
+  - include `session_id` in human-mode output headers when more than one session is alive for the project
 
 - Docs/help parity tests:
-  - ensure README, `--help`, and agent skill examples stay aligned with the actual surface
-
+  - ensure README, `--help`, and agent skill examples stay aligned with the actual surface and the intended primary command paths
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 
 ### Goals

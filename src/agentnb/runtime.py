@@ -126,7 +126,6 @@ class KernelRuntime:
         project_root: Path,
         session_id: str = DEFAULT_SESSION_ID,
         python_executable: Path | None = None,
-        auto_install: bool = False,
     ) -> tuple[KernelStatus, bool]:
         store, state = self._resolve_runtime_state(
             project_root=project_root,
@@ -138,9 +137,7 @@ class KernelRuntime:
             store.clear_session()
 
         provisioner = self._provisioner_factory(store.project_root)
-        provisioned = provisioner.provision(
-            preferred_python=python_executable, auto_install=auto_install
-        )
+        provisioned = provisioner.provision(preferred_python=python_executable)
 
         session = self._backend.start(
             project_root=store.project_root,
@@ -166,6 +163,7 @@ class KernelRuntime:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
         self._backend.stop(session)
         store.clear_session()
+        self.clear_current_session_id(project_root=project_root, expected_session_id=session_id)
         self._hooks.on_kernel_stop(store.project_root, store.session_id, session)
 
     def stop_starting(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
@@ -175,6 +173,7 @@ class KernelRuntime:
             raise NoKernelRunningError()
         self._backend.stop(session)
         store.delete_session()
+        self.clear_current_session_id(project_root=project_root, expected_session_id=session_id)
         self._hooks.on_kernel_stop(store.project_root, store.session_id, session)
 
     def ensure_started(
@@ -568,7 +567,6 @@ class KernelRuntime:
         project_root: Path,
         session_id: str = DEFAULT_SESSION_ID,
         python_executable: Path | None = None,
-        auto_fix: bool = False,
     ) -> DoctorPayload:
         store, state = self._resolve_runtime_state(
             project_root=project_root,
@@ -576,7 +574,6 @@ class KernelRuntime:
         )
         report = self._provisioner_factory(store.project_root).doctor(
             preferred_python=python_executable,
-            auto_fix=auto_fix,
         )
         payload = cast(DoctorPayload, report.to_dict())
         status = state.to_kernel_status()

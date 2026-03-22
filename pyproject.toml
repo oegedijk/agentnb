@@ -1,6 +1,6 @@
 [project]
 name = "agentnb"
-version = "0.3.6"
+version = "0.3.7"
 description = "A persistent Python REPL for AI agents, driven from the CLI"
 readme = "README.md"
 license = "MIT"

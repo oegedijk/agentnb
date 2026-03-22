@@ -68,6 +68,12 @@ class ResponseProjector:
                 "background",
                 "ensured_started",
                 "started_new_session",
+                "initial_runtime_state",
+                "session_restarted",
+                "session_python",
+                "source_kind",
+                "source_path",
+                "namespace_delta",
                 "wait_behavior",
                 "waited_ms",
                 "lock_pid",
@@ -93,12 +99,20 @@ class ResponseProjector:
         if command_name == "runs-show":
             run = data.get("run")
             if isinstance(run, dict):
-                return {"run": compact_run_entry(cast(RunSnapshot, run))}
+                projected: dict[str, object] = {"run": compact_run_entry(cast(RunSnapshot, run))}
+                status = data.get("status")
+                if isinstance(status, str):
+                    projected["status"] = status
+                return projected
             return {}
         if command_name == "runs-follow":
             run = data.get("run")
             if isinstance(run, dict):
-                return {"run": compact_run_entry(cast(RunSnapshot, run))}
+                projected: dict[str, object] = {"run": compact_run_entry(cast(RunSnapshot, run))}
+                status = data.get("status")
+                if isinstance(status, str):
+                    projected["status"] = status
+                return projected
             return {}
         if command_name == "runs-wait":
             run = data.get("run")
@@ -106,7 +120,11 @@ class ResponseProjector:
                 run_snapshot = cast(RunSnapshot, run)
                 compacted = compact_run_entry(run_snapshot)
                 compacted["status"] = run_snapshot.get("status")
-                return {"run": compacted}
+                projected: dict[str, object] = {"run": compacted}
+                status = data.get("status")
+                if isinstance(status, str):
+                    projected["status"] = status
+                return projected
             return {}
         if command_name == "runs-cancel":
             return _subset(

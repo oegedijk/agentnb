@@ -4,7 +4,7 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import click
 
@@ -44,7 +44,7 @@ from .execution import ExecutionService
 from .execution_invocation import ExecInvocationPolicy, OutputSelector, StartupPolicy
 from .invocation import ROOT_OPTION_SPECS, InvocationResolver
 from .ops import NotebookOps
-from .output import RenderOptions, projector, render_response
+from .output import RenderOptions, projector, render_response, render_stream_completion
 from .runtime import KernelRuntime
 from .selectors import (
     HistoryReference,
@@ -155,6 +155,7 @@ def main(
     \b
     Inspect and recover:
       agentnb vars                  agentnb inspect df
+      agentnb inspect "payload['items'][0]"
       agentnb history --last 5      agentnb history @last-error
       agentnb runs show @latest     agentnb runs list --last 10
       agentnb wait                  agentnb sessions list
@@ -174,8 +175,10 @@ def main(
     wait/show` when you want explicit control over sequencing.
 
     Canonical grammar: `agentnb <command> [subcommand] [options]`. For
-    subcommands, put `--session` and `--project` after the command name; that
-    is the always-works documented form. `wait` is the primary blocking
+    subcommands, put `--project` after the command name. Session-scoped
+    subcommands also accept `--session` there, but execution-id `runs`
+    subcommands (`show`, `wait`, `follow`, `cancel`) are project-scoped and
+    intentionally do not accept `--session`. `wait` is the primary blocking
     command. `status --wait` and `status --wait-idle` remain compatibility
     forms. When code contains braces or quotes, prefer heredoc or --file over
     inline strings. Do not use `\\n` to embed newlines in an inline string;
@@ -184,8 +187,11 @@ def main(
     `--agent` returns compact JSON. `--json` returns the full stable envelope.
     The `result` field is the Python repr of the return value; when valid
     JSON can be extracted, a `result_json` field is also included with the
-    parsed value. `--quiet` and `--no-suggestions` reduce noise. `history`
-    and `runs list` accept `--last N` and `--errors` to limit output.
+    parsed value. `--quiet` trims non-essential success-path chatter, while
+    `--no-suggestions` suppresses the `Next:` block. `history` and `runs
+    list` accept `--last N` and `--errors` to limit output. `start` and
+    `doctor` never install packages for you; if `ipykernel` is missing, they
+    print one explicit shell command and tell you to restart with `--fresh`.
     """
     ctx.obj = RenderOptions.resolve(
         root_as_json=root_as_json,
@@ -267,12 +273,7 @@ def _history_reference_callback(
 
 def _emit(response: CommandResponse, *, as_json: bool) -> None:
     options = _current_render_options(local_as_json=as_json)
-    if response.command == "exec" and response.data.get("selected_output") is not None:
-        response = replace(response, suggestions=[])
-    if options.quiet or not options.show_suggestions:
-        response = replace(response, suggestions=[])
-    elif not options.as_json:
-        response = replace(response, suggestions=_strip_json_suffix(response.suggestions))
+    response = _prepare_response_for_rendering(response, options=options)
     rendered = render_response(response, options=options)
     if rendered:
         click.echo(rendered)
@@ -340,10 +341,7 @@ def _emit_stream_completion(
     stream: ExecutionSink | None = None,
 ) -> None:
     options = _current_render_options(local_as_json=as_json)
-    if options.quiet or not options.show_suggestions:
-        response = replace(response, suggestions=[])
-    elif not options.as_json:
-        response = replace(response, suggestions=_strip_json_suffix(response.suggestions))
+    response = _prepare_response_for_rendering(response, options=options)
 
     if options.as_json:
         _emit_json_stream_frame(
@@ -354,54 +352,55 @@ def _emit_stream_completion(
         )
     else:
         human_stream = stream if isinstance(stream, HumanExecutionStream) else None
-        if response.status == "ok" and human_stream is not None and not human_stream.emitted_output:
-            click.echo("Execution completed.")
-        if response.status == "error":
-            rendered = render_response(response, options=options)
-            if rendered:
-                click.echo(rendered, err=True)
-        elif response.suggestions:
-            click.echo(_render_suggestions_block(response.suggestions))
+        rendered = render_stream_completion(
+            response,
+            options=options,
+            output_emitted=bool(human_stream and human_stream.emitted_output),
+        )
+        if rendered:
+            click.echo(rendered, err=response.status == "error")
 
     if response.status == "error":
         raise click.exceptions.Exit(1)
 
 
-def _render_suggestions_block(suggestions: list[str]) -> str:
-    lines = ["", "Next:"]
-    lines.extend(f"- {suggestion}" for suggestion in suggestions)
-    return "\n".join(lines)
+def _prepare_response_for_rendering(
+    response: CommandResponse,
+    *,
+    options: RenderOptions,
+) -> CommandResponse:
+    if response.command == "exec" and response.data.get("selected_output") is not None:
+        response = replace(response, suggestions=[])
+    if not options.show_suggestions:
+        return replace(response, suggestions=[])
+    if not options.as_json:
+        return replace(response, suggestions=_strip_json_suffix(response.suggestions))
+    return response
 
 
 @main.command()
 @project_option
 @session_option
 @python_option
-@click.option(
-    "--auto-install",
-    is_flag=True,
-    help="Install ipykernel into the selected interpreter if it is missing.",
-)
 @json_option
 def start(
     project: Path | None,
     session_id: str | None,
     python_executable: Path | None,
-    auto_install: bool,
     as_json: bool,
 ) -> None:
     """Start or reuse the project's persistent kernel.
 
     The interpreter is selected from --python, .venv, VIRTUAL_ENV, or the
-    current Python executable. Without --auto-install, startup fails with the
-    exact install command if ipykernel is missing.
+    current Python executable. If ipykernel is missing, startup fails with the
+    exact install command and tells you to restart cleanly afterward; `start`
+    does not modify the environment itself.
     """
 
     request = StartRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
         session_id=session_id,
         python_executable=python_executable,
-        auto_install=auto_install,
     )
     _emit(application.start(request), as_json=as_json)
 
@@ -469,9 +468,11 @@ def exec_cmd(
     session starts automatically unless you pass --no-ensure-started, which
     makes missing-session startup fail fast instead. Like a notebook cell, the
     final expression is returned as the execution result, while `print(...)`
-    writes to stdout. `--fresh` restarts the whole session process before
-    executing; use `reset` when you only want to clear user state in the
-    existing process.
+    writes to stdout. Quiet file execution can return a compact namespace
+    change summary when a script ends in assignments instead of a final
+    expression. `--fresh` restarts the whole session process before executing;
+    use `reset` when you only want to clear user state in the existing
+    process.
 
     Examples:
 
@@ -528,6 +529,8 @@ def exec_cmd(
         code=source.code,
         session_id=session_id,
         timeout_s=timeout,
+        source_kind=cast(Any, source.source_kind),
+        source_path=source.path,
         invocation=ExecInvocationPolicy.from_cli(
             startup_policy=startup_policy,
             background=background,
@@ -603,9 +606,10 @@ def inspect_cmd(name: str, project: Path | None, session_id: str | None, as_json
     """Inspect one variable in the kernel namespace.
 
     Dataframe-like values get a compact tabular preview. Lists, tuples, sets,
-    and dicts get a compact structural preview instead of a generic repr. This
-    command auto-starts a missing session when targeting is unambiguous and
-    waits behind active same-session work.
+    and dicts get a compact structural preview instead of a generic repr.
+    Dotted and constant-index references such as `df.a` and `payload['items'][0]`
+    are supported. This command auto-starts a missing session when targeting
+    is unambiguous and waits behind active same-session work.
     """
 
     request = InspectRequest(
@@ -752,8 +756,9 @@ def history(
     By default, this shows semantic user-visible steps such as exec, vars,
     inspect, reload, and reset. Pass --all to include internal helper
     executions such as the helper calls behind `vars`, `inspect`, and
-    `reload`. History entries are compact summaries by default; use --full to
-    see complete stored code and output.
+    `reload`. Selectors such as `@latest`, `@last-error`, and
+    `@last-success` are supported for REFERENCE. History entries are compact
+    summaries by default; use --full to see complete stored code and output.
     """
 
     request = HistoryRequest(
@@ -818,27 +823,25 @@ def stop(project: Path | None, session_id: str | None, as_json: bool) -> None:
 @project_option
 @session_option
 @python_option
-@click.option("--fix", is_flag=True, help="Attempt to auto-fix issues when possible")
 @json_option
 def doctor(
     project: Path | None,
     session_id: str | None,
     python_executable: Path | None,
-    fix: bool,
     as_json: bool,
 ) -> None:
     """Check interpreter and kernel prerequisites for startup.
 
     Use this when start fails, the wrong interpreter is selected, or ipykernel
-    is missing. Pass --fix to attempt automatic remediation when supported,
-    such as installing missing ipykernel into the selected interpreter.
+    is missing. Doctor reports one explicit install command when a dependency
+    is missing; run that command in your shell, then restart with `--fresh`.
+    Doctor does not install packages on your behalf.
     """
 
     request = DoctorRequest(
         project_root=resolve_project_root(cwd=Path.cwd(), override=project),
         session_id=session_id,
         python_executable=python_executable,
-        auto_fix=fix,
     )
     _emit(application.doctor(request), as_json=as_json)
 

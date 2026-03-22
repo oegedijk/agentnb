@@ -102,6 +102,20 @@ class AdvicePolicy:
             if context.error_name == "ModuleNotFoundError":
                 module = _extract_module_name(context.error_value)
                 if module:
+                    session_python = _session_python(context.data)
+                    if session_python:
+                        return [
+                            (
+                                "Repair the live session: run "
+                                f"`uv pip install --python {session_python} {module}` "
+                                "in your shell."
+                            ),
+                            (
+                                "For a durable project dependency, run "
+                                f"`uv add {module}` in your shell."
+                            ),
+                            "Then retry the execution.",
+                        ]
                     return [
                         (
                             f"Install the missing module: run `uv add {module}` "
@@ -111,11 +125,19 @@ class AdvicePolicy:
                     ]
             if _missing_pip_in_called_process(context):
                 package = _extract_pip_install_target(context.error_value)
-                install_hint = (
-                    f"run `uv add {package}` in your shell (not inside the session)."
-                    if package
-                    else "use `uv add PACKAGE` in your shell (not inside the session)."
-                )
+                session_python = _session_python(context.data)
+                if package and session_python:
+                    install_hint = (
+                        f"run `uv pip install --python {session_python} {package}` in your shell."
+                    )
+                elif session_python:
+                    install_hint = (
+                        f"use `uv pip install --python {session_python} PACKAGE` in your shell."
+                    )
+                elif package:
+                    install_hint = f"run `uv add {package}` in your shell (not inside the session)."
+                else:
+                    install_hint = "use `uv add PACKAGE` in your shell (not inside the session)."
                 return [
                     "The selected interpreter does not provide pip inside the live session.",
                     f"Install the dependency from this project with {install_hint}",
@@ -173,7 +195,11 @@ class AdvicePolicy:
                     ]
                 return ["Run `agentnb start --json` to start the kernel."]
             return [
-                "Run `agentnb doctor --fix --json` to attempt automatic fixes.",
+                "Run the install command shown by `agentnb doctor --json` in your shell.",
+                (
+                    'Then restart with `agentnb --fresh "..." --json` '
+                    "or run `agentnb start --json` again."
+                ),
                 (
                     "Run `agentnb start --python /path/to/python --json` "
                     "to try a specific interpreter."
@@ -296,9 +322,36 @@ class AdvicePolicy:
             if context.error_name == "ModuleNotFoundError":
                 module = _extract_module_name(context.error_value)
                 if module:
+                    session_python = _session_python(data)
+                    if session_python:
+                        return [
+                            _shell_action(
+                                "Repair live session",
+                                "uv",
+                                "pip",
+                                "install",
+                                "--python",
+                                session_python,
+                                module,
+                            ),
+                            _shell_action("Add dependency", "uv", "add", module),
+                        ]
                     return [_shell_action("Install dependency", "uv", "add", module)]
             if _missing_pip_in_called_process(context):
                 package = _extract_pip_install_target(context.error_value)
+                session_python = _session_python(data)
+                if package and session_python:
+                    return [
+                        _shell_action(
+                            "Repair live session",
+                            "uv",
+                            "pip",
+                            "install",
+                            "--python",
+                            session_python,
+                            package,
+                        )
+                    ]
                 if package:
                     return [_shell_action("Install dependency", "uv", "add", package)]
         return []
@@ -350,12 +403,25 @@ def _missing_pip_in_called_process(context: AdviceContext) -> bool:
     return bool(context.error_value and "No module named pip" in context.error_value)
 
 
+def _session_python(data: Mapping[str, object]) -> str | None:
+    value = data.get("session_python")
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
 def _exec_output_is_empty(data: Mapping[str, object]) -> bool:
     for key in ("result", "stdout", "stderr", "selected_text"):
         value = data.get(key)
         if isinstance(value, str) and value:
             return False
-    return True
+    namespace_delta = data.get("namespace_delta")
+    entries = (
+        cast(Mapping[str, object], namespace_delta).get("entries")
+        if isinstance(namespace_delta, dict)
+        else None
+    )
+    return not entries
 
 
 def _agentnb_action(label: str, *args: str) -> SuggestionAction:

@@ -58,14 +58,20 @@ agentnb analysis.py
 agentnb "print(final_result)"
 ```
 
+If a file ends in assignments instead of a final expression, `agentnb` reports
+a compact namespace-change summary so you can see what became available
+without an immediate follow-up `vars`.
+
 Canonical grammar is:
 
 ```bash
 agentnb <command> [subcommand] [options]
 ```
 
-For subcommands, put `--session` and `--project` after the command name. That
-is the documented always-works form:
+For subcommands, put `--project` after the command name. Session-scoped
+subcommands also accept `--session` there, but execution-id `runs`
+subcommands (`show`, `wait`, `follow`, `cancel`) are project-scoped and do
+not accept `--session`:
 
 ```bash
 agentnb --session myenv "df.head()"     # prefix works for inline exec
@@ -73,6 +79,7 @@ agentnb --background "long_task()"
 agentnb history --session myenv
 agentnb runs list --session myenv
 agentnb vars --project /path/to/project
+agentnb runs show RUN_ID --project /path/to/project
 ```
 
 The default execution timeout is 30 seconds. Use `--timeout` for long-running
@@ -125,6 +132,7 @@ agentnb vars
 agentnb vars --recent 5
 agentnb vars --match rows
 agentnb inspect df
+agentnb inspect "payload['items'][0]"
 ```
 
 ## Reloading Local Imports
@@ -377,7 +385,6 @@ agentnb interrupt
 agentnb reset
 agentnb stop
 agentnb doctor
-agentnb doctor --fix
 ```
 
 Use:
@@ -394,8 +401,10 @@ On `agentnb start`, the runtime selects an interpreter in this order:
 4. current Python executable
 
 If `ipykernel` is missing for the selected interpreter, `agentnb start` fails
-with the exact install command. Pass `--auto-install` to let `agentnb` install
-it, or use `agentnb doctor --fix`.
+with the exact install command and a `--fresh` restart hint. `agentnb doctor`
+reports the same command without modifying the environment. Run the command in
+your shell, then restart cleanly with `agentnb --fresh "..."` or rerun
+`agentnb start`.
 
 ## Projects And Sessions
 

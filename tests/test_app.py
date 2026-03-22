@@ -23,7 +23,7 @@ from agentnb.app import (
 )
 from agentnb.contracts import HelperAccessMetadata, KernelStatus
 from agentnb.errors import AmbiguousSessionError
-from agentnb.execution import ExecutionRecord, ExecutionService, ManagedExecution
+from agentnb.execution import ExecutionRecord, ExecutionService, ManagedExecution, StartOutcome
 from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry
@@ -117,7 +117,7 @@ def test_app_exec_success_routes_through_resolved_session(project_dir) -> None:
             code="1 + 1",
             result="2",
         ),
-        started_new_session=True,
+        start_outcome=StartOutcome(started_new_session=True, initial_runtime_state="missing"),
     )
     app = AgentNBApp(runtime=runtime, executions=executions)
 
@@ -208,7 +208,7 @@ def test_app_exec_background_success_uses_background_service(project_dir) -> Non
             duration_ms=0,
             code="long_running()",
         ),
-        started_new_session=True,
+        start_outcome=StartOutcome(started_new_session=True, initial_runtime_state="missing"),
     )
     app = AgentNBApp(runtime=runtime, executions=executions)
 
@@ -1075,3 +1075,92 @@ def test_app_runs_show_does_not_remember_session_preference(project_dir) -> None
     assert response.status == "ok"
     runtime.remember_current_session.assert_not_called()
     assert "switched_session" not in response.data
+
+
+def test_app_runs_show_exposes_top_level_status_alias(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "default"
+    runtime.current_session_id.return_value = "analysis"
+    executions = Mock(spec=ExecutionService)
+    executions.get_run.return_value = {
+        "execution_id": "run-1",
+        "session_id": "other",
+        "status": "running",
+    }
+    app = AgentNBApp(runtime=runtime, executions=executions)
+
+    response = app.runs_show(
+        RunLookupRequest(project_root=project_dir, run_reference=parse_run_reference("run-1"))
+    )
+
+    assert response.status == "ok"
+    assert response.data["status"] == "running"
+    assert response.data["run"]["status"] == "running"
+
+
+def test_app_file_exec_without_visible_output_surfaces_namespace_delta(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    runtime.resolve_session_id.return_value = "default"
+    runtime.current_session_id.return_value = "default"
+    runtime.runtime_state.side_effect = [
+        RuntimeState(
+            kind="ready",
+            session_id="default",
+            kernel_status=KernelStatus(alive=True, pid=123, python="/python", busy=False),
+        ),
+        RuntimeState(
+            kind="ready",
+            session_id="default",
+            kernel_status=KernelStatus(alive=True, pid=123, python="/python", busy=False),
+        ),
+    ]
+    executions = Mock(spec=ExecutionService)
+    executions.execute_code.return_value = ManagedExecution(
+        record=ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="ok",
+            duration_ms=5,
+            code="value = 2",
+        ),
+        start_outcome=StartOutcome(),
+    )
+    ops = Mock(spec=NotebookOps)
+    ops.list_vars_result.side_effect = [
+        KernelHelperResult(
+            execution=Mock(),
+            payload=[{"name": "value", "type": "int", "repr": "1"}],
+        ),
+        KernelHelperResult(
+            execution=Mock(),
+            payload=[
+                {"name": "value", "type": "int", "repr": "2"},
+                {"name": "payload", "type": "dict", "repr": "dict len=1 keys=id"},
+            ],
+        ),
+    ]
+    app = AgentNBApp(runtime=runtime, executions=executions, ops=ops)
+
+    response = app.exec(
+        ExecRequest(
+            project_root=project_dir,
+            code="value = 2",
+            source_kind="file",
+            source_path=project_dir / "analysis.py",
+        )
+    )
+
+    assert response.status == "ok"
+    assert response.data["source_kind"] == "file"
+    assert response.data["source_path"] == str(project_dir / "analysis.py")
+    assert response.data["namespace_delta"] == {
+        "entries": [
+            {"change": "updated", "name": "value", "type": "int", "repr": "2"},
+            {"change": "new", "name": "payload", "type": "dict", "repr": "dict len=1 keys=id"},
+        ],
+        "new_count": 1,
+        "updated_count": 1,
+        "truncated": False,
+    }

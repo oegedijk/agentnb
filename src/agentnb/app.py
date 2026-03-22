@@ -24,8 +24,8 @@ from .contracts import (
     success_response,
 )
 from .errors import AgentNBException, KernelWaitTimedOutError
-from .execution import ExecutionService
-from .execution_invocation import ExecInvocationPolicy, OutputSelector
+from .execution import ExecutionService, ManagedExecution
+from .execution_invocation import ExecInvocationPolicy, ExecSourceKind, OutputSelector
 from .introspection import HelperExecutionPolicy
 from .ops import NotebookOps
 from .payloads import (
@@ -37,6 +37,8 @@ from .payloads import (
     InspectPreview,
     InspectResponsePayload,
     InterruptPayload,
+    NamespaceDeltaEntry,
+    NamespaceDeltaPayload,
     ReloadReport,
     RunLookupPayload,
     RunsListPayload,
@@ -92,13 +94,14 @@ class SessionRequest(ProjectRequest):
 class ExecRequest(SessionRequest):
     code: str
     timeout_s: float = 30.0
+    source_kind: ExecSourceKind = "argument"
+    source_path: Path | None = None
     invocation: ExecInvocationPolicy = field(default_factory=ExecInvocationPolicy)
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class StartRequest(SessionRequest):
     python_executable: Path | None = None
-    auto_install: bool = False
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -158,7 +161,6 @@ class StopRequest(SessionRequest):
 @dataclass(slots=True, frozen=True, kw_only=True)
 class DoctorRequest(SessionRequest):
     python_executable: Path | None = None
-    auto_fix: bool = False
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -505,11 +507,9 @@ class AgentNBApp:
             project_root=request.project_root,
             session_id=session_id,
             python_executable=request.python_executable,
-            auto_install=request.auto_install,
         )
         payload = cast(StartPayload, _kernel_status_payload(status))
         payload["started_new"] = started_new
-        payload["auto_install"] = request.auto_install
         return payload
 
     def _exec_payload(
@@ -520,6 +520,12 @@ class AgentNBApp:
         event_sink: ExecutionSink | None,
     ) -> ExecPayload:
         invocation = request.invocation
+        payload_builder = _ExecPayloadBuilder(
+            runtime=self.runtime,
+            ops=self.ops,
+            request=request,
+            session_id=session_id,
+        )
         if invocation.is_background:
             managed = self.executions.start_background_code(
                 project_root=request.project_root,
@@ -537,18 +543,7 @@ class AgentNBApp:
                 event_sink=invocation.streaming_sink(event_sink),
             )
 
-        payload = compact_execution_payload(
-            cast(CompactExecPayloadInput, managed.record.to_execution_payload()),
-            no_truncate=invocation.no_truncate,
-        )
-        if invocation.is_background:
-            payload["background"] = True
-        if invocation.ensure_started:
-            payload["ensured_started"] = True
-            payload["started_new_session"] = managed.started_new_session
-        if invocation.output_selector is not None:
-            payload["selected_output"] = invocation.output_selector
-            payload["selected_text"] = select_exec_output(payload, invocation.output_selector)
+        payload = payload_builder.build(managed)
 
         if not invocation.is_background and managed.record.status == "error":
             raise AgentNBException(
@@ -799,7 +794,6 @@ class AgentNBApp:
             project_root=request.project_root,
             session_id=session_id,
             python_executable=request.python_executable,
-            auto_fix=request.auto_fix,
         )
 
     def _runs_list_payload(self, *, request: RunsListRequest) -> RunsListPayload:
@@ -850,7 +844,11 @@ class AgentNBApp:
                 project_root=project_root,
                 execution_id=execution_id,
             )
-        return {"run": _public_run_payload(run)}
+        payload: RunLookupPayload = {"run": _public_run_payload(run)}
+        status = run.get("status")
+        if isinstance(status, str):
+            payload["status"] = status
+        return payload
 
     def _validate_exec_request(self, request: ExecRequest) -> CommandResponse | None:
         message = request.invocation.validation_error()
@@ -1180,6 +1178,169 @@ def _runtime_state_from_status(status: KernelStatus) -> RuntimeStateKind:
 
 def _sessions_list_payload(sessions: list[SessionSummary]) -> SessionsListPayload:
     return {"sessions": sessions}
+
+
+@dataclass(slots=True)
+class _ExecPayloadBuilder:
+    runtime: KernelRuntime
+    ops: NotebookOps
+    request: ExecRequest
+    session_id: str
+    namespace_before: list[VarDisplayEntry] | None = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.namespace_before = self._file_exec_namespace_snapshot()
+
+    def build(self, managed: ManagedExecution) -> ExecPayload:
+        invocation = self.request.invocation
+        payload = compact_execution_payload(
+            cast(CompactExecPayloadInput, managed.record.to_execution_payload()),
+            no_truncate=invocation.no_truncate,
+        )
+        payload["source_kind"] = self.request.source_kind
+        if self.request.source_path is not None:
+            payload["source_path"] = str(self.request.source_path)
+        if invocation.is_background:
+            payload["background"] = True
+        if invocation.ensure_started:
+            payload["ensured_started"] = True
+            payload["started_new_session"] = managed.start_outcome.started_new_session
+            if managed.start_outcome.initial_runtime_state is not None:
+                payload["initial_runtime_state"] = managed.start_outcome.initial_runtime_state
+            if managed.start_outcome.session_restarted:
+                payload["session_restarted"] = True
+        if invocation.output_selector is not None:
+            payload["selected_output"] = invocation.output_selector
+            payload["selected_text"] = select_exec_output(payload, invocation.output_selector)
+        session_python = self._session_python()
+        if session_python is not None:
+            payload["session_python"] = session_python
+        namespace_delta = self._file_exec_namespace_delta(payload)
+        if namespace_delta is not None:
+            payload["namespace_delta"] = namespace_delta
+        return payload
+
+    def _file_exec_namespace_snapshot(self) -> list[VarDisplayEntry] | None:
+        if self.request.source_kind != "file" or self.request.invocation.is_background:
+            return None
+        state = self.runtime.runtime_state(
+            project_root=self.request.project_root,
+            session_id=self.session_id,
+        )
+        if state.kind in {"missing", "dead", "stale"}:
+            return []
+        if state.kind == "starting":
+            return None
+        return self._ephemeral_vars_snapshot(
+            ensure_started=self.request.invocation.ensure_started,
+            wait_for_usable=True,
+        )
+
+    def _file_exec_namespace_delta(self, payload: ExecPayload) -> NamespaceDeltaPayload | None:
+        if self.request.source_kind != "file" or self.request.invocation.is_background:
+            return None
+        if payload.get("status") == "error":
+            return None
+        if self.namespace_before is None or not _exec_payload_is_empty(payload):
+            return None
+        after = self._ephemeral_vars_snapshot(
+            ensure_started=False,
+            wait_for_usable=False,
+        )
+        if after is None:
+            return None
+        return _namespace_delta(before=self.namespace_before, after=after)
+
+    def _ephemeral_vars_snapshot(
+        self,
+        *,
+        ensure_started: bool,
+        wait_for_usable: bool,
+    ) -> list[VarDisplayEntry] | None:
+        try:
+            helper_result = self.ops.list_vars_result(
+                project_root=self.request.project_root,
+                session_id=self.session_id,
+                execution_policy=HelperExecutionPolicy(
+                    ensure_started=ensure_started,
+                    wait_for_usable=wait_for_usable,
+                    retry_on_busy=wait_for_usable,
+                    record_history=False,
+                ),
+            )
+        except AgentNBException:
+            return None
+        return cast(list[VarDisplayEntry], helper_result.payload)
+
+    def _session_python(self) -> str | None:
+        state = self.runtime.runtime_state(
+            project_root=self.request.project_root,
+            session_id=self.session_id,
+        )
+        if state.session is not None and state.session.python_executable:
+            return state.session.python_executable
+        status = state.to_kernel_status()
+        if status.python:
+            return status.python
+        return None
+
+
+def _exec_payload_is_empty(payload: ExecPayload) -> bool:
+    for key in ("result", "stdout", "stderr", "selected_text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return False
+    namespace_delta = payload.get("namespace_delta")
+    entries = namespace_delta.get("entries") if isinstance(namespace_delta, dict) else None
+    return not entries
+
+
+def _namespace_delta(
+    *,
+    before: list[VarDisplayEntry],
+    after: list[VarDisplayEntry],
+) -> NamespaceDeltaPayload | None:
+    before_by_name = {
+        str(item.get("name")): item
+        for item in before
+        if isinstance(item.get("name"), str) and item.get("name")
+    }
+    changed: list[NamespaceDeltaEntry] = []
+    new_count = 0
+    updated_count = 0
+    for item in after:
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        previous = before_by_name.get(name)
+        current_repr = item.get("repr")
+        current_type = item.get("type")
+        change: str | None = None
+        if previous is None:
+            change = "new"
+            new_count += 1
+        elif previous.get("repr") != current_repr or previous.get("type") != current_type:
+            change = "updated"
+            updated_count += 1
+        if change is None:
+            continue
+        changed.append(
+            {
+                "name": name,
+                "type": str(current_type or ""),
+                "repr": str(current_repr or ""),
+                "change": change,
+            }
+        )
+    if not changed:
+        return None
+    limited = changed[:5]
+    return {
+        "entries": limited,
+        "new_count": new_count,
+        "updated_count": updated_count,
+        "truncated": len(changed) > len(limited),
+    }
 
 
 def _public_run_payload(run: Mapping[str, object]) -> RunSnapshot:

@@ -214,6 +214,79 @@ frame = DataFrameLike()
     assert inspect_payload["doc"] == ""
 
 
+def test_ops_inspect_supports_safe_reference_access(
+    started_runtime_module: tuple[KernelRuntime, Path],
+) -> None:
+    runtime, project_dir = started_runtime_module
+    runtime.execute(
+        project_root=project_dir,
+        timeout_s=5,
+        code="""
+class Holder:
+    def __init__(self):
+        self.value = {"items": [{"id": 1}, {"id": 2}]}
+
+
+holder = Holder()
+payload = holder.value
+""",
+    )
+
+    ops = NotebookOps(runtime)
+
+    attr_payload = ops.inspect_var(project_root=project_dir, name="holder.value")
+    subscript_payload = ops.inspect_var(project_root=project_dir, name="payload['items'][0]")
+
+    assert attr_payload["name"] == "holder.value"
+    assert attr_payload["preview"] == {
+        "kind": "mapping-like",
+        "length": 1,
+        "keys": ["items"],
+        "sample": {"items": [{"id": 1}, {"id": 2}]},
+    }
+    assert subscript_payload["name"] == "payload['items'][0]"
+    assert subscript_payload["preview"] == {
+        "kind": "mapping-like",
+        "length": 1,
+        "keys": ["id"],
+        "sample": {"id": 1},
+    }
+
+
+def test_ops_inspect_nested_mapping_preview_preserves_structure(
+    started_runtime_module: tuple[KernelRuntime, Path],
+) -> None:
+    runtime, project_dir = started_runtime_module
+    runtime.execute(
+        project_root=project_dir,
+        timeout_s=5,
+        code="""
+payload = {
+    "items": [
+        {"id": 1, "meta": {"tags": ["a", "b"], "owner": {"name": "Ada"}}},
+        {"id": 2, "meta": {"tags": ["c"], "owner": {"name": "Linus"}}},
+    ],
+    "paging": {"next": "/page/2", "count": 2},
+}
+""",
+    )
+
+    inspect_payload = NotebookOps(runtime).inspect_var(project_root=project_dir, name="payload")
+
+    assert inspect_payload["preview"] == {
+        "kind": "mapping-like",
+        "length": 2,
+        "keys": ["items", "paging"],
+        "sample": {
+            "items": [
+                {"id": 1, "meta": {"tags": ["a", "b"], "owner": {"name": "Ada"}}},
+                {"id": 2, "meta": {"tags": ["c"], "owner": {"name": "Linus"}}},
+            ],
+            "paging": {"next": "/page/2", "count": 2},
+        },
+    }
+
+
 def test_ops_reload_without_module_reloads_imported_project_modules(
     started_runtime_module: tuple[KernelRuntime, Path],
 ) -> None:

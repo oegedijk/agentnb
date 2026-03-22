@@ -496,6 +496,30 @@ def test_runtime_delete_session_clears_current_session_preference(project_dir: P
     assert runtime.current_session_id(project_root=project_dir) is None
 
 
+def test_runtime_stop_clears_current_session_preference(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="analysis")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    runtime = KernelRuntime(backend=backend)
+    runtime.remember_current_session(project_root=project_dir, session_id="analysis")
+
+    runtime.stop(project_root=project_dir, session_id="analysis")
+
+    assert runtime.current_session_id(project_root=project_dir) is None
+
+
 def test_runtime_wait_for_ready_returns_when_status_becomes_alive(
     project_dir: Path, mocker
 ) -> None:

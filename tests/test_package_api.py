@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from agentnb import (
     __all__,
     doctor_environment,
@@ -53,14 +55,13 @@ def test_package_api_wrapper_functions_delegate(monkeypatch, project_dir: Path) 
     monkeypatch.setattr("agentnb.KernelRuntime", lambda: runtime)
     monkeypatch.setattr("agentnb.resolve_project_root", lambda override: project_dir)
 
-    status, started = start_kernel(project=project_dir, session_id="analysis", auto_install=True)
+    status, started = start_kernel(project=project_dir, session_id="analysis")
     current = status_kernel(project=project_dir, session_id="analysis")
     execution = execute_code("1 + 1", project=project_dir, timeout_s=7, session_id="analysis")
     stop_kernel(project=project_dir, session_id="analysis")
     doctor = doctor_environment(
         project=project_dir,
         python_executable=project_dir / ".venv" / "bin" / "python",
-        auto_fix=True,
         session_id="analysis",
     )
 
@@ -75,7 +76,6 @@ def test_package_api_wrapper_functions_delegate(monkeypatch, project_dir: Path) 
             {
                 "project_root": project_dir,
                 "session_id": "analysis",
-                "auto_install": True,
             },
         ),
         (
@@ -107,10 +107,19 @@ def test_package_api_wrapper_functions_delegate(monkeypatch, project_dir: Path) 
                 "project_root": project_dir,
                 "session_id": "analysis",
                 "python_executable": project_dir / ".venv" / "bin" / "python",
-                "auto_fix": True,
             },
         ),
     ]
+
+
+def test_start_kernel_rejects_removed_auto_install_kwarg(project_dir: Path) -> None:
+    with pytest.raises(TypeError):
+        start_kernel(project=project_dir, auto_install=True)  # type: ignore[call-arg]
+
+
+def test_doctor_environment_rejects_removed_auto_fix_kwarg(project_dir: Path) -> None:
+    with pytest.raises(TypeError):
+        doctor_environment(project=project_dir, auto_fix=True)  # type: ignore[call-arg]
 
 
 def test_package_main_module_invokes_cli(project_dir: Path) -> None:

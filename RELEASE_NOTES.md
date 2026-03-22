@@ -1,3 +1,36 @@
+# v0.3.7 — Contract And Recovery Polish
+
+## Improvements
+
+**Run and help contracts are tighter and more consistent** — `runs show` and
+`runs wait` now expose a top-level `data.status` alias for machine consumers
+while preserving `data.run.status`, root help no longer overpromises `--session`
+support for execution-id run commands, and `history --help` now documents
+selector shortcuts such as `@latest`, `@last-error`, and `@last-success`.
+
+**Recovery paths are more explicit and less stateful** — Foreground exec now
+reports when it had to replace a dead or stale kernel and makes the resulting
+state loss explicit in both human and JSON output. Stopping the current session
+also clears the remembered-session preference so later bare exec does not
+silently revive a stopped named session.
+
+**Dependency repair is now shell-first instead of session-mutation-first** —
+Missing live-session modules now point first to `uv pip install --python ...`
+for the selected interpreter, startup and `doctor` no longer try to install
+`ipykernel` automatically, and missing-startup guidance now tells the user to
+install it explicitly and restart with `--fresh`.
+
+**Inspection and exec output are more informative** — `inspect` now supports
+safe dotted and constant-subscript references such as `df.a` and
+`payload['items'][0]`, nested previews preserve JSON-like structure more
+faithfully, `runs show` and `runs wait` preserve multiline stdout and stderr in
+human output, and file execution now reports compact namespace changes when a
+script completes without stdout, stderr, or a final expression result.
+
+**Quiet-mode behavior is clearer** — `--quiet` now suppresses non-essential
+success-path chatter without hiding primary output or failure recovery guidance,
+while `--no-suggestions` suppresses only the `Next:` block.
+
 # v0.3.6 — Command Surface Simplification And Release Cut
 
 ## Improvements
@@ -19,9 +52,8 @@ command waited, what condition it waited for, and the starting runtime state
 when that context is available.
 
 **Pip-less recovery is aligned across `start` and `doctor`** — Provisioning
-errors now carry one concrete manual recovery command, and `doctor --fix`
-reuses the same command that `start --auto-install` would surface for the
-same interpreter state.
+errors now carry one concrete manual recovery command, and `start` / `doctor`
+surface the same command for the same interpreter state.
 
 **Release metadata now matches the shipped 0.3.6 surface** — Versioned
 artifacts, roadmap notes, and release notes now agree on `0.3.6`.
@@ -80,11 +112,11 @@ recent kernel execution failure the agent actually needed to inspect. Journal
 selection now prefers real execution failures and only falls back to the
 latest control-plane error when no execution failure exists.
 
-**`doctor --fix` could repair the wrong environment** — In uv-managed
-projects, automatic ipykernel repair could run outside the target project or
-against the wrong interpreter. The provisioner now runs from the target
-project root and binds the `uv pip` fallback to the selected interpreter
-before re-checking availability.
+**Missing-ipykernel recovery could target the wrong environment** — In
+uv-managed projects, the suggested ipykernel repair command could be derived
+from the wrong project or interpreter context. The provisioner now uses the
+target project root and binds the `uv pip` fallback to the selected
+interpreter.
 
 **Read-only helper commands during startup were ambiguous** — `vars`,
 `inspect`, and `reload` could collapse into generic no-kernel behavior while a
@@ -217,13 +249,11 @@ subcommands** — `agentnb --session X runs list` and
 name for group commands. Prefix position works for inline exec and most
 subcommands; after the subcommand always works.
 
-**`--auto-install` failed in pip-less venvs** — `agentnb start --auto-install`
-always tried `python -m pip install ipykernel`, which fails in fresh `uv`
+**Pip-less ipykernel recovery chose the wrong command** — Missing-ipykernel
+recovery used to assume `python -m pip install`, which fails in fresh `uv`
 environments where `pip` is not present. The provisioner now probes pip
 availability first and falls back to `uv add ipykernel` (when `uv.lock` is
-detected) or `uv pip install ipykernel>=6.0`. When the installer itself
-reports `"No module named pip"`, the error message now suggests the correct
-`uv` command instead of repeating the failing `pip` invocation.
+detected) or `uv pip install ipykernel>=6.0`.
 
 ## Improvements
 

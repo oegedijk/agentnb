@@ -7,6 +7,7 @@ from .contracts import ExecutionSink
 
 OutputSelector = Literal["stdout", "stderr", "result"]
 StartupPolicy = Literal["default", "always", "never"]
+ExecSourceKind = Literal["argument", "file", "stdin"]
 
 
 @dataclass(slots=True, frozen=True)

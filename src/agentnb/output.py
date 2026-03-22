@@ -17,6 +17,7 @@ from .payloads import (
     HistoryPayload,
     InspectResponsePayload,
     MappingPreview,
+    NamespaceDeltaPayload,
     ReloadReport,
     RunLookupPayload,
     RunsListPayload,
@@ -56,8 +57,6 @@ class RenderOptions:
     @property
     def show_suggestions(self) -> bool:
         if self.profile == OutputProfile.AGENT:
-            return False
-        if self.quiet_human:
             return False
         return not self.suppress_suggestions
 
@@ -102,6 +101,35 @@ def render_response(response: CommandResponse, *, options: RenderOptions) -> str
             ensure_ascii=True,
         )
     return render_human(response, options=options)
+
+
+def render_stream_completion(
+    response: CommandResponse,
+    *,
+    options: RenderOptions,
+    output_emitted: bool,
+) -> str:
+    if (
+        options.as_json
+        or response.status == "error"
+        or response.command != "exec"
+        or not output_emitted
+    ):
+        return render_response(response, options=options)
+
+    body = ""
+    exec_notice = _exec_notice(response)
+    if exec_notice:
+        body = exec_notice
+
+    switched = response.data.get("switched_session")
+    if not options.quiet and switched and not response.data.get("selected_output"):
+        switch_note = f"(now targeting session: {switched})"
+        body = f"{body}\n{switch_note}" if body else switch_note
+
+    show_suggestions = options.show_suggestions and not options.quiet
+    suggestions = response.suggestions if show_suggestions else []
+    return _append_suggestions(body, suggestions)
 
 
 def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
@@ -154,8 +182,10 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                             f"({session_label}pid {status_data.get('pid')}, {busy_detail})."
                         )
                 else:
+                    waited_for = status_data.get("waited_for")
+                    state_label = "idle" if waited_for == "idle" else "running"
                     body = (
-                        f"Kernel is running ({session_label}pid {status_data.get('pid')}"
+                        f"Kernel is {state_label} ({session_label}pid {status_data.get('pid')}"
                         f"{_detail_suffix(wait_note)})."
                     )
             elif status_data.get("runtime_state") == "starting":
@@ -224,7 +254,8 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 lines = [_render_var_entry(item) for item in vars_data]
                 body = "\n".join(lines)
             body = _prepend_session_identity(body, response.session_id)
-            body = _append_helper_access_note(body, cast(Mapping[str, object], data))
+            if not options.quiet:
+                body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
         elif command == "inspect":
             inspect_response = cast(InspectResponsePayload, data)
@@ -343,8 +374,14 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     )
                 body = "\n".join(lines)
         elif command == "runs-show" or command == "runs-wait":
-            run_data = cast(RunLookupPayload, data).get("run", {})
-            body = _render_run_snapshot(run_data, snapshot_only=(command == "runs-show"))
+            run_lookup = cast(RunLookupPayload, data)
+            run_data = run_lookup.get("run")
+            if not isinstance(run_data, dict):
+                run_data = {}
+            body = _render_run_snapshot(
+                cast(RunSnapshot, run_data),
+                snapshot_only=(command == "runs-show"),
+            )
         elif command == "runs-cancel":
             if data.get("cancel_requested"):
                 if data.get("status") == "ok":
@@ -368,11 +405,19 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         else:
             body = json.dumps(data, ensure_ascii=True, indent=2)
 
+    if response.status != "error":
+        exec_notice = _exec_notice(response)
+        if exec_notice:
+            body = f"{body}\n{exec_notice}" if body else exec_notice
+
     switched = response.data.get("switched_session")
-    if switched and not response.data.get("selected_output"):
+    if not options.quiet and switched and not response.data.get("selected_output"):
         body = f"{body}\n(now targeting session: {switched})"
 
-    suggestions = response.suggestions if options.show_suggestions else []
+    show_suggestions = options.show_suggestions and (
+        response.status == "error" or not options.quiet
+    )
+    suggestions = response.suggestions if show_suggestions else []
     return _append_suggestions(body, suggestions)
 
 
@@ -398,6 +443,9 @@ def _render_exec_like(data: ExecPayload) -> str:
         if data.get("background"):
             execution_id = data.get("execution_id", "")
             return f"Background execution started ({execution_id})."
+        file_exec_hint = _render_file_exec_hint(data)
+        if file_exec_hint is not None:
+            return file_exec_hint
         lines.append("Execution completed.")
     return "\n".join(lines)
 
@@ -427,6 +475,9 @@ def _render_error(response: CommandResponse) -> str:
     if isinstance(stderr, str) and stderr:
         lines.append("[stderr]")
         lines.append(stderr.rstrip("\n"))
+    exec_notice = _exec_notice(response)
+    if exec_notice:
+        lines.append(exec_notice)
 
     if response.error is None:
         lines.append("Error: unknown error")
@@ -442,12 +493,75 @@ def _render_error(response: CommandResponse) -> str:
     return "\n".join(lines)
 
 
+def _exec_notice(response: CommandResponse) -> str | None:
+    if response.command != "exec":
+        return None
+    if not response.data.get("session_restarted"):
+        return None
+    previous_state = response.data.get("initial_runtime_state")
+    if previous_state == "dead":
+        return (
+            "Notice: session was restarted after the previous kernel died; "
+            "prior in-memory state was lost."
+        )
+    if previous_state == "stale":
+        return (
+            "Notice: session was restarted after stale kernel state was detected; "
+            "prior in-memory state was lost."
+        )
+    return "Notice: session was restarted; prior in-memory state was lost."
+
+
 def _append_suggestions(body: str, suggestions: list[str]) -> str:
     if not suggestions:
         return body
     lines = [body, "", "Next:"]
     lines.extend(f"- {suggestion}" for suggestion in suggestions)
     return "\n".join(lines)
+
+
+def _render_file_exec_hint(data: ExecPayload) -> str | None:
+    if data.get("source_kind") != "file":
+        return None
+    namespace_delta = data.get("namespace_delta")
+    if not isinstance(namespace_delta, dict):
+        return "File executed."
+    payload = cast(NamespaceDeltaPayload, namespace_delta)
+    entries = payload.get("entries", [])
+    lines = ["File executed. Namespace changes:"]
+    for entry in entries:
+        change = entry.get("change")
+        name = entry.get("name")
+        repr_text = entry.get("repr")
+        type_name = entry.get("type")
+        if not isinstance(change, str) or not isinstance(name, str):
+            continue
+        suffix = f" ({type_name})" if isinstance(type_name, str) and type_name else ""
+        summary = (
+            f"{name}: {repr_text}{suffix}" if isinstance(repr_text, str) and repr_text else name
+        )
+        lines.append(f"- {change}: {summary}")
+    if payload.get("truncated"):
+        lines.append("- ... additional namespace changes omitted")
+    return "\n".join(lines)
+
+
+def _render_output_block(label: str, text: str, *, limit: int) -> list[str]:
+    rendered = _truncate_preserving_newlines(text, limit=limit)
+    if "\n" not in rendered:
+        return [f"{label}: {rendered}"]
+    return [f"{label}:", rendered]
+
+
+def _truncate_preserving_newlines(text: str, *, limit: int) -> str:
+    trimmed = text.rstrip("\n")
+    if len(trimmed) <= limit:
+        return trimmed
+    truncated = trimmed[:limit].rstrip("\n")
+    omitted = len(trimmed) - len(truncated)
+    if not truncated:
+        return f"[{omitted} chars truncated]"
+    return f"{truncated}\n...[{omitted} chars truncated]"
 
 
 def _format_duration_ms(duration_ms: int) -> str:
@@ -556,11 +670,11 @@ def _render_run_snapshot(run: RunSnapshot, *, snapshot_only: bool) -> str:
 
     stdout = run.get("stdout")
     if isinstance(stdout, str) and stdout:
-        lines.append(f"stdout: {summarize_history_text(stdout, limit=200) or stdout[:200]}")
+        lines.extend(_render_output_block("stdout", stdout, limit=200))
 
     stderr = run.get("stderr")
     if isinstance(stderr, str) and stderr:
-        lines.append(f"stderr: {summarize_history_text(stderr, limit=200) or stderr[:200]}")
+        lines.extend(_render_output_block("stderr", stderr, limit=200))
 
     result = run.get("result")
     if isinstance(result, str) and result:

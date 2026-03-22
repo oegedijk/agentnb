@@ -23,6 +23,7 @@ from ..state import StateRepository
 RunStatus = Literal["starting", "running", "ok", "error"]
 TerminalReason = Literal["completed", "failed", "cancelled", "worker_exited"]
 FailureOrigin = Literal["kernel", "control"]
+RuntimeStateName = Literal["missing", "starting", "ready", "busy", "dead", "stale"]
 
 _ACTIVE_RUN_STATUSES = frozenset({"starting", "running"})
 _CANCELLED_ERROR_TYPE = "CancelledError"
@@ -378,7 +379,17 @@ class ExecutionStore:
 @dataclass(slots=True)
 class ManagedExecution:
     record: ExecutionRecord
+    start_outcome: StartOutcome = field(default_factory=lambda: StartOutcome())
+
+
+@dataclass(slots=True, frozen=True)
+class StartOutcome:
     started_new_session: bool = False
+    initial_runtime_state: RuntimeStateName | None = None
+
+    @property
+    def session_restarted(self) -> bool:
+        return self.started_new_session and self.initial_runtime_state in {"dead", "stale"}
 
 
 @dataclass(slots=True)

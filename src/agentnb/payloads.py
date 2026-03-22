@@ -87,6 +87,17 @@ class VarEntry(TypedDict):
     repr: str
 
 
+class NamespaceDeltaEntry(VarEntry):
+    change: Literal["new", "updated"]
+
+
+class NamespaceDeltaPayload(TypedDict):
+    entries: list[NamespaceDeltaEntry]
+    new_count: int
+    updated_count: int
+    truncated: bool
+
+
 class DataframePreview(TypedDict, total=False):
     kind: Literal["dataframe-like"]
     shape: list[int]
@@ -168,7 +179,6 @@ class StatusPayload(TypedDict, total=False):
 
 class StartPayload(StatusPayload, total=False):
     started_new: bool
-    auto_install: bool
 
 
 class ExecPayload(TypedDict, total=False):
@@ -185,6 +195,12 @@ class ExecPayload(TypedDict, total=False):
     background: bool
     ensured_started: bool
     started_new_session: bool
+    initial_runtime_state: Literal["missing", "starting", "ready", "busy", "dead", "stale"]
+    session_restarted: bool
+    session_python: str
+    source_kind: Literal["argument", "file", "stdin"]
+    source_path: str
+    namespace_delta: NamespaceDeltaPayload
     wait_behavior: str
     waited_ms: int
     lock_pid: int
@@ -206,6 +222,10 @@ class CompactExecPayloadInput(TypedDict, total=False):
     result_preview: InspectPreview
     ename: str | None
     evalue: str | None
+    session_python: str
+    source_kind: Literal["argument", "file", "stdin"]
+    source_path: str
+    namespace_delta: NamespaceDeltaPayload
     wait_behavior: str
     waited_ms: int
     lock_pid: int
@@ -304,5 +324,6 @@ class RunsListPayload(TypedDict):
     runs: list[RunListEntryPayload]
 
 
-class RunLookupPayload(TypedDict):
+class RunLookupPayload(TypedDict, total=False):
     run: RunSnapshot
+    status: str

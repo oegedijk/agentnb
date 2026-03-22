@@ -101,62 +101,26 @@ class KernelProvisioner:
     def provision(
         self,
         preferred_python: Path | None = None,
-        auto_install: bool = False,
     ) -> ProvisionResult:
         selected = self.select_interpreter(preferred_python=preferred_python)
-        installed = self.ensure_ipykernel(selected, auto_install=auto_install)
+        installed = self.ensure_ipykernel(selected)
         return ProvisionResult(
             executable=selected.executable,
             source=selected.source,
             installed_ipykernel=installed,
         )
 
-    def ensure_ipykernel(self, selected: InterpreterSelection, auto_install: bool) -> bool:
+    def ensure_ipykernel(self, selected: InterpreterSelection) -> bool:
         if selected.ipykernel_available:
             return False
 
         install_cmd = self._ipykernel_install_cmd(selected.executable)
         install_cmd_text = " ".join(install_cmd)
-
-        if not auto_install:
-            raise ProvisioningError(
-                f"Selected interpreter is missing ipykernel. Run manually: {install_cmd_text}",
-                recovery_command=install_cmd_text,
-            )
-
-        result = subprocess.run(
-            install_cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            cwd=self.project_root,
+        raise ProvisioningError(
+            "Selected interpreter is missing ipykernel. "
+            f"Run manually: {install_cmd_text}. {self._restart_hint()}",
+            recovery_command=install_cmd_text,
         )
-        if result.returncode != 0:
-            stderr_text = result.stderr or ""
-            if "No module named pip" in stderr_text:
-                uv_cmd = self._uv_install_cmd_text(selected.executable)
-                raise ProvisioningError(
-                    "Failed to auto-install ipykernel because pip is not available in this "
-                    f"interpreter. Run manually: {uv_cmd}",
-                    recovery_command=uv_cmd,
-                )
-            detail = _tail_text(stderr_text or result.stdout)
-            raise ProvisioningError(
-                "Failed to auto-install ipykernel. "
-                f"Run manually: {install_cmd_text}. "
-                f"Installer output: {detail}",
-                recovery_command=install_cmd_text,
-            )
-
-        if not _python_supports_module(Path(selected.executable), "ipykernel_launcher"):
-            raise ProvisioningError(
-                "ipykernel install completed but the module is still unavailable. "
-                f"Run manually: {install_cmd_text}",
-                recovery_command=install_cmd_text,
-            )
-
-        return True
 
     def _ipykernel_install_cmd(self, executable: str) -> list[str]:
         if _python_supports_module(Path(executable), "pip"):
@@ -168,10 +132,7 @@ class KernelProvisioner:
             return ("uv", "add", "ipykernel")
         return ("uv", "pip", "install", "--python", executable, IPYKERNEL_REQUIREMENT)
 
-    def _uv_install_cmd_text(self, executable: str) -> str:
-        return " ".join(self._uv_install_cmd(executable))
-
-    def doctor(self, preferred_python: Path | None = None, auto_fix: bool = False) -> DoctorReport:
+    def doctor(self, preferred_python: Path | None = None) -> DoctorReport:
         checks: list[DoctorCheck] = []
 
         try:
@@ -210,38 +171,14 @@ class KernelProvisioner:
             )
         else:
             install_cmd = " ".join(self._ipykernel_install_cmd(selected.executable))
-            if auto_fix:
-                try:
-                    self.ensure_ipykernel(selected, auto_install=True)
-                    checks.append(
-                        DoctorCheck(
-                            name="ipykernel",
-                            status="ok",
-                            message="ipykernel was missing and has been installed.",
-                        )
-                    )
-                except ProvisioningError as exc:
-                    checks.append(
-                        DoctorCheck(
-                            name="ipykernel",
-                            status="error",
-                            message=exc.message,
-                            fix_hint=(
-                                f"Run manually: {exc.recovery_command}"
-                                if exc.recovery_command
-                                else f"Run manually: {install_cmd}"
-                            ),
-                        )
-                    )
-            else:
-                checks.append(
-                    DoctorCheck(
-                        name="ipykernel",
-                        status="warn",
-                        message="ipykernel is not installed for the selected interpreter.",
-                        fix_hint=f"Run: {install_cmd}",
-                    )
+            checks.append(
+                DoctorCheck(
+                    name="ipykernel",
+                    status="warn",
+                    message="ipykernel is not installed for the selected interpreter.",
+                    fix_hint=f"Run: {install_cmd}. {self._restart_hint()}",
                 )
+            )
 
         checks.append(self._check_state_directory())
         checks.append(self._check_socket_bind())
@@ -253,6 +190,10 @@ class KernelProvisioner:
             python_source=selected.source,
             checks=checks,
         )
+
+    @staticmethod
+    def _restart_hint() -> str:
+        return 'Then restart with `agentnb --fresh "..."`.'
 
     def _candidate_interpreters(self, preferred_python: Path | None) -> list[tuple[Path, str]]:
         if preferred_python is not None:

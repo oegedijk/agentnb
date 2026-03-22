@@ -189,7 +189,8 @@ def test_local_run_manager_submit_background_uses_ensure_started_result(
         )
     )
 
-    assert managed.started_new_session is True
+    assert managed.start_outcome.started_new_session is True
+    assert managed.start_outcome.initial_runtime_state == "missing"
     ensure_started.assert_called_once_with(project_root=project_dir, session_id="default")
 
 

@@ -243,3 +243,19 @@ def test_kernel_introspection_does_not_probe_live_session_during_helper_autostar
     )
 
     ensure_started.assert_not_called()
+
+
+def test_kernel_introspection_rejects_unsafe_reference_syntax(
+    project_dir,
+    mocker: MockerFixture,
+) -> None:
+    runtime = KernelRuntime(backend=mocker.Mock())
+    execute = mocker.patch.object(runtime, "execute")
+
+    with pytest.raises(
+        AgentNBException,
+        match=r"Inspect only supports names, dotted access, and constant subscripts\.",
+    ):
+        KernelIntrospection(runtime).inspect_var(project_root=project_dir, name="value()")
+
+    execute.assert_not_called()

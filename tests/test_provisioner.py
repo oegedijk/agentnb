@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -79,7 +78,7 @@ def test_select_interpreter_rejects_non_executable_explicit_python(project_dir: 
         KernelProvisioner(project_dir).select_interpreter(preferred_python=project_dir)
 
 
-def test_ensure_ipykernel_raises_when_auto_install_disabled(project_dir: Path) -> None:
+def test_ensure_ipykernel_raises_with_manual_install_command(project_dir: Path) -> None:
     provisioner = KernelProvisioner(project_dir)
     selected = InterpreterSelection(
         executable=str(Path(sys.executable).absolute()),
@@ -87,72 +86,13 @@ def test_ensure_ipykernel_raises_when_auto_install_disabled(project_dir: Path) -
         ipykernel_available=False,
     )
 
-    with pytest.raises(ProvisioningError):
-        provisioner.ensure_ipykernel(selected, auto_install=False)
+    with pytest.raises(ProvisioningError) as exc_info:
+        provisioner.ensure_ipykernel(selected)
 
-
-def test_ensure_ipykernel_auto_install_flow(project_dir: Path, mocker: MockerFixture) -> None:
-    provisioner = KernelProvisioner(project_dir)
-    selected = InterpreterSelection(
-        executable=str(Path(sys.executable).absolute()),
-        source="current_python",
-        ipykernel_available=False,
-    )
-
-    run_mock = mocker.patch("agentnb.kernel.provisioner.subprocess.run")
-    run_mock.return_value = subprocess.CompletedProcess(args=["python"], returncode=0)
-    supports_mock = mocker.patch(
-        "agentnb.kernel.provisioner._python_supports_module",
-        side_effect=[True, True],  # first: pip check; second: ipykernel_launcher post-install check
-    )
-
-    installed = provisioner.ensure_ipykernel(selected, auto_install=True)
-
-    assert installed is True
-    run_mock.assert_called_once()
-    assert run_mock.call_args.kwargs["cwd"] == project_dir
-    assert supports_mock.call_count == 2
-
-
-def test_ensure_ipykernel_auto_install_surfaces_installer_failure(
-    project_dir: Path,
-    mocker: MockerFixture,
-) -> None:
-    provisioner = KernelProvisioner(project_dir)
-    selected = InterpreterSelection(
-        executable=str(Path(sys.executable).absolute()),
-        source="current_python",
-        ipykernel_available=False,
-    )
-    run_mock = mocker.patch("agentnb.kernel.provisioner.subprocess.run")
-    run_mock.return_value = subprocess.CompletedProcess(
-        args=["python"],
-        returncode=1,
-        stderr="x" * 500,
-    )
-
-    with pytest.raises(ProvisioningError, match="Failed to auto-install ipykernel"):
-        provisioner.ensure_ipykernel(selected, auto_install=True)
-
-
-def test_ensure_ipykernel_auto_install_rechecks_module_availability(
-    project_dir: Path,
-    mocker: MockerFixture,
-) -> None:
-    provisioner = KernelProvisioner(project_dir)
-    selected = InterpreterSelection(
-        executable=str(Path(sys.executable).absolute()),
-        source="current_python",
-        ipykernel_available=False,
-    )
-    mocker.patch(
-        "agentnb.kernel.provisioner.subprocess.run",
-        return_value=subprocess.CompletedProcess(args=["python"], returncode=0),
-    )
-    mocker.patch("agentnb.kernel.provisioner._python_supports_module", return_value=False)
-
-    with pytest.raises(ProvisioningError, match="module is still unavailable"):
-        provisioner.ensure_ipykernel(selected, auto_install=True)
+    assert "Run manually:" in exc_info.value.message
+    assert exc_info.value.recovery_command is not None
+    assert exc_info.value.recovery_command in exc_info.value.message
+    assert 'agentnb --fresh "..."' in exc_info.value.message
 
 
 def test_doctor_reports_warn_for_missing_ipykernel_without_fix(
@@ -180,14 +120,14 @@ def test_doctor_reports_warn_for_missing_ipykernel_without_fix(
         return_value=DoctorCheck(name="socket", status="ok", message="ok"),
     )
 
-    report = provisioner.doctor(auto_fix=False)
+    report = provisioner.doctor()
 
     assert report.ready is False
     ipykernel_check = next(check for check in report.checks if check.name == "ipykernel")
     assert ipykernel_check.status == "warn"
 
 
-def test_doctor_auto_fix_promotes_missing_ipykernel_to_ok(
+def test_doctor_reports_manual_recovery_for_missing_ipykernel(
     project_dir: Path, mocker: MockerFixture
 ) -> None:
     provisioner = KernelProvisioner(project_dir)
@@ -200,7 +140,6 @@ def test_doctor_auto_fix_promotes_missing_ipykernel_to_ok(
             ipykernel_available=False,
         ),
     )
-    ensure_mock = mocker.patch.object(provisioner, "ensure_ipykernel", return_value=True)
     mocker.patch.object(
         provisioner,
         "_check_state_directory",
@@ -211,13 +150,20 @@ def test_doctor_auto_fix_promotes_missing_ipykernel_to_ok(
         "_check_socket_bind",
         return_value=DoctorCheck(name="socket", status="ok", message="ok"),
     )
+    mocker.patch.object(
+        provisioner,
+        "_ipykernel_install_cmd",
+        return_value=["/python", "-m", "pip", "install", "ipykernel>=6.0"],
+    )
 
-    report = provisioner.doctor(auto_fix=True)
+    report = provisioner.doctor()
 
-    assert report.ready is True
-    ensure_mock.assert_called_once()
+    assert report.ready is False
     ipykernel_check = next(check for check in report.checks if check.name == "ipykernel")
-    assert ipykernel_check.status == "ok"
+    assert ipykernel_check.status == "warn"
+    assert ipykernel_check.fix_hint == (
+        'Run: /python -m pip install ipykernel>=6.0. Then restart with `agentnb --fresh "..."`.'
+    )
 
 
 def test_ensure_ipykernel_uses_uv_when_pip_unavailable(
@@ -229,27 +175,17 @@ def test_ensure_ipykernel_uses_uv_when_pip_unavailable(
         source="current_python",
         ipykernel_available=False,
     )
-    run_mock = mocker.patch("agentnb.kernel.provisioner.subprocess.run")
-    run_mock.return_value = subprocess.CompletedProcess(args=["uv"], returncode=0)
     mocker.patch(
         "agentnb.kernel.provisioner._python_supports_module",
-        side_effect=[False, True],  # pip unavailable, then ipykernel_launcher check passes
+        return_value=False,
     )
 
-    installed = provisioner.ensure_ipykernel(selected, auto_install=True)
+    with pytest.raises(ProvisioningError) as exc_info:
+        provisioner.ensure_ipykernel(selected)
 
-    assert installed is True
-    call_args = run_mock.call_args[0][0]
-    assert call_args[0] == "uv"
-    assert call_args == [
-        "uv",
-        "pip",
-        "install",
-        "--python",
-        str(Path(sys.executable).absolute()),
-        "ipykernel>=6.0",
-    ]
-    assert run_mock.call_args.kwargs["cwd"] == project_dir
+    assert exc_info.value.recovery_command == (
+        f"uv pip install --python {Path(sys.executable).absolute()} ipykernel>=6.0"
+    )
 
 
 def test_ensure_ipykernel_uses_uv_add_when_uv_lock_present(
@@ -262,85 +198,15 @@ def test_ensure_ipykernel_uses_uv_add_when_uv_lock_present(
         source="current_python",
         ipykernel_available=False,
     )
-    run_mock = mocker.patch("agentnb.kernel.provisioner.subprocess.run")
-    run_mock.return_value = subprocess.CompletedProcess(args=["uv"], returncode=0)
     mocker.patch(
         "agentnb.kernel.provisioner._python_supports_module",
-        side_effect=[False, True],
+        return_value=False,
     )
 
-    provisioner.ensure_ipykernel(selected, auto_install=True)
+    with pytest.raises(ProvisioningError) as exc_info:
+        provisioner.ensure_ipykernel(selected)
 
-    call_args = run_mock.call_args[0][0]
-    assert call_args == ["uv", "add", "ipykernel"]
-    assert run_mock.call_args.kwargs["cwd"] == project_dir
-
-
-def test_ensure_ipykernel_no_pip_error_message_suggests_uv(
-    project_dir: Path, mocker: MockerFixture
-) -> None:
-    provisioner = KernelProvisioner(project_dir)
-    selected = InterpreterSelection(
-        executable=str(Path(sys.executable).absolute()),
-        source="current_python",
-        ipykernel_available=False,
-    )
-    run_mock = mocker.patch("agentnb.kernel.provisioner.subprocess.run")
-    run_mock.return_value = subprocess.CompletedProcess(
-        args=["python"],
-        returncode=1,
-        stderr="No module named pip",
-    )
-    mocker.patch(
-        "agentnb.kernel.provisioner._python_supports_module",
-        return_value=True,  # pip check passes, but pip itself reports no module named pip
-    )
-
-    with pytest.raises(ProvisioningError, match="uv"):
-        provisioner.ensure_ipykernel(selected, auto_install=True)
-
-
-def test_provisioning_error_keeps_recovery_command_for_doctor_fix_hint(
-    project_dir: Path, mocker: MockerFixture
-) -> None:
-    provisioner = KernelProvisioner(project_dir)
-    selected = InterpreterSelection(
-        executable=str(Path(sys.executable).absolute()),
-        source="explicit",
-        ipykernel_available=False,
-    )
-    mocker.patch.object(
-        provisioner,
-        "select_interpreter",
-        return_value=selected,
-    )
-    mocker.patch.object(
-        provisioner,
-        "ensure_ipykernel",
-        side_effect=ProvisioningError(
-            "Failed to auto-install ipykernel because pip is not available in this interpreter. "
-            "Run manually: uv pip install --python /python ipykernel>=6.0",
-            recovery_command="uv pip install --python /python ipykernel>=6.0",
-        ),
-    )
-    mocker.patch.object(
-        provisioner,
-        "_check_state_directory",
-        return_value=DoctorCheck(name="state_dir", status="ok", message="ok"),
-    )
-    mocker.patch.object(
-        provisioner,
-        "_check_socket_bind",
-        return_value=DoctorCheck(name="socket", status="ok", message="ok"),
-    )
-
-    report = provisioner.doctor(auto_fix=True)
-
-    ipykernel_check = next(check for check in report.checks if check.name == "ipykernel")
-    assert ipykernel_check.status == "error"
-    assert ipykernel_check.fix_hint == (
-        "Run manually: uv pip install --python /python ipykernel>=6.0"
-    )
+    assert exc_info.value.recovery_command == "uv add ipykernel"
 
 
 def test_doctor_reports_python_selection_errors(project_dir: Path, mocker: MockerFixture) -> None:
@@ -351,7 +217,7 @@ def test_doctor_reports_python_selection_errors(project_dir: Path, mocker: Mocke
         side_effect=ProvisioningError("bad interpreter"),
     )
 
-    report = provisioner.doctor(auto_fix=False)
+    report = provisioner.doctor()
 
     assert report.ready is False
     assert report.selected_python is None

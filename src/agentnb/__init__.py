@@ -53,15 +53,12 @@ __all__ = [
 def start_kernel(
     project: str | Path = ".",
     session_id: str = DEFAULT_SESSION_ID,
-    *,
-    auto_install: bool = False,
 ) -> tuple[KernelStatus, bool]:
     runtime = KernelRuntime()
     project_root = resolve_project_root(override=Path(project))
     return runtime.start(
         project_root=project_root,
         session_id=session_id,
-        auto_install=auto_install,
     )
 
 
@@ -94,7 +91,6 @@ def doctor_environment(
     project: str | Path = ".",
     *,
     python_executable: str | Path | None = None,
-    auto_fix: bool = False,
     session_id: str = DEFAULT_SESSION_ID,
 ) -> DoctorPayload:
     runtime = KernelRuntime()
@@ -104,5 +100,4 @@ def doctor_environment(
         project_root=project_root,
         session_id=session_id,
         python_executable=python_path,
-        auto_fix=auto_fix,
     )

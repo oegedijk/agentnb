@@ -86,14 +86,12 @@ def test_runtime_start_uses_provisioner_and_passes_python(
     status, started_new = runtime.start(
         project_root=project_dir,
         python_executable=Path("/custom/python"),
-        auto_install=False,
     )
 
     assert started_new is True
     assert status.alive is True
     provisioner.provision.assert_called_once_with(
         preferred_python=Path("/custom/python"),
-        auto_install=False,
     )
     backend.start.assert_called_once()
     assert backend.start.call_args.kwargs["python_executable"] == "/custom/python"
@@ -128,7 +126,7 @@ def test_runtime_start_persists_canonicalized_session_id(
     assert persisted.session_id == "default"
 
 
-def test_runtime_start_defaults_auto_install_to_false(
+def test_runtime_start_provisions_without_auto_install_contract(
     project_dir: Path,
     mocker: MockerFixture,
 ) -> None:
@@ -156,7 +154,6 @@ def test_runtime_start_defaults_auto_install_to_false(
 
     provisioner.provision.assert_called_once_with(
         preferred_python=None,
-        auto_install=False,
     )
 
 

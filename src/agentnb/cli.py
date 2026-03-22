@@ -44,7 +44,7 @@ from .execution import ExecutionService
 from .execution_invocation import ExecInvocationPolicy, OutputSelector, StartupPolicy
 from .invocation import ROOT_OPTION_SPECS, InvocationResolver
 from .ops import NotebookOps
-from .output import RenderOptions, projector, render_response
+from .output import RenderOptions, projector, render_response, render_stream_completion
 from .runtime import KernelRuntime
 from .selectors import (
     HistoryReference,
@@ -273,12 +273,7 @@ def _history_reference_callback(
 
 def _emit(response: CommandResponse, *, as_json: bool) -> None:
     options = _current_render_options(local_as_json=as_json)
-    if response.command == "exec" and response.data.get("selected_output") is not None:
-        response = replace(response, suggestions=[])
-    if not options.show_suggestions:
-        response = replace(response, suggestions=[])
-    elif not options.as_json:
-        response = replace(response, suggestions=_strip_json_suffix(response.suggestions))
+    response = _prepare_response_for_rendering(response, options=options)
     rendered = render_response(response, options=options)
     if rendered:
         click.echo(rendered)
@@ -346,10 +341,7 @@ def _emit_stream_completion(
     stream: ExecutionSink | None = None,
 ) -> None:
     options = _current_render_options(local_as_json=as_json)
-    if not options.show_suggestions:
-        response = replace(response, suggestions=[])
-    elif not options.as_json:
-        response = replace(response, suggestions=_strip_json_suffix(response.suggestions))
+    response = _prepare_response_for_rendering(response, options=options)
 
     if options.as_json:
         _emit_json_stream_frame(
@@ -360,23 +352,30 @@ def _emit_stream_completion(
         )
     else:
         human_stream = stream if isinstance(stream, HumanExecutionStream) else None
-        if response.status == "ok" and human_stream is not None and not human_stream.emitted_output:
-            click.echo("Execution completed.")
-        if response.status == "error":
-            rendered = render_response(response, options=options)
-            if rendered:
-                click.echo(rendered, err=True)
-        elif response.suggestions:
-            click.echo(_render_suggestions_block(response.suggestions))
+        rendered = render_stream_completion(
+            response,
+            options=options,
+            output_emitted=bool(human_stream and human_stream.emitted_output),
+        )
+        if rendered:
+            click.echo(rendered, err=response.status == "error")
 
     if response.status == "error":
         raise click.exceptions.Exit(1)
 
 
-def _render_suggestions_block(suggestions: list[str]) -> str:
-    lines = ["", "Next:"]
-    lines.extend(f"- {suggestion}" for suggestion in suggestions)
-    return "\n".join(lines)
+def _prepare_response_for_rendering(
+    response: CommandResponse,
+    *,
+    options: RenderOptions,
+) -> CommandResponse:
+    if response.command == "exec" and response.data.get("selected_output") is not None:
+        response = replace(response, suggestions=[])
+    if not options.show_suggestions:
+        return replace(response, suggestions=[])
+    if not options.as_json:
+        return replace(response, suggestions=_strip_json_suffix(response.suggestions))
+    return response
 
 
 @main.command()

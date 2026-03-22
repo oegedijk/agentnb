@@ -452,6 +452,90 @@ def test_cli_exec_stream_human_prints_live_output(
     assert result.output == "hello\n2\n"
 
 
+def test_cli_exec_stream_human_reports_restart_notice_after_recovery(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.runtime.resolve_session_id = lambda **_: "default"  # type: ignore[method-assign]
+
+    def execute_code_stub(**kwargs: object) -> ManagedExecution:
+        sink = _event_sink(kwargs)
+        sink.started(execution_id="run-457", session_id="default")
+        sink.accept(ExecutionEvent(kind="result", content="2"))
+        return ManagedExecution(
+            record=ExecutionRecord(
+                execution_id="run-457",
+                ts="2026-03-11T00:00:00+00:00",
+                session_id="default",
+                command_type="exec",
+                status="ok",
+                duration_ms=5,
+                code="1 + 1",
+                result="2",
+                events=[ExecutionEvent(kind="result", content="2")],
+            ),
+            start_outcome=StartOutcome(started_new_session=True, initial_runtime_state="dead"),
+        )
+
+    cli.executions.execute_code = execute_code_stub  # type: ignore[method-assign]
+
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--stream", "1 + 1"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == (
+        "2\n"
+        "Notice: session was restarted after the previous kernel died; "
+        "prior in-memory state was lost.\n"
+    )
+
+
+def test_cli_exec_stream_human_reports_file_namespace_summary_without_duplicate_completion(
+    cli_runner: CliRunner,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agentnb.cli as cli
+    from agentnb.app import ExecRequest
+
+    script = project_dir / "analysis.py"
+    script.write_text("value = 2\n", encoding="utf-8")
+
+    def exec_stub(request: ExecRequest, event_sink=None):
+        del event_sink
+        return success_response(
+            command="exec",
+            project=str(project_dir),
+            session_id="default",
+            data={
+                "source_kind": request.source_kind,
+                "source_path": str(request.source_path),
+                "namespace_delta": {
+                    "entries": [
+                        {"change": "new", "name": "value", "type": "int", "repr": "2"},
+                    ],
+                    "new_count": 1,
+                    "updated_count": 0,
+                    "truncated": False,
+                },
+            },
+        )
+
+    monkeypatch.setattr(cli.application, "exec", exec_stub)
+
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--stream", "--file", str(script)],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "File executed. Namespace changes:\n- new: value: 2 (int)\n"
+
+
 def test_cli_exec_stream_json_returns_error_final_frame_on_execution_failure(
     cli_runner: CliRunner,
     project_dir: Path,
@@ -917,7 +1001,8 @@ def test_cli_start_uses_manual_recovery_contract(
     result = cli_runner.invoke(main, ["start", "--project", str(project_dir), "--json"])
 
     assert result.exit_code == 0
-    assert start_mock.call_args.kwargs["auto_install"] is False
+    assert start_mock.call_args.kwargs["project_root"] == project_dir.resolve()
+    assert start_mock.call_args.kwargs["python_executable"] is None
 
 
 def test_cli_start_rejects_removed_auto_install_flag(
@@ -2478,7 +2563,7 @@ def test_cli_status_human_reports_implicit_session_switch(
     assert "(now targeting session: analysis)" in result.output
 
 
-def test_cli_doctor_uses_target_project_root_without_auto_fix(
+def test_cli_doctor_uses_target_project_root(
     cli_runner: CliRunner,
     project_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2494,13 +2579,11 @@ def test_cli_doctor_uses_target_project_root_without_auto_fix(
         def doctor(
             self,
             preferred_python: Path | None = None,
-            auto_fix: bool = False,
         ) -> DoctorReport:
             calls.append(
                 {
                     "project_root": self.project_root,
                     "preferred_python": preferred_python,
-                    "auto_fix": auto_fix,
                 }
             )
             return DoctorReport(
@@ -2525,7 +2608,6 @@ def test_cli_doctor_uses_target_project_root_without_auto_fix(
         {
             "project_root": project_dir.resolve(),
             "preferred_python": None,
-            "auto_fix": False,
         }
     ]
 

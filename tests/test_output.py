@@ -5,7 +5,13 @@ import json
 import pytest
 
 from agentnb.contracts import error_response, success_response
-from agentnb.output import OutputProfile, RenderOptions, render_human, render_response
+from agentnb.output import (
+    OutputProfile,
+    RenderOptions,
+    render_human,
+    render_response,
+    render_stream_completion,
+)
 
 
 def test_render_response_json_matches_command_payload() -> None:
@@ -364,6 +370,58 @@ def test_render_human_file_exec_without_output_reports_namespace_changes() -> No
         "File executed. Namespace changes:\n"
         "- new: payload: dict len=2 keys=items, paging (dict)\n"
         "- updated: df: DataFrame shape=(10, 3) (DataFrame)"
+    )
+
+
+def test_render_stream_completion_reuses_file_exec_hint_when_no_output_was_streamed() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "source_kind": "file",
+            "namespace_delta": {
+                "entries": [
+                    {"change": "new", "name": "value", "repr": "2", "type": "int"},
+                ],
+                "new_count": 1,
+                "updated_count": 0,
+                "truncated": False,
+            },
+        },
+    )
+
+    assert (
+        render_stream_completion(
+            response,
+            options=RenderOptions(),
+            output_emitted=False,
+        )
+        == "File executed. Namespace changes:\n- new: value: 2 (int)"
+    )
+
+
+def test_render_stream_completion_appends_restart_notice_without_repeating_streamed_result() -> (
+    None
+):
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "result": "2",
+            "session_restarted": True,
+            "initial_runtime_state": "dead",
+        },
+    )
+
+    assert render_stream_completion(
+        response,
+        options=RenderOptions(),
+        output_emitted=True,
+    ) == (
+        "Notice: session was restarted after the previous kernel died; "
+        "prior in-memory state was lost."
     )
 
 

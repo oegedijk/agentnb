@@ -103,6 +103,35 @@ def render_response(response: CommandResponse, *, options: RenderOptions) -> str
     return render_human(response, options=options)
 
 
+def render_stream_completion(
+    response: CommandResponse,
+    *,
+    options: RenderOptions,
+    output_emitted: bool,
+) -> str:
+    if (
+        options.as_json
+        or response.status == "error"
+        or response.command != "exec"
+        or not output_emitted
+    ):
+        return render_response(response, options=options)
+
+    body = ""
+    exec_notice = _exec_notice(response)
+    if exec_notice:
+        body = exec_notice
+
+    switched = response.data.get("switched_session")
+    if not options.quiet and switched and not response.data.get("selected_output"):
+        switch_note = f"(now targeting session: {switched})"
+        body = f"{body}\n{switch_note}" if body else switch_note
+
+    show_suggestions = options.show_suggestions and not options.quiet
+    suggestions = response.suggestions if show_suggestions else []
+    return _append_suggestions(body, suggestions)
+
+
 def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
     if response.status == "error":
         body = _render_error(response)

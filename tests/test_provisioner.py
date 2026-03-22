@@ -120,7 +120,7 @@ def test_doctor_reports_warn_for_missing_ipykernel_without_fix(
         return_value=DoctorCheck(name="socket", status="ok", message="ok"),
     )
 
-    report = provisioner.doctor(auto_fix=False)
+    report = provisioner.doctor()
 
     assert report.ready is False
     ipykernel_check = next(check for check in report.checks if check.name == "ipykernel")
@@ -156,7 +156,7 @@ def test_doctor_reports_manual_recovery_for_missing_ipykernel(
         return_value=["/python", "-m", "pip", "install", "ipykernel>=6.0"],
     )
 
-    report = provisioner.doctor(auto_fix=True)
+    report = provisioner.doctor()
 
     assert report.ready is False
     ipykernel_check = next(check for check in report.checks if check.name == "ipykernel")
@@ -217,7 +217,7 @@ def test_doctor_reports_python_selection_errors(project_dir: Path, mocker: Mocke
         side_effect=ProvisioningError("bad interpreter"),
     )
 
-    report = provisioner.doctor(auto_fix=False)
+    report = provisioner.doctor()
 
     assert report.ready is False
     assert report.selected_python is None

@@ -24,7 +24,7 @@ from .contracts import (
     success_response,
 )
 from .errors import AgentNBException, KernelWaitTimedOutError
-from .execution import ExecutionService
+from .execution import ExecutionService, ManagedExecution
 from .execution_invocation import ExecInvocationPolicy, ExecSourceKind, OutputSelector
 from .introspection import HelperExecutionPolicy
 from .ops import NotebookOps
@@ -102,7 +102,6 @@ class ExecRequest(SessionRequest):
 @dataclass(slots=True, frozen=True, kw_only=True)
 class StartRequest(SessionRequest):
     python_executable: Path | None = None
-    auto_install: bool = False
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -162,7 +161,6 @@ class StopRequest(SessionRequest):
 @dataclass(slots=True, frozen=True, kw_only=True)
 class DoctorRequest(SessionRequest):
     python_executable: Path | None = None
-    auto_fix: bool = False
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -509,7 +507,6 @@ class AgentNBApp:
             project_root=request.project_root,
             session_id=session_id,
             python_executable=request.python_executable,
-            auto_install=request.auto_install,
         )
         payload = cast(StartPayload, _kernel_status_payload(status))
         payload["started_new"] = started_new
@@ -523,7 +520,9 @@ class AgentNBApp:
         event_sink: ExecutionSink | None,
     ) -> ExecPayload:
         invocation = request.invocation
-        namespace_before = self._file_exec_namespace_snapshot(
+        payload_builder = _ExecPayloadBuilder(
+            runtime=self.runtime,
+            ops=self.ops,
             request=request,
             session_id=session_id,
         )
@@ -544,39 +543,7 @@ class AgentNBApp:
                 event_sink=invocation.streaming_sink(event_sink),
             )
 
-        payload = compact_execution_payload(
-            cast(CompactExecPayloadInput, managed.record.to_execution_payload()),
-            no_truncate=invocation.no_truncate,
-        )
-        payload["source_kind"] = request.source_kind
-        if request.source_path is not None:
-            payload["source_path"] = str(request.source_path)
-        if invocation.is_background:
-            payload["background"] = True
-        if invocation.ensure_started:
-            payload["ensured_started"] = True
-            payload["started_new_session"] = managed.start_outcome.started_new_session
-            if managed.start_outcome.initial_runtime_state is not None:
-                payload["initial_runtime_state"] = managed.start_outcome.initial_runtime_state
-            if managed.start_outcome.session_restarted:
-                payload["session_restarted"] = True
-        if invocation.output_selector is not None:
-            payload["selected_output"] = invocation.output_selector
-            payload["selected_text"] = select_exec_output(payload, invocation.output_selector)
-        session_python = self._session_python(
-            project_root=request.project_root,
-            session_id=session_id,
-        )
-        if session_python is not None:
-            payload["session_python"] = session_python
-        namespace_delta = self._file_exec_namespace_delta(
-            request=request,
-            session_id=session_id,
-            payload=payload,
-            before=namespace_before,
-        )
-        if namespace_delta is not None:
-            payload["namespace_delta"] = namespace_delta
+        payload = payload_builder.build(managed)
 
         if not invocation.is_background and managed.record.status == "error":
             raise AgentNBException(
@@ -588,76 +555,6 @@ class AgentNBApp:
                 data=dict(payload),
             )
         return payload
-
-    def _file_exec_namespace_snapshot(
-        self,
-        *,
-        request: ExecRequest,
-        session_id: str,
-    ) -> list[VarDisplayEntry] | None:
-        if request.source_kind != "file" or request.invocation.is_background:
-            return None
-        state = self.runtime.runtime_state(
-            project_root=request.project_root,
-            session_id=session_id,
-        )
-        if state.kind in {"missing", "dead", "stale"}:
-            return []
-        if state.kind == "starting":
-            return None
-        return self._ephemeral_vars_snapshot(
-            project_root=request.project_root,
-            session_id=session_id,
-            ensure_started=request.invocation.ensure_started,
-            wait_for_usable=True,
-        )
-
-    def _file_exec_namespace_delta(
-        self,
-        *,
-        request: ExecRequest,
-        session_id: str,
-        payload: ExecPayload,
-        before: list[VarDisplayEntry] | None,
-    ) -> NamespaceDeltaPayload | None:
-        if request.source_kind != "file" or request.invocation.is_background:
-            return None
-        if payload.get("status") == "error":
-            return None
-        if before is None or not _exec_payload_is_empty(payload):
-            return None
-        after = self._ephemeral_vars_snapshot(
-            project_root=request.project_root,
-            session_id=session_id,
-            ensure_started=False,
-            wait_for_usable=False,
-        )
-        if after is None:
-            return None
-        return _namespace_delta(before=before, after=after)
-
-    def _ephemeral_vars_snapshot(
-        self,
-        *,
-        project_root: Path,
-        session_id: str,
-        ensure_started: bool,
-        wait_for_usable: bool,
-    ) -> list[VarDisplayEntry] | None:
-        try:
-            helper_result = self.ops.list_vars_result(
-                project_root=project_root,
-                session_id=session_id,
-                execution_policy=HelperExecutionPolicy(
-                    ensure_started=ensure_started,
-                    wait_for_usable=wait_for_usable,
-                    retry_on_busy=wait_for_usable,
-                    record_history=False,
-                ),
-            )
-        except AgentNBException:
-            return None
-        return cast(list[VarDisplayEntry], helper_result.payload)
 
     def _status_payload(self, *, request: StatusRequest, session_id: str) -> StatusPayload:
         if request.wait_for == "idle":
@@ -897,7 +794,6 @@ class AgentNBApp:
             project_root=request.project_root,
             session_id=session_id,
             python_executable=request.python_executable,
-            auto_fix=request.auto_fix,
         )
 
     def _runs_list_payload(self, *, request: RunsListRequest) -> RunsListPayload:
@@ -963,18 +859,6 @@ class AgentNBApp:
                 session_id=request.session_id,
                 message=message,
             )
-        return None
-
-    def _session_python(self, *, project_root: Path, session_id: str) -> str | None:
-        state = self.runtime.runtime_state(
-            project_root=project_root,
-            session_id=session_id,
-        )
-        if state.session is not None and state.session.python_executable:
-            return state.session.python_executable
-        status = state.to_kernel_status()
-        if status.python:
-            return status.python
         return None
 
     def _validate_history_request(self, request: HistoryRequest) -> CommandResponse | None:
@@ -1294,6 +1178,111 @@ def _runtime_state_from_status(status: KernelStatus) -> RuntimeStateKind:
 
 def _sessions_list_payload(sessions: list[SessionSummary]) -> SessionsListPayload:
     return {"sessions": sessions}
+
+
+@dataclass(slots=True)
+class _ExecPayloadBuilder:
+    runtime: KernelRuntime
+    ops: NotebookOps
+    request: ExecRequest
+    session_id: str
+    namespace_before: list[VarDisplayEntry] | None = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.namespace_before = self._file_exec_namespace_snapshot()
+
+    def build(self, managed: ManagedExecution) -> ExecPayload:
+        invocation = self.request.invocation
+        payload = compact_execution_payload(
+            cast(CompactExecPayloadInput, managed.record.to_execution_payload()),
+            no_truncate=invocation.no_truncate,
+        )
+        payload["source_kind"] = self.request.source_kind
+        if self.request.source_path is not None:
+            payload["source_path"] = str(self.request.source_path)
+        if invocation.is_background:
+            payload["background"] = True
+        if invocation.ensure_started:
+            payload["ensured_started"] = True
+            payload["started_new_session"] = managed.start_outcome.started_new_session
+            if managed.start_outcome.initial_runtime_state is not None:
+                payload["initial_runtime_state"] = managed.start_outcome.initial_runtime_state
+            if managed.start_outcome.session_restarted:
+                payload["session_restarted"] = True
+        if invocation.output_selector is not None:
+            payload["selected_output"] = invocation.output_selector
+            payload["selected_text"] = select_exec_output(payload, invocation.output_selector)
+        session_python = self._session_python()
+        if session_python is not None:
+            payload["session_python"] = session_python
+        namespace_delta = self._file_exec_namespace_delta(payload)
+        if namespace_delta is not None:
+            payload["namespace_delta"] = namespace_delta
+        return payload
+
+    def _file_exec_namespace_snapshot(self) -> list[VarDisplayEntry] | None:
+        if self.request.source_kind != "file" or self.request.invocation.is_background:
+            return None
+        state = self.runtime.runtime_state(
+            project_root=self.request.project_root,
+            session_id=self.session_id,
+        )
+        if state.kind in {"missing", "dead", "stale"}:
+            return []
+        if state.kind == "starting":
+            return None
+        return self._ephemeral_vars_snapshot(
+            ensure_started=self.request.invocation.ensure_started,
+            wait_for_usable=True,
+        )
+
+    def _file_exec_namespace_delta(self, payload: ExecPayload) -> NamespaceDeltaPayload | None:
+        if self.request.source_kind != "file" or self.request.invocation.is_background:
+            return None
+        if payload.get("status") == "error":
+            return None
+        if self.namespace_before is None or not _exec_payload_is_empty(payload):
+            return None
+        after = self._ephemeral_vars_snapshot(
+            ensure_started=False,
+            wait_for_usable=False,
+        )
+        if after is None:
+            return None
+        return _namespace_delta(before=self.namespace_before, after=after)
+
+    def _ephemeral_vars_snapshot(
+        self,
+        *,
+        ensure_started: bool,
+        wait_for_usable: bool,
+    ) -> list[VarDisplayEntry] | None:
+        try:
+            helper_result = self.ops.list_vars_result(
+                project_root=self.request.project_root,
+                session_id=self.session_id,
+                execution_policy=HelperExecutionPolicy(
+                    ensure_started=ensure_started,
+                    wait_for_usable=wait_for_usable,
+                    retry_on_busy=wait_for_usable,
+                    record_history=False,
+                ),
+            )
+        except AgentNBException:
+            return None
+        return cast(list[VarDisplayEntry], helper_result.payload)
+
+    def _session_python(self) -> str | None:
+        state = self.runtime.runtime_state(
+            project_root=self.request.project_root,
+            session_id=self.session_id,
+        )
+        if state.session is not None and state.session.python_executable:
+            return state.session.python_executable
+        status = state.to_kernel_status()
+        if status.python:
+            return status.python
+        return None
 
 
 def _exec_payload_is_empty(payload: ExecPayload) -> bool:

@@ -101,9 +101,7 @@ class KernelProvisioner:
     def provision(
         self,
         preferred_python: Path | None = None,
-        auto_install: bool = False,
     ) -> ProvisionResult:
-        del auto_install
         selected = self.select_interpreter(preferred_python=preferred_python)
         installed = self.ensure_ipykernel(selected)
         return ProvisionResult(
@@ -134,11 +132,7 @@ class KernelProvisioner:
             return ("uv", "add", "ipykernel")
         return ("uv", "pip", "install", "--python", executable, IPYKERNEL_REQUIREMENT)
 
-    def _uv_install_cmd_text(self, executable: str) -> str:
-        return " ".join(self._uv_install_cmd(executable))
-
-    def doctor(self, preferred_python: Path | None = None, auto_fix: bool = False) -> DoctorReport:
-        del auto_fix
+    def doctor(self, preferred_python: Path | None = None) -> DoctorReport:
         checks: list[DoctorCheck] = []
 
         try:

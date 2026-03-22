@@ -19,9 +19,10 @@ from agentnb.contracts import (
     ExecutionSink,
     HelperAccessMetadata,
     KernelStatus,
+    success_response,
 )
 from agentnb.errors import SessionBusyError
-from agentnb.execution import ExecutionRecord, ManagedExecution
+from agentnb.execution import ExecutionRecord, ManagedExecution, StartOutcome
 from agentnb.execution_output import OutputItem
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry, JournalQuery
@@ -104,6 +105,7 @@ def _managed_execution(
     session_id: str = "default",
     code: str = "1 + 1",
     started_new_session: bool = False,
+    initial_runtime_state: str | None = None,
 ) -> ManagedExecution:
     return ManagedExecution(
         record=ExecutionRecord(
@@ -121,7 +123,10 @@ def _managed_execution(
             evalue=evalue,
             traceback=traceback,
         ),
-        started_new_session=started_new_session,
+        start_outcome=StartOutcome(
+            started_new_session=started_new_session,
+            initial_runtime_state=cast(Any, initial_runtime_state),
+        ),
     )
 
 
@@ -891,7 +896,7 @@ def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path
     }
 
 
-def test_cli_start_auto_install_is_opt_in(
+def test_cli_start_uses_manual_recovery_contract(
     cli_runner: CliRunner,
     project_dir: Path,
     mocker: MockerFixture,
@@ -915,30 +920,16 @@ def test_cli_start_auto_install_is_opt_in(
     assert start_mock.call_args.kwargs["auto_install"] is False
 
 
-def test_cli_start_auto_install_flag_enables_installs(
+def test_cli_start_rejects_removed_auto_install_flag(
     cli_runner: CliRunner,
     project_dir: Path,
-    mocker: MockerFixture,
 ) -> None:
-    start_mock = mocker.patch("agentnb.cli.runtime.start")
-    start_mock.return_value = (
-        KernelStatus(
-            alive=True,
-            pid=1234,
-            connection_file=str(project_dir / ".agentnb" / "kernel-default.json"),
-            started_at="2026-03-09T00:00:00+00:00",
-            uptime_s=0.0,
-            python="python",
-        ),
-        True,
-    )
-
     result = cli_runner.invoke(
         main, ["start", "--project", str(project_dir), "--auto-install", "--json"]
     )
 
-    assert result.exit_code == 0
-    assert start_mock.call_args.kwargs["auto_install"] is True
+    assert result.exit_code != 0
+    assert "No such option: --auto-install" in result.output
 
 
 def test_cli_start_passes_named_session(
@@ -985,7 +976,8 @@ def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     assert "Persistent project-scoped Python REPL for agent workflows." in result.output
     assert 'agentnb "import json"' in result.output
     assert "Canonical grammar:" in result.output
-    assert "`status --wait` and `status --wait-idle` remain compatibility" in result.output
+    assert "status --wait-idle" in result.output
+    assert "execution-id `runs` subcommands" in result.output
     assert "runs show @latest" in result.output
     assert "@last-error" in result.output
     assert "--quiet" in result.output
@@ -998,6 +990,15 @@ def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     assert "exec  Execute code in the live kernel." in result.output
     assert "wait       Wait until the target session is usable" in result.output
     assert "runs  Inspect persisted execution records for" in result.output
+
+
+def test_cli_history_help_mentions_selectors(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(main, ["history", "--help"])
+
+    assert result.exit_code == 0
+    assert "@latest" in result.output
+    assert "@last-error" in result.output
+    assert "@last-success" in result.output
 
 
 def test_cli_json_response_includes_suggestions(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -1063,6 +1064,17 @@ def test_cli_quiet_root_flag_works_after_subcommand(
     result = cli_runner.invoke(main, ["status", "--quiet", "--project", str(project_dir)])
     assert result.exit_code == 0
     assert result.output == ""
+
+
+def test_cli_quiet_keeps_error_recovery_guidance(cli_runner: CliRunner, project_dir: Path) -> None:
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--quiet", "--project", str(project_dir), "missing_name"],
+    )
+
+    assert result.exit_code == 1
+    assert "Error:" in result.output
+    assert "Next:" in result.output
 
 
 def test_cli_env_format_json_applies_without_per_command_flag(
@@ -1188,6 +1200,77 @@ def test_cli_exec_ensure_started_starts_missing_session(
     assert ensure_calls[0]["session_id"] == "default"
 
 
+def test_cli_exec_human_reports_restart_notice_after_dead_recovery(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.execute_code = lambda **_: ManagedExecution(  # type: ignore[method-assign]
+        record=ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="error",
+            duration_ms=5,
+            code="x",
+            ename="NameError",
+            evalue="name 'x' is not defined",
+            traceback=["tb"],
+        ),
+        start_outcome=StartOutcome(started_new_session=True, initial_runtime_state="dead"),
+    )
+
+    result = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "x"])
+
+    assert result.exit_code == 1
+    assert "Notice: session was restarted after the previous kernel died" in result.output
+    assert "Error: Execution failed" in result.output
+
+
+def test_cli_exec_file_request_preserves_source_metadata(
+    cli_runner: CliRunner,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agentnb.cli as cli
+    from agentnb.app import ExecRequest
+
+    script = project_dir / "analysis.py"
+    script.write_text("value = 2\npayload = {'id': 1}\n", encoding="utf-8")
+    captured: dict[str, ExecRequest] = {}
+
+    def exec_stub(request: ExecRequest):
+        captured["request"] = request
+        return success_response(
+            command="exec",
+            project=str(project_dir),
+            session_id="default",
+            data={
+                "source_kind": request.source_kind,
+                "source_path": str(request.source_path),
+                "namespace_delta": {
+                    "entries": [
+                        {"change": "new", "name": "value", "type": "int", "repr": "2"},
+                    ],
+                    "new_count": 1,
+                    "updated_count": 0,
+                    "truncated": False,
+                },
+            },
+        )
+
+    monkeypatch.setattr(cli.application, "exec", exec_stub)
+
+    result = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--file", str(script)])
+
+    assert result.exit_code == 0
+    request = captured["request"]
+    assert request.source_kind == "file"
+    assert request.source_path == script
+    assert "File executed. Namespace changes:" in result.output
+
+
 def test_cli_exec_background_returns_run_id(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
@@ -1202,7 +1285,7 @@ def test_cli_exec_background_returns_run_id(cli_runner: CliRunner, project_dir: 
             code="1 + 1",
             worker_pid=123,
         ),
-        started_new_session=True,
+        start_outcome=StartOutcome(started_new_session=True, initial_runtime_state="missing"),
     )
 
     result = cli_runner.invoke(
@@ -2035,6 +2118,35 @@ def test_cli_runs_show_json_marks_running_snapshot_as_stale(
     assert payload["data"]["run"]["snapshot_stale"] is True
 
 
+def test_cli_runs_show_json_exposes_top_level_status_alias(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
+        "execution_id": "run-1",
+        "ts": "2026-03-10T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "running",
+        "duration_ms": 12,
+        "stdout": "",
+        "stderr": "",
+        "result": None,
+        "events": [],
+    }
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "show", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = _payload(result.output)
+    assert payload["data"]["status"] == "running"
+    assert payload["data"]["run"]["status"] == "running"
+
+
 def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
@@ -2366,7 +2478,7 @@ def test_cli_status_human_reports_implicit_session_switch(
     assert "(now targeting session: analysis)" in result.output
 
 
-def test_cli_doctor_fix_uses_target_project_root(
+def test_cli_doctor_uses_target_project_root_without_auto_fix(
     cli_runner: CliRunner,
     project_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2404,7 +2516,7 @@ def test_cli_doctor_fix_uses_target_project_root(
         lambda project_root: FakeProvisioner(project_root),
     )
 
-    result = cli_runner.invoke(main, ["doctor", "--project", str(project_dir), "--fix", "--json"])
+    result = cli_runner.invoke(main, ["doctor", "--project", str(project_dir), "--json"])
 
     assert result.exit_code == 0
     payload = _payload(result.output)
@@ -2413,9 +2525,19 @@ def test_cli_doctor_fix_uses_target_project_root(
         {
             "project_root": project_dir.resolve(),
             "preferred_python": None,
-            "auto_fix": True,
+            "auto_fix": False,
         }
     ]
+
+
+def test_cli_doctor_rejects_removed_fix_flag(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    result = cli_runner.invoke(main, ["doctor", "--project", str(project_dir), "--fix", "--json"])
+
+    assert result.exit_code != 0
+    assert "No such option: --fix" in result.output
 
 
 def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Path) -> None:

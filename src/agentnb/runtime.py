@@ -166,6 +166,7 @@ class KernelRuntime:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
         self._backend.stop(session)
         store.clear_session()
+        self.clear_current_session_id(project_root=project_root, expected_session_id=session_id)
         self._hooks.on_kernel_stop(store.project_root, store.session_id, session)
 
     def stop_starting(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
@@ -175,6 +176,7 @@ class KernelRuntime:
             raise NoKernelRunningError()
         self._backend.stop(session)
         store.delete_session()
+        self.clear_current_session_id(project_root=project_root, expected_session_id=session_id)
         self._hooks.on_kernel_stop(store.project_root, store.session_id, session)
 
     def ensure_started(

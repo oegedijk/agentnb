@@ -264,6 +264,16 @@ v0.3.7 should close the highest-value ergonomic issues that still showed up in t
   - The shortest path for a live exploratory loop is not always the same as the right long-term project dependency workflow.
   - Agents need a clear "recover now" path when they are already inside a running session.
 
+- Issue: automatic dependency installation during startup/doctor is too brittle and too stateful for this CLI.
+  Reproduce:
+  - Trigger a missing-kernel-dependency path such as missing `ipykernel` in a fresh project environment.
+  - Run `uv run agentnb start --auto-install` or `uv run agentnb doctor --fix`.
+  - Observe agentnb trying to choose and run an installer itself across environment-management variants such as uv-managed envs, pip-less envs, and active live sessions.
+  Why this is a problem for ergonomic use:
+  - Installing packages is environment management, not durable REPL control; folding it into agentnb increases ambiguity around which interpreter/environment was changed.
+  - Auto-install behavior is brittle across `pip` vs `uv` differences and makes recovery harder to reason about when startup still fails.
+  - The cleaner contract is: detect the missing dependency, print one concrete install command, then tell the user/agent to restart with `--fresh` after installation.
+
 - Issue: readiness wording is still ambiguous after `status --wait-idle`.
   Reproduce:
   - Start background work in a session.

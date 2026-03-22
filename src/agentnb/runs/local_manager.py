@@ -21,7 +21,14 @@ from ..session import pid_exists
 from .executor import LocalRunExecutor, RunExecutor
 from .manager import RunManager
 from .models import RunObserver, RunPlan, RunSpec
-from .store import ExecutionRecord, ExecutionRun, ExecutionStore, ManagedExecution, new_execution_id
+from .store import (
+    ExecutionRecord,
+    ExecutionRun,
+    ExecutionStore,
+    ManagedExecution,
+    StartOutcome,
+    new_execution_id,
+)
 
 if TYPE_CHECKING:
     from ..runtime import KernelRuntime
@@ -323,7 +330,7 @@ class LocalRunManager(RunManager):
 
         try:
             self._reject_if_session_run_active(plan=plan, run=run)
-            started_new_session = self._ensure_plan_ready(plan)
+            start_outcome = self._ensure_plan_ready(plan)
             execution = self._executor.run_foreground(plan=plan, run=run, observer=observer)
         except Exception as exc:
             if isinstance(exc, (NoKernelRunningError, KernelNotReadyError)):
@@ -341,7 +348,7 @@ class LocalRunManager(RunManager):
             raise
 
         record = run.finalize_result(execution)
-        return ManagedExecution(record=record, started_new_session=started_new_session)
+        return ManagedExecution(record=record, start_outcome=start_outcome)
 
     def _submit_background(self, plan: RunPlan) -> ManagedExecution:
         run = self._new_run(
@@ -354,7 +361,7 @@ class LocalRunManager(RunManager):
 
         try:
             self._reject_if_session_run_active(plan=plan, run=run)
-            started_new_session = self._ensure_plan_ready(plan)
+            start_outcome = self._ensure_plan_ready(plan)
             run.start()
             record = self._executor.start_background(
                 plan=plan,
@@ -376,7 +383,7 @@ class LocalRunManager(RunManager):
                     ) from exc
             raise
 
-        return ManagedExecution(record=record, started_new_session=started_new_session)
+        return ManagedExecution(record=record, start_outcome=start_outcome)
 
     def _store(self, project_root: Path) -> ExecutionStore:
         return ExecutionStore(project_root)
@@ -416,14 +423,22 @@ class LocalRunManager(RunManager):
         if plan.mode == "background" and not plan.supports_background:
             raise ValueError(f"Unsupported run mode for {plan.command_type}: {plan.mode}")
 
-    def _ensure_plan_ready(self, plan: RunPlan) -> bool:
-        started_new_session = False
-        if plan.command_type == "exec" and plan.ensure_started:
-            _, started_new_session = self.runtime.ensure_started(
-                project_root=plan.project_root,
-                session_id=plan.session_id,
-            )
-        return started_new_session
+    def _ensure_plan_ready(self, plan: RunPlan) -> StartOutcome:
+        if plan.command_type != "exec" or not plan.ensure_started:
+            return StartOutcome()
+
+        initial_state = self.runtime.runtime_state(
+            project_root=plan.project_root,
+            session_id=plan.session_id,
+        )
+        _, started_new_session = self.runtime.ensure_started(
+            project_root=plan.project_root,
+            session_id=plan.session_id,
+        )
+        return StartOutcome(
+            started_new_session=started_new_session,
+            initial_runtime_state=cast(HelperInitialRuntimeState, initial_state.kind),
+        )
 
     def _plan_for_record(self, *, project_root: Path, record: ExecutionRecord) -> RunPlan:
         if record.command_type == "exec":

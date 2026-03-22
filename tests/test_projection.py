@@ -240,6 +240,29 @@ def test_response_projector_agent_compacts_exec_success_to_next_step_fields() ->
     }
 
 
+def test_response_projector_agent_includes_run_status_alias() -> None:
+    response = success_response(
+        command="runs-show",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "status": "running",
+            "run": {
+                "execution_id": "run-1",
+                "session_id": "default",
+                "command_type": "exec",
+                "status": "running",
+                "duration_ms": 12,
+            },
+        },
+    )
+
+    projected = ResponseProjector().project(response, profile="agent")
+
+    assert projected["data"]["status"] == "running"
+    assert projected["data"]["run"]["status"] == "running"
+
+
 def test_response_projector_agent_keeps_structured_exec_result_preview() -> None:
     response = success_response(
         command="exec",

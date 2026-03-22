@@ -42,7 +42,10 @@ def test_render_human_doctor_includes_fix_hint() -> None:
                     "name": "ipykernel",
                     "status": "warn",
                     "message": "ipykernel is not installed.",
-                    "fix_hint": "Run: python -m pip install ipykernel>=6.0",
+                    "fix_hint": (
+                        "Run: python -m pip install ipykernel>=6.0. "
+                        'Then restart with `agentnb --fresh "..."`.'
+                    ),
                 },
             ],
         },
@@ -54,7 +57,8 @@ def test_render_human_doctor_includes_fix_hint() -> None:
         "Doctor found issues.\n"
         "[OK] python: Using interpreter: python\n"
         "[WARN] ipykernel: ipykernel is not installed.\n"
-        "  fix: Run: python -m pip install ipykernel>=6.0"
+        "  fix: Run: python -m pip install ipykernel>=6.0. "
+        'Then restart with `agentnb --fresh "..."`.'
     )
 
 
@@ -108,7 +112,9 @@ def test_render_human_runs_show_mentions_snapshot_for_running_run() -> None:
         "Run run-1 [running] exec on session analysis.\n"
         "duration: 12ms\n"
         "snapshot: persisted state only; use `agentnb runs follow` for live events\n"
-        "stdout: tick 1 tick 2\n"
+        "stdout:\n"
+        "tick 1\n"
+        "tick 2\n"
         "events: 1 recorded"
     )
 
@@ -278,7 +284,7 @@ def test_render_human_status_wait_includes_wait_detail() -> None:
 
     assert (
         render_human(response, options=RenderOptions())
-        == "Kernel is running (session: default, pid 321, after waiting 3.9s for idle from busy)."
+        == "Kernel is idle (session: default, pid 321, after waiting 3.9s for idle from busy)."
     )
 
 
@@ -323,6 +329,42 @@ def test_render_human_exec_without_output_reports_completion() -> None:
 
     assert render_human(exec_response, options=RenderOptions()) == "Execution completed."
     assert render_human(reset_response, options=RenderOptions()) == "Namespace cleared."
+
+
+def test_render_human_file_exec_without_output_reports_namespace_changes() -> None:
+    exec_response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "source_kind": "file",
+            "namespace_delta": {
+                "entries": [
+                    {
+                        "change": "new",
+                        "name": "payload",
+                        "repr": "dict len=2 keys=items, paging",
+                        "type": "dict",
+                    },
+                    {
+                        "change": "updated",
+                        "name": "df",
+                        "repr": "DataFrame shape=(10, 3)",
+                        "type": "DataFrame",
+                    },
+                ],
+                "new_count": 1,
+                "updated_count": 1,
+                "truncated": False,
+            },
+        },
+    )
+
+    assert render_human(exec_response, options=RenderOptions()) == (
+        "File executed. Namespace changes:\n"
+        "- new: payload: dict len=2 keys=items, paging (dict)\n"
+        "- updated: df: DataFrame shape=(10, 3) (DataFrame)"
+    )
 
 
 def test_render_human_status_includes_session_name() -> None:
@@ -710,3 +752,72 @@ def test_render_human_session_switch_note() -> None:
     )
 
     assert render_human(response, options=RenderOptions()) == "2\n(now targeting session: analysis)"
+
+
+def test_render_human_quiet_hides_success_chatter_but_keeps_primary_output() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="analysis",
+        data={"stdout": "2\n", "switched_session": "analysis"},
+        suggestions=["Run `agentnb vars --json` next."],
+    )
+
+    assert render_human(response, options=RenderOptions(quiet_human=True)) == "2"
+
+
+def test_render_human_quiet_keeps_error_suggestions() -> None:
+    response = error_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        code="EXECUTION_ERROR",
+        message="Execution failed",
+        ename="NameError",
+        evalue="name 'x' is not defined",
+        suggestions=["Run `agentnb vars --json` to inspect the namespace."],
+    )
+
+    assert render_human(response, options=RenderOptions(quiet_human=True)) == (
+        "Error: Execution failed\n"
+        "Type: NameError\n"
+        "Detail: name 'x' is not defined\n\n"
+        "Next:\n"
+        "- Run `agentnb vars --json` to inspect the namespace."
+    )
+
+
+def test_render_human_no_suggestions_suppresses_error_next_block() -> None:
+    response = error_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        code="EXECUTION_ERROR",
+        message="Execution failed",
+        suggestions=["Run `agentnb vars --json` to inspect the namespace."],
+    )
+
+    assert render_human(response, options=RenderOptions(suppress_suggestions=True)) == (
+        "Error: Execution failed"
+    )
+
+
+def test_render_human_exec_restart_notice_is_explicit() -> None:
+    response = error_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        code="EXECUTION_ERROR",
+        message="Execution failed",
+        ename="NameError",
+        evalue="name 'x' is not defined",
+        data={"session_restarted": True, "initial_runtime_state": "dead"},
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "Notice: session was restarted after the previous kernel died; "
+        "prior in-memory state was lost.\n"
+        "Error: Execution failed\n"
+        "Type: NameError\n"
+        "Detail: name 'x' is not defined"
+    )

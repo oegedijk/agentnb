@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import ast
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generic, TypeVar, cast
+from typing import Generic, Literal, TypeVar, cast
 
 from .contracts import (
     ExecutionResult,
@@ -56,6 +57,20 @@ class HelperExecutionPolicy:
     ensure_started: bool = False
     wait_for_usable: bool = False
     retry_on_busy: bool = False
+    record_history: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class InspectAccessor:
+    kind: Literal["attr", "subscript"]
+    value: str | int | float | bool | None
+
+
+@dataclass(slots=True, frozen=True)
+class InspectReference:
+    raw: str
+    root_name: str
+    accessors: tuple[InspectAccessor, ...] = ()
 
 
 class KernelIntrospection:
@@ -97,11 +112,12 @@ class KernelIntrospection:
         timeout_s: float = 10.0,
         execution_policy: HelperExecutionPolicy | None = None,
     ) -> KernelHelperResult[InspectPayload]:
+        reference = _parse_inspect_reference(name)
         result = self._run_json_helper(
             project_root=project_root,
             session_id=session_id,
             timeout_s=timeout_s,
-            helper=_inspect_helper(name),
+            helper=_inspect_helper(reference),
             execution_policy=execution_policy,
         )
         return KernelHelperResult(
@@ -140,10 +156,14 @@ class KernelIntrospection:
         helper: KernelHelperRequest,
         execution_policy: HelperExecutionPolicy | None = None,
     ) -> KernelHelperResult[JSONValue]:
-        history = HistoryStore(project_root=project_root, session_id=session_id)
-        recording = self._recording_for_helper(helper)
         policy = execution_policy or HelperExecutionPolicy()
         access_metadata = HelperAccessMetadata()
+        history = (
+            HistoryStore(project_root=project_root, session_id=session_id)
+            if policy.record_history
+            else None
+        )
+        recording = self._recording_for_helper(helper) if policy.record_history else None
 
         try:
             if policy.ensure_started:
@@ -170,29 +190,32 @@ class KernelIntrospection:
                 exc = _augment_session_busy_error(exc, access_metadata)
             elif isinstance(exc, AgentNBException):
                 exc = _augment_helper_error(exc, access_metadata)
-            self._append_execution_error(
-                history=history,
-                session_id=session_id,
-                helper=helper,
-                error=exc,
-            )
+            if history is not None:
+                self._append_execution_error(
+                    history=history,
+                    session_id=session_id,
+                    helper=helper,
+                    error=exc,
+                )
             if exc is original_exc:
                 raise
             raise exc from original_exc
 
-        internal_record = recording.build_internal_record(
-            session_id=session_id,
-            execution=execution,
-        )
-        if internal_record is not None:
-            history.append(internal_record)
-        if execution.status == "error":
-            history.append(
-                recording.build_user_record(
-                    session_id=session_id,
-                    execution=execution,
-                )
+        if history is not None and recording is not None:
+            internal_record = recording.build_internal_record(
+                session_id=session_id,
+                execution=execution,
             )
+            if internal_record is not None:
+                history.append(internal_record)
+        if execution.status == "error":
+            if history is not None and recording is not None:
+                history.append(
+                    recording.build_user_record(
+                        session_id=session_id,
+                        execution=execution,
+                    )
+                )
             raise AgentNBException(
                 code="EXECUTION_ERROR",
                 message=f"Failed to {helper.context}",
@@ -211,12 +234,13 @@ class KernelIntrospection:
             )
         except AgentNBException as exc:
             raise _augment_helper_error(exc, access_metadata) from exc
-        history.append(
-            recording.build_user_record(
-                session_id=session_id,
-                execution=execution,
+        if history is not None and recording is not None:
+            history.append(
+                recording.build_user_record(
+                    session_id=session_id,
+                    execution=execution,
+                )
             )
-        )
         return KernelHelperResult(
             execution=execution,
             payload=payload,
@@ -325,18 +349,19 @@ class KernelIntrospection:
         *,
         execution: ExecutionResult,
         session_id: str,
-        history: HistoryStore,
+        history: HistoryStore | None,
         helper: KernelHelperRequest,
     ) -> JSONValue:
         lines = [line.strip() for line in execution.stdout.splitlines() if line.strip()]
         if not lines:
-            self._append_parse_error(
-                history=history,
-                session_id=session_id,
-                helper=helper,
-                execution=execution,
-                error_type="PARSE_ERROR",
-            )
+            if history is not None:
+                self._append_parse_error(
+                    history=history,
+                    session_id=session_id,
+                    helper=helper,
+                    execution=execution,
+                    error_type="PARSE_ERROR",
+                )
             raise AgentNBException(
                 code="PARSE_ERROR",
                 message=f"No output while attempting to {helper.context}",
@@ -345,13 +370,14 @@ class KernelIntrospection:
         try:
             return json.loads(lines[-1])
         except json.JSONDecodeError as exc:
-            self._append_parse_error(
-                history=history,
-                session_id=session_id,
-                helper=helper,
-                execution=execution,
-                error_type=type(exc).__name__,
-            )
+            if history is not None:
+                self._append_parse_error(
+                    history=history,
+                    session_id=session_id,
+                    helper=helper,
+                    execution=execution,
+                    error_type=type(exc).__name__,
+                )
             raise AgentNBException(
                 code="PARSE_ERROR",
                 message=f"Unable to parse JSON payload while attempting to {helper.context}",
@@ -668,6 +694,59 @@ def _parse_reload_report(payload: JSONValue) -> ReloadReport:
     return report
 
 
+def _parse_inspect_reference(reference: str) -> InspectReference:
+    raw = reference.strip()
+    if not raw:
+        raise AgentNBException(code="INVALID_INPUT", message="Inspect reference cannot be empty.")
+    try:
+        expression = ast.parse(raw, mode="eval")
+    except SyntaxError as exc:
+        raise AgentNBException(
+            code="INVALID_INPUT",
+            message="Inspect only supports names, dotted access, and constant subscripts.",
+            ename=type(exc).__name__,
+            evalue=str(exc),
+        ) from exc
+
+    root_name, accessors = _parse_inspect_expression(expression.body)
+    return InspectReference(raw=raw, root_name=root_name, accessors=tuple(accessors))
+
+
+def _parse_inspect_expression(node: ast.AST) -> tuple[str, list[InspectAccessor]]:
+    if isinstance(node, ast.Name):
+        return node.id, []
+    if isinstance(node, ast.Attribute):
+        root_name, accessors = _parse_inspect_expression(node.value)
+        accessors.append(InspectAccessor(kind="attr", value=node.attr))
+        return root_name, accessors
+    if isinstance(node, ast.Subscript):
+        root_name, accessors = _parse_inspect_expression(node.value)
+        accessors.append(
+            InspectAccessor(kind="subscript", value=_parse_inspect_subscript(node.slice))
+        )
+        return root_name, accessors
+    raise AgentNBException(
+        code="INVALID_INPUT",
+        message="Inspect only supports names, dotted access, and constant subscripts.",
+    )
+
+
+def _parse_inspect_subscript(node: ast.AST) -> str | int | float | bool | None:
+    if isinstance(node, ast.Constant) and isinstance(
+        node.value, str | int | float | bool | type(None)
+    ):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        operand = node.operand
+        if isinstance(operand, ast.Constant) and isinstance(operand.value, int | float):
+            value = operand.value if isinstance(node.op, ast.UAdd) else -operand.value
+            return value
+    raise AgentNBException(
+        code="INVALID_INPUT",
+        message="Inspect subscripts must use constant string or numeric indexes.",
+    )
+
+
 def _list_vars_helper() -> KernelHelperRequest:
     return KernelHelperRequest(
         command_type="vars",
@@ -789,13 +868,17 @@ print(json.dumps(_items, default=str))
     )
 
 
-def _inspect_helper(name: str) -> KernelHelperRequest:
-    escaped_name = json.dumps(name)
+def _inspect_helper(reference: InspectReference) -> KernelHelperRequest:
+    escaped_display_name = json.dumps(reference.raw)
+    escaped_root_name = json.dumps(reference.root_name)
+    escaped_steps = json.dumps(
+        [{"kind": accessor.kind, "value": accessor.value} for accessor in reference.accessors]
+    )
     return KernelHelperRequest(
         command_type="inspect",
-        label=f"inspect {name}",
+        label=f"inspect {reference.raw}",
         context="inspect variable",
-        input_text=name,
+        input_text=reference.raw,
         code=f"""
 import json
 from IPython import get_ipython
@@ -918,7 +1001,7 @@ def _json_safe(value, depth=0):
         return value
     if isinstance(value, str):
         return _simple_text(value, 80)
-    if depth >= 2:
+    if depth >= 6:
         return _truncate_text(value, 80)
     _mapping = _mapping_items(value)
     if _mapping is not None:
@@ -992,11 +1075,18 @@ def _sequence_preview(value):
 
 
 _user_ns = get_ipython().user_ns if get_ipython() is not None else globals()
-_name = {escaped_name}
-if _name not in _user_ns:
-    raise NameError(f"Variable '{{_name}}' is not defined")
+_name = {escaped_display_name}
+_root_name = {escaped_root_name}
+_steps = {escaped_steps}
+if _root_name not in _user_ns:
+    raise NameError(f"Variable '{{_root_name}}' is not defined")
 
-_value = _user_ns[_name]
+_value = _user_ns[_root_name]
+for _step in _steps:
+    if _step["kind"] == "attr":
+        _value = getattr(_value, _step["value"])
+    else:
+        _value = _value[_step["value"]]
 _repr_text = _truncate_text(_value, 500)
 _preview = _dataframe_preview(_value)
 if _preview is None:

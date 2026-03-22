@@ -237,15 +237,16 @@ Good signs:
 Intent:
 - use `doctor` to check the current interpreter and ipykernel availability
 - try starting a session without ipykernel installed and observe the error message
-- use `start --auto-install` or `doctor --fix` to install ipykernel automatically
+- run the exact install command that `start` or `doctor` prints for missing `ipykernel`
+- restart cleanly with `--fresh` or rerun `start` after installing
 - try importing a missing third-party module inside the session
-- install it from within the session using `!pip install` or subprocess and verify it works
-- use `reload` to pick up the new module without restarting
+- repair it from the shell using the suggested `uv pip install --python <session_python> PACKAGE` command
+- retry the import and verify it works without restarting the whole session
 
 Good signs:
 - the error message for missing ipykernel gives the exact install command
-- `--auto-install` and `doctor --fix` work without manual steps
-- installing a module inside the session and importing it does not require a restart
+- the startup path does not mutate the environment itself; it gives one explicit recovery command plus a `--fresh` restart hint
+- missing-module recovery inside a live session prefers a session-bound shell install command, with `uv add` only as the durable follow-up
 
 ## Scenario 18: Session Cleanup And Stale Reconciliation
 

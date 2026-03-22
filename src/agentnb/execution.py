@@ -14,6 +14,7 @@ from .runs import (
     ManagedExecution,
     RunManager,
     RunSpec,
+    StartOutcome,
     _ExecutionProgressSink,
 )
 from .session import DEFAULT_SESSION_ID
@@ -186,5 +187,6 @@ __all__ = [
     "ExecutionService",
     "ExecutionStore",
     "ManagedExecution",
+    "StartOutcome",
     "_ExecutionProgressSink",
 ]

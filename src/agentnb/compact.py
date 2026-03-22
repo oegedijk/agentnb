@@ -118,6 +118,16 @@ def compact_execution_payload(
     if isinstance(evalue, str):
         compacted["evalue"] = evalue
 
+    source_kind = payload.get("source_kind")
+    if isinstance(source_kind, str):
+        compacted["source_kind"] = cast(Any, source_kind)
+    source_path = payload.get("source_path")
+    if isinstance(source_path, str) and source_path:
+        compacted["source_path"] = source_path
+    namespace_delta = payload.get("namespace_delta")
+    if isinstance(namespace_delta, dict):
+        compacted["namespace_delta"] = cast(Any, dict(namespace_delta))
+
     selected_output = payload.get("selected_output")
     if isinstance(selected_output, str):
         compacted["selected_output"] = selected_output
@@ -416,7 +426,7 @@ def _compact_jsonish(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, str):
         return summarize_history_text(value, limit=80) or ""
 
-    if depth >= 2:
+    if depth >= 6:
         text = str(value)
         return summarize_history_text(text, limit=80) or text[:80]
 

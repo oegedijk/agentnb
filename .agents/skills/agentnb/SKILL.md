@@ -48,15 +48,22 @@ PY
 agentnb analysis.py
 ```
 
+If a file finishes with assignments instead of a final expression, `agentnb`
+reports a compact namespace-change summary so you can see what changed
+without immediately calling `vars`.
+
 `--session` and `--background` work in prefix position for inline code, file
-execution, and most subcommands. Putting them after the subcommand name always
-works:
+execution, and most subcommands. Put `--project` after the command name.
+Session-scoped subcommands also accept `--session` there, but execution-id
+`runs` subcommands (`show`, `wait`, `follow`, `cancel`) are project-scoped and
+do not accept `--session`:
 
 ```bash
 agentnb --session myenv "df.head()"     # prefix works for inline exec
 agentnb --background "long_task()"
 agentnb history --session myenv
 agentnb runs list --session myenv
+agentnb runs show RUN_ID --project /path/to/project
 ```
 
 The default execution timeout is 30 seconds. Use `--timeout` for long-running
@@ -100,6 +107,7 @@ agentnb vars
 agentnb vars --recent 5
 agentnb vars --match rows
 agentnb inspect df
+agentnb inspect "payload['items'][0]"
 ```
 
 Use `wait` when the question is "can I safely send the next command yet?":
@@ -216,13 +224,16 @@ agentnb reset
 agentnb stop
 agentnb start
 agentnb doctor
-agentnb doctor --fix
 ```
 
 - `interrupt` for hanging code
 - `reset` for polluted namespace with a healthy kernel
 - `stop` and `start` for a dead or wedged kernel
 - `doctor` when startup or interpreter detection fails
+
+If `ipykernel` is missing, `start` and `doctor` print one explicit install
+command. Run that command in your shell, then restart cleanly with
+`agentnb --fresh "..."` or rerun `agentnb start`.
 
 Check session readiness with wait modes:
 

@@ -221,6 +221,77 @@ def test_advice_policy_module_not_found_extracts_top_level_package() -> None:
     ]
 
 
+def test_advice_policy_module_not_found_prefers_live_session_repair_when_python_known() -> None:
+    policy = AdvicePolicy()
+
+    context = AdviceContext(
+        command_name="exec",
+        response_status="error",
+        data={"session_python": "/tmp/project/.venv/bin/python"},
+        error_code="EXECUTION_ERROR",
+        error_name="ModuleNotFoundError",
+        error_value="No module named 'pandas'",
+    )
+
+    assert policy.suggestions(context) == [
+        (
+            "Repair the live session: run `uv pip install --python "
+            "/tmp/project/.venv/bin/python pandas` in your shell."
+        ),
+        "For a durable project dependency, run `uv add pandas` in your shell.",
+        "Then retry the execution.",
+    ]
+    assert policy.suggestion_actions(context) == [
+        {
+            "kind": "shell",
+            "label": "Repair live session",
+            "command": "uv",
+            "args": ["pip", "install", "--python", "/tmp/project/.venv/bin/python", "pandas"],
+        },
+        {
+            "kind": "shell",
+            "label": "Add dependency",
+            "command": "uv",
+            "args": ["add", "pandas"],
+        },
+    ]
+
+
+def test_advice_policy_pipless_called_process_prefers_uv_pip_when_python_known() -> None:
+    policy = AdvicePolicy()
+
+    context = AdviceContext(
+        command_name="exec",
+        response_status="error",
+        data={
+            "stderr": "/tmp/.venv/bin/python: No module named pip\n",
+            "session_python": "/tmp/.venv/bin/python",
+        },
+        error_code="EXECUTION_ERROR",
+        error_name="CalledProcessError",
+        error_value=(
+            "Command '['/tmp/.venv/bin/python', '-m', 'pip', 'install', 'pyjokes']' "
+            "returned non-zero exit status 1."
+        ),
+    )
+
+    assert policy.suggestions(context) == [
+        "The selected interpreter does not provide pip inside the live session.",
+        (
+            "Install the dependency from this project with "
+            "run `uv pip install --python /tmp/.venv/bin/python pyjokes` in your shell."
+        ),
+    ]
+    assert policy.suggestion_actions(context) == [
+        {
+            "kind": "shell",
+            "label": "Repair live session",
+            "command": "uv",
+            "args": ["pip", "install", "--python", "/tmp/.venv/bin/python", "pyjokes"],
+        }
+    ]
+
+
 def test_advice_policy_name_error_with_session_suggests_vars() -> None:
     policy = AdvicePolicy()
 

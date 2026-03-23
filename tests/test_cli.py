@@ -1113,7 +1113,7 @@ def test_cli_history_help_mentions_selectors(cli_runner: CliRunner) -> None:
     assert "@latest" in result.output
     assert "@last-error" in result.output
     assert "last-" in result.output
-    assert "success` are supported" in result.output
+    assert "Selectors for REFERENCE" in result.output
     assert "helper/provenance entries" in result.output
 
 
@@ -1663,7 +1663,7 @@ def test_cli_history_latest_returns_only_most_recent_entry(
     payload = _payload(history_res.output)
     assert len(payload["data"]["entries"]) == 1
     assert payload["data"]["entries"][0]["command_type"] == "exec"
-    assert payload["data"]["entries"][0]["label"] == "exec x = 2 x + 2"
+    assert payload["data"]["entries"][0]["label"] == "exec x = 2 | x + 2"
     assert payload["data"]["entries"][0]["kind"] == "user_command"
     assert queries[0].session_id == "default"
     assert queries[0].errors_only is False
@@ -2560,8 +2560,6 @@ def test_cli_runs_follow_human_window_elapsed_reuses_snapshot_renderer(
     assert result.output == (
         "Run run-1 [running] exec on session default.\n"
         "duration: 12ms\n"
-        "stdout: tick\n"
-        "events: 0 recorded\n"
         "Observation window elapsed; the run is still active.\n"
     )
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import cast
 
-from .compact import summarize_history_text
+from .compact import preview_text, summarize_history_text
 from .contracts import CommandResponse
 from .payloads import (
     DataframePreview,
@@ -450,7 +450,7 @@ def _render_exec_like(data: ExecPayload) -> str:
         lines.append("[stderr]")
         lines.append(stderr.rstrip("\n"))
     if result is not None:
-        lines.append(str(result))
+        lines.append(_render_exec_result(data))
     if not lines:
         if data.get("background"):
             execution_id = data.get("execution_id", "")
@@ -460,6 +460,26 @@ def _render_exec_like(data: ExecPayload) -> str:
             return file_exec_hint
         lines.append("Execution completed.")
     return "\n".join(lines)
+
+
+def _render_exec_result(data: ExecPayload) -> str:
+    result = data.get("result")
+    preview = data.get("result_preview")
+    if isinstance(preview, dict) and _prefer_preview_for_human_result(preview, result):
+        return preview_text(preview)
+    return "" if result is None else str(result)
+
+
+def _prefer_preview_for_human_result(preview: Mapping[str, object], result: object) -> bool:
+    kind = preview.get("kind")
+    if kind == "dataframe-like":
+        return True
+    length = preview.get("length")
+    if kind in {"sequence-like", "mapping-like"} and isinstance(length, int) and length > 3:
+        return True
+    if not isinstance(result, str):
+        return True
+    return "\n" in result or len(result) > 240
 
 
 def _prepend_session_identity(body: str, session_id: str | None) -> str:

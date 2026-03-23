@@ -26,9 +26,12 @@ def _read_version_from_pyproject() -> str:
 
 def _resolve_version() -> str:
     try:
-        return version("agentnb")
+        installed_version = version("agentnb")
     except PackageNotFoundError:
         return _read_version_from_pyproject()
+    if installed_version:
+        return installed_version
+    return _read_version_from_pyproject()
 
 
 __version__ = _resolve_version()

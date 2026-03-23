@@ -282,8 +282,31 @@ def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
     assert ok_label.startswith("exec url = 'https://example.com")
     assert "gamma=3" not in ok_label
     assert error_entry["label"] == "exec error ZeroDivisionError"
-    assert internal_ok_entry["label"] == "exec kernel execution value = 42 value"
+    assert internal_ok_entry["label"] == "exec kernel execution value = 42 | value"
     assert internal_error_entry["label"] == "exec kernel error ZeroDivisionError"
+
+
+def test_compact_history_entry_preserves_multiline_code_preview() -> None:
+    entry = compact_history_entry(
+        JournalEntry(
+            kind="user_command",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            execution_id=None,
+            status="error",
+            duration_ms=5,
+            command_type="exec",
+            label="exec",
+            user_visible=True,
+            classification="replayable",
+            provenance_source="history_store",
+            provenance_detail="history_record",
+            code="a = 1\nb = 2\nc = a + b\nc",
+            error_type="NameError",
+        )
+    )
+
+    assert entry["code"] == "a = 1\nb = 2\nc = a + b\n..."
 
 
 def test_compact_run_entry_exposes_previews_and_error_type() -> None:

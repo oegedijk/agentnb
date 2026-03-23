@@ -147,7 +147,7 @@ agentnb runs cancel @active
 ```
 
 - `runs show` reads the latest stored snapshot
-- `runs follow` replays all output so far then streams new events; use `--tail` to skip history, and use `--timeout T` to bound the observation window without turning an active run into an error
+- `runs follow` streams new events from the current tail; use `runs show` to inspect the stored snapshot first, and use `--timeout T` to bound the observation window without turning an active run into an error
 - `runs wait` blocks until the run finishes
 - `runs cancel` requests cancellation for an active run
 

@@ -502,7 +502,7 @@ class AgentNBApp:
                 timeout_s=request.timeout_s,
                 event_sink=event_sink,
                 default_behavior="active",
-                skip_history=request.tail,
+                skip_history=True,
             ),
             response_session_id_resolver=_run_response_session_id,
         )
@@ -871,7 +871,12 @@ class AgentNBApp:
                 project_root=project_root,
                 execution_id=execution_id,
             )
-        payload: RunLookupPayload = {"run": _public_run_payload(run)}
+        payload: RunLookupPayload = {
+            "run": _public_run_payload(
+                run,
+                include_output=not (observation is not None and skip_history),
+            )
+        }
         status = run.get("status")
         if isinstance(status, str):
             payload["status"] = status
@@ -1423,8 +1428,11 @@ def _namespace_delta(
     }
 
 
-def _public_run_payload(run: Mapping[str, object]) -> RunSnapshot:
-    payload = {key: value for key, value in run.items() if key != "outputs"}
+def _public_run_payload(run: Mapping[str, object], *, include_output: bool = True) -> RunSnapshot:
+    hidden_keys = {"outputs"}
+    if not include_output:
+        hidden_keys.update({"stdout", "stderr", "result", "events"})
+    payload = {key: value for key, value in run.items() if key not in hidden_keys}
     for key in ("traceback", "recorded_traceback"):
         value = payload.get(key)
         if isinstance(value, list):

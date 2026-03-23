@@ -650,7 +650,7 @@ def test_app_history_compacts_entries_and_applies_last_selection(project_dir) ->
 
     assert response.status == "ok"
     assert [entry["command_type"] for entry in response.data["entries"]] == ["exec", "vars"]
-    assert response.data["entries"][0]["label"] == "exec beta = 2 beta + 1"
+    assert response.data["entries"][0]["label"] == "exec beta = 2 | beta + 1"
     runtime.select_history.assert_called_once()
     query = runtime.select_history.call_args.kwargs["query"]
     assert query.session_id == "default"
@@ -811,6 +811,7 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     assert response.status == "ok"
     assert response.session_id == "analysis"
     assert response.data["run"]["execution_id"] == "run-1"
+    assert "result" not in response.data["run"]
     executions.observe_run.assert_called_once()
     _assert_called_with_subset(
         executions.observe_run,
@@ -939,7 +940,7 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
             execution_id="run-1",
             timeout_s=4.0,
             event_sink=sink,
-            skip_history=False,
+            skip_history=True,
         )
 
     assert response.status == "ok"

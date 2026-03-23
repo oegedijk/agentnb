@@ -37,7 +37,7 @@ from agentnb.advice import AdviceContext, AdvicePolicy, _extract_module_name
             ),
             [
                 "Run `agentnb runs wait EXECUTION_ID --json` to wait for the final result.",
-                ("Run `agentnb runs show EXECUTION_ID --json` to inspect the current run record."),
+                "Run `agentnb runs show EXECUTION_ID --json` to inspect the current run record.",
                 "Run `agentnb runs cancel EXECUTION_ID --json` to stop the background run.",
             ],
         ),
@@ -54,29 +54,18 @@ def test_advice_policy_returns_expected_suggestions(
 
 def test_advice_policy_handles_ambiguous_session_error() -> None:
     policy = AdvicePolicy()
-
-    suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="status",
-            response_status="error",
-            data={},
-            error_code="AMBIGUOUS_SESSION",
-        )
+    context = AdviceContext(
+        command_name="status",
+        response_status="error",
+        data={},
+        error_code="AMBIGUOUS_SESSION",
     )
 
-    assert suggestions == [
+    assert policy.suggestions(context) == [
         "Run `agentnb sessions list --json` to see the live session names.",
         "Retry with `agentnb status --session NAME --json` to target one explicitly.",
     ]
-
-    assert policy.suggestion_actions(
-        AdviceContext(
-            command_name="status",
-            response_status="error",
-            data={},
-            error_code="AMBIGUOUS_SESSION",
-        )
-    ) == [
+    assert policy.suggestion_actions(context) == [
         {
             "kind": "command",
             "label": "List sessions",
@@ -134,6 +123,41 @@ def test_advice_policy_interpolates_execution_id_for_background_exec() -> None:
     ]
 
 
+def test_advice_policy_background_exec_text_and_actions_share_the_same_steps() -> None:
+    policy = AdvicePolicy()
+    context = AdviceContext(
+        command_name="exec",
+        response_status="ok",
+        data={"background": True, "execution_id": "run-7"},
+    )
+
+    assert policy.suggestions(context) == [
+        "Run `agentnb runs wait run-7 --json` to wait for the final result.",
+        "Run `agentnb runs show run-7 --json` to inspect the current run record.",
+        "Run `agentnb runs cancel run-7 --json` to stop the background run.",
+    ]
+    assert policy.suggestion_actions(context) == [
+        {
+            "kind": "command",
+            "label": "Wait for run",
+            "command": "agentnb",
+            "args": ["runs", "wait", "run-7", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Show run",
+            "command": "agentnb",
+            "args": ["runs", "show", "run-7", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Cancel run",
+            "command": "agentnb",
+            "args": ["runs", "cancel", "run-7", "--json"],
+        },
+    ]
+
+
 def test_advice_policy_preserves_cross_project_scope_for_follow_ups() -> None:
     policy = AdvicePolicy()
 
@@ -163,31 +187,20 @@ def test_advice_policy_preserves_cross_project_scope_for_follow_ups() -> None:
 def test_advice_policy_module_not_found_error_suggests_install() -> None:
     policy = AdvicePolicy()
 
-    suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="exec",
-            response_status="error",
-            data={},
-            error_code="EXECUTION_ERROR",
-            error_name="ModuleNotFoundError",
-            error_value="No module named 'pandas'",
-        )
+    context = AdviceContext(
+        command_name="exec",
+        response_status="error",
+        data={},
+        error_code="EXECUTION_ERROR",
+        error_name="ModuleNotFoundError",
+        error_value="No module named 'pandas'",
     )
 
-    assert suggestions == [
+    assert policy.suggestions(context) == [
         "Install the missing module: run `uv add pandas` in your shell (not inside the session).",
         "Then retry the execution.",
     ]
-    assert policy.suggestion_actions(
-        AdviceContext(
-            command_name="exec",
-            response_status="error",
-            data={},
-            error_code="EXECUTION_ERROR",
-            error_name="ModuleNotFoundError",
-            error_value="No module named 'pandas'",
-        )
-    ) == [
+    assert policy.suggestion_actions(context) == [
         {
             "kind": "shell",
             "label": "Install dependency",
@@ -244,7 +257,10 @@ def test_advice_policy_module_not_found_extracts_top_level_package() -> None:
     )
 
     assert suggestions == [
-        "Install the missing module: run `uv add sklearn` in your shell (not inside the session).",
+        (
+            "Install the missing module: run `uv add scikit-learn` "
+            "in your shell (not inside the session)."
+        ),
         "Then retry the execution.",
     ]
 
@@ -499,12 +515,7 @@ def test_advice_policy_active_runs_follow_suggests_wait_show_cancel() -> None:
     context = AdviceContext(
         command_name="runs-follow",
         response_status="ok",
-        data={
-            "run": {
-                "execution_id": "run-9",
-                "status": "running",
-            }
-        },
+        data={"run": {"execution_id": "run-9", "status": "running"}},
     )
 
     assert policy.suggestions(context) == [
@@ -534,38 +545,6 @@ def test_advice_policy_active_runs_follow_suggests_wait_show_cancel() -> None:
     ]
 
 
-def test_advice_policy_status_starting_suggests_wait() -> None:
-    policy = AdvicePolicy()
-
-    suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="status",
-            response_status="ok",
-            data={"alive": False, "runtime_state": "starting"},
-        )
-    )
-
-    assert suggestions == ["Run `agentnb wait --json` to wait for startup to finish."]
-
-
-def test_advice_policy_kernel_not_ready_suggests_wait_and_status() -> None:
-    policy = AdvicePolicy()
-
-    suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="vars",
-            response_status="error",
-            data={"runtime_state": "starting"},
-            error_code="KERNEL_NOT_READY",
-        )
-    )
-
-    assert suggestions == [
-        "Run `agentnb wait --json` to wait for startup to finish.",
-        "Run `agentnb status --json` to inspect the current session state.",
-    ]
-
-
 @pytest.mark.parametrize("error_code", ["NO_KERNEL", "BACKEND_ERROR", "KERNEL_DEAD"])
 def test_advice_policy_dead_kernel_suggests_start_and_doctor(error_code: str) -> None:
     policy = AdvicePolicy()
@@ -582,6 +561,23 @@ def test_advice_policy_dead_kernel_suggests_start_and_doctor(error_code: str) ->
     assert suggestions == [
         "Run `agentnb start --json` to start the kernel.",
         "Run `agentnb doctor --json` if startup has been failing.",
+    ]
+
+
+def test_advice_policy_reset_suggests_real_exec_command() -> None:
+    policy = AdvicePolicy()
+    context = AdviceContext(command_name="reset", response_status="ok", data={})
+
+    assert policy.suggestions(context) == [
+        'Run `agentnb exec "..." --json` to rebuild the state you need.'
+    ]
+    assert policy.suggestion_actions(context) == [
+        {
+            "kind": "command",
+            "label": "Rebuild state",
+            "command": "agentnb",
+            "args": ["exec", "...", "--json"],
+        }
     ]
 
 

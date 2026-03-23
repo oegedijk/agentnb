@@ -429,6 +429,25 @@ class KernelRuntime:
     def current_session_id(self, *, project_root: Path) -> str | None:
         return StateRepository(project_root).session_preferences().current_session_id
 
+    def is_live_session(self, *, project_root: Path, session_id: str) -> bool:
+        for session in self.list_sessions(project_root=project_root, probe_backend=False):
+            candidate = session.get("session_id")
+            if isinstance(candidate, str) and candidate == session_id:
+                return True
+        return False
+
+    def hidden_non_live_session_count(
+        self,
+        *,
+        project_root: Path,
+        probe_backend: bool = True,
+    ) -> int:
+        inventory = self.session_inventory(
+            project_root=project_root,
+            probe_backend=probe_backend,
+        )
+        return sum(1 for entry in inventory if not entry.alive)
+
     def remember_current_session(self, *, project_root: Path, session_id: str) -> None:
         canonical_session_id = SessionStore(
             project_root=project_root, session_id=session_id

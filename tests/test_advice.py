@@ -418,6 +418,94 @@ def test_advice_policy_session_busy_with_active_run_suggests_run_controls() -> N
     ]
 
 
+def test_advice_policy_file_exec_truncation_suggests_escape_hatches() -> None:
+    policy = AdvicePolicy()
+
+    context = AdviceContext(
+        command_name="exec",
+        response_status="ok",
+        data={
+            "source_kind": "file",
+            "source_path": "/tmp/project/analysis.py",
+            "stdout_truncated": True,
+        },
+        session_id="analysis",
+    )
+
+    assert policy.suggestions(context) == [
+        (
+            "Run `agentnb exec --session analysis --no-truncate --file "
+            "/tmp/project/analysis.py` to rerun the file without truncation."
+        ),
+        (
+            "Run `agentnb vars --session analysis --recent 5 --json` "
+            "to inspect the newest live variables."
+        ),
+    ]
+    assert policy.suggestion_actions(context) == [
+        {
+            "kind": "command",
+            "label": "Rerun without truncation",
+            "command": "agentnb",
+            "args": [
+                "exec",
+                "--session",
+                "analysis",
+                "--no-truncate",
+                "--file",
+                "/tmp/project/analysis.py",
+            ],
+        },
+        {
+            "kind": "command",
+            "label": "Inspect recent vars",
+            "command": "agentnb",
+            "args": ["vars", "--session", "analysis", "--recent", "5", "--json"],
+        },
+    ]
+
+
+def test_advice_policy_active_runs_follow_suggests_wait_show_cancel() -> None:
+    policy = AdvicePolicy()
+
+    context = AdviceContext(
+        command_name="runs-follow",
+        response_status="ok",
+        data={
+            "run": {
+                "execution_id": "run-9",
+                "status": "running",
+            }
+        },
+    )
+
+    assert policy.suggestions(context) == [
+        "Run `agentnb runs wait run-9 --json` to wait for the final snapshot.",
+        "Run `agentnb runs show run-9 --json` to inspect the latest run snapshot.",
+        "Run `agentnb runs cancel run-9 --json` to stop the background run.",
+    ]
+    assert policy.suggestion_actions(context) == [
+        {
+            "kind": "command",
+            "label": "Wait for run",
+            "command": "agentnb",
+            "args": ["runs", "wait", "run-9", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Show run",
+            "command": "agentnb",
+            "args": ["runs", "show", "run-9", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Cancel run",
+            "command": "agentnb",
+            "args": ["runs", "cancel", "run-9", "--json"],
+        },
+    ]
+
+
 def test_advice_policy_status_starting_suggests_wait() -> None:
     policy = AdvicePolicy()
 

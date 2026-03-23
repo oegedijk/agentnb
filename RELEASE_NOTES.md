@@ -1,3 +1,42 @@
+# v0.3.8 — Follow Semantics, Discoverability, And Cleanup Polish
+
+## Improvements
+
+**`runs follow` now behaves like a bounded observation tool instead of a
+timeout trap** — `runs follow --timeout` now means "observe for up to this
+long" rather than "fail unless the run finishes in time". When the window
+elapses, the command returns `ok` with the latest persisted run snapshot plus
+typed observation metadata such as `completion_reason`,
+`replayed_event_count`, and `emitted_event_count`. Human `runs follow` output
+now reuses the normal run snapshot renderer instead of falling back to raw
+JSON-like output.
+
+**Command discoverability is more deterministic and less surprising** —
+Predictable mistypes such as `agentnb list` and `agentnb log` are now
+classified before implicit exec and return concrete guidance toward
+`sessions list`, `runs list`, or `history` instead of generic Click errors or
+accidental code execution.
+
+**Session targeting is quieter in the common single-live-session case** —
+When agentnb falls back to the sole live session because the remembered
+session is no longer live, it no longer re-announces the same implicit switch
+on every command. Explicit targeting behavior remains unchanged.
+
+**Session cleanup and exec truncation are more explicit at the surface** —
+`sessions list` now reports when non-live session records are hidden from the
+default live-only view and points directly to `sessions delete --stale`.
+Exec-like payloads now expose explicit truncation booleans for stdout, stderr,
+and result, so file execution can suggest `--no-truncate` and recent-variable
+inspection without guessing from rendered text.
+
+**Help text now explains the cleanup and output-shaping contracts directly** —
+`--stdout-only`, `--stderr-only`, and `--result-only` now describe their
+behavior more precisely, including the fact that large structured results may
+still render as a compact preview. Root, `exec`, `reset`, and `stop` help now
+share one cleanup-primitive explanation that makes the `reset` vs `--fresh`
+vs `stop` distinction explicit, and `history --all` is documented more
+clearly as a helper/provenance view rather than the default debugging path.
+
 # v0.3.7 — Contract And Recovery Polish
 
 ## Improvements

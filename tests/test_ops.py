@@ -89,6 +89,8 @@ import localmod
         "length": 3,
         "sample": [1, 2, 3],
         "item_type": "int",
+        "sample_items_shown": 3,
+        "sample_truncated": False,
     }
     assert inspect_payload["members"] == []
     assert inspect_payload["doc"] == ""
@@ -243,6 +245,9 @@ payload = holder.value
         "length": 1,
         "keys": ["items"],
         "sample": {"items": [{"id": 1}, {"id": 2}]},
+        "keys_shown": 1,
+        "sample_items_shown": 1,
+        "sample_truncated": False,
     }
     assert subscript_payload["name"] == "payload['items'][0]"
     assert subscript_payload["preview"] == {
@@ -250,6 +255,9 @@ payload = holder.value
         "length": 1,
         "keys": ["id"],
         "sample": {"id": 1},
+        "keys_shown": 1,
+        "sample_items_shown": 1,
+        "sample_truncated": False,
     }
 
 
@@ -284,6 +292,9 @@ payload = {
             ],
             "paging": {"next": "/page/2", "count": 2},
         },
+        "keys_shown": 2,
+        "sample_items_shown": 2,
+        "sample_truncated": False,
     }
 
 

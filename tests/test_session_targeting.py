@@ -9,6 +9,7 @@ from agentnb.session_targeting import SessionTargetingPolicy
 def test_session_targeting_persists_explicit_target(project_dir: Path) -> None:
     runtime = Mock()
     runtime.current_session_id.return_value = "default"
+    runtime.is_live_session.return_value = True
     runtime.resolve_session_id.return_value = "analysis"
     policy = SessionTargetingPolicy(runtime)
 
@@ -33,6 +34,7 @@ def test_session_targeting_persists_explicit_target(project_dir: Path) -> None:
 def test_session_targeting_does_not_persist_implicit_target(project_dir: Path) -> None:
     runtime = Mock()
     runtime.current_session_id.return_value = "default"
+    runtime.is_live_session.return_value = True
     runtime.resolve_session_id.return_value = "analysis"
     policy = SessionTargetingPolicy(runtime)
 
@@ -54,6 +56,7 @@ def test_session_targeting_does_not_persist_implicit_target(project_dir: Path) -
 def test_session_targeting_can_skip_persisting_explicit_target(project_dir: Path) -> None:
     runtime = Mock()
     runtime.current_session_id.return_value = "default"
+    runtime.is_live_session.return_value = True
     runtime.resolve_session_id.return_value = "analysis"
     policy = SessionTargetingPolicy(runtime)
 
@@ -80,3 +83,26 @@ def test_session_targeting_uses_current_preference_for_run_scope(project_dir: Pa
     preference = policy.current_run_preference(project_root=project_dir)
 
     assert preference == "analysis"
+
+
+def test_session_targeting_suppresses_implicit_switch_notice_for_non_live_preference(
+    project_dir: Path,
+) -> None:
+    runtime = Mock()
+    runtime.current_session_id.return_value = "default"
+    runtime.is_live_session.return_value = False
+    runtime.resolve_session_id.return_value = "analysis"
+    policy = SessionTargetingPolicy(runtime)
+
+    decision = policy.resolve_command_target(
+        project_root=project_dir,
+        requested_session_id=None,
+        require_live_session=True,
+        persist_explicit_preference=True,
+        announce_switch=True,
+    )
+
+    assert decision.session_id == "analysis"
+    assert decision.source == "sole_live"
+    assert decision.updates_preference is False
+    assert decision.switched_session is None

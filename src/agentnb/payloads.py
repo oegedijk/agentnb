@@ -199,6 +199,9 @@ class ExecPayload(TypedDict, total=False):
     stdout: str
     stderr: str
     result: str
+    stdout_truncated: bool
+    stderr_truncated: bool
+    result_truncated: bool
     result_preview: InspectPreview
     ename: str
     evalue: str
@@ -229,6 +232,9 @@ class CompactExecPayloadInput(TypedDict, total=False):
     stdout: str
     stderr: str
     result: str | None
+    stdout_truncated: bool
+    stderr_truncated: bool
+    result_truncated: bool
     result_preview: InspectPreview
     ename: str | None
     evalue: str | None
@@ -312,8 +318,9 @@ class DoctorPayload(TypedDict, total=False):
     kernel_pid: int | None
 
 
-class SessionsListPayload(TypedDict):
+class SessionsListPayload(TypedDict, total=False):
     sessions: list[SessionSummary]
+    hidden_non_live_count: int
 
 
 class RunListEntryPayload(TypedDict, total=False):
@@ -337,3 +344,6 @@ class RunsListPayload(TypedDict):
 class RunLookupPayload(TypedDict, total=False):
     run: RunSnapshot
     status: str
+    completion_reason: Literal["terminal", "window_elapsed"]
+    replayed_event_count: int
+    emitted_event_count: int

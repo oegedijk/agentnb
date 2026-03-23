@@ -332,6 +332,65 @@ def test_response_projector_agent_derives_exec_result_preview_from_result_text()
     }
 
 
+def test_response_projector_agent_keeps_exec_truncation_flags() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "status": "ok",
+            "execution_id": "run-1",
+            "stdout_truncated": True,
+            "stderr_truncated": False,
+            "result_truncated": True,
+        },
+    )
+
+    projected = ResponseProjector().project(response, profile="agent")
+
+    assert projected["data"]["stdout_truncated"] is True
+    assert projected["data"]["stderr_truncated"] is False
+    assert projected["data"]["result_truncated"] is True
+
+
+def test_response_projector_agent_keeps_runs_follow_observation_metadata() -> None:
+    response = success_response(
+        command="runs-follow",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "status": "running",
+            "completion_reason": "window_elapsed",
+            "replayed_event_count": 1,
+            "emitted_event_count": 2,
+            "run": {
+                "execution_id": "run-1",
+                "session_id": "default",
+                "command_type": "exec",
+                "status": "running",
+                "duration_ms": 12,
+            },
+        },
+    )
+
+    projected = ResponseProjector().project(response, profile="agent")
+
+    assert projected["data"] == {
+        "status": "running",
+        "completion_reason": "window_elapsed",
+        "replayed_event_count": 1,
+        "emitted_event_count": 2,
+        "run": {
+            "execution_id": "run-1",
+            "ts": None,
+            "session_id": "default",
+            "command_type": "exec",
+            "status": "running",
+            "duration_ms": 12,
+        },
+    }
+
+
 def test_response_projector_agent_compacts_runs_cancel_response() -> None:
     response = success_response(
         command="runs-cancel",

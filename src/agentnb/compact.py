@@ -80,6 +80,7 @@ def compact_execution_payload(
             summary = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
             if summary is not None:
                 if len(stdout) > _STDOUT_LIMIT:
+                    compacted["stdout_truncated"] = True
                     summary = summary + f" [{len(stdout) - _STDOUT_LIMIT} chars truncated]"
                 compacted["stdout"] = summary
 
@@ -91,6 +92,7 @@ def compact_execution_payload(
             summary = summarize_history_text(stderr, limit=_STDOUT_LIMIT)
             if summary is not None:
                 if len(stderr) > _STDOUT_LIMIT:
+                    compacted["stderr_truncated"] = True
                     summary = summary + f" [{len(stderr) - _STDOUT_LIMIT} chars truncated]"
                 compacted["stderr"] = summary
 
@@ -101,6 +103,8 @@ def compact_execution_payload(
         else:
             summary = summarize_history_text(result, limit=_RESULT_LIMIT)
             if summary is not None:
+                if len(result) > _RESULT_LIMIT:
+                    compacted["result_truncated"] = True
                 compacted["result"] = summary
 
     result_preview = compact_result_preview(

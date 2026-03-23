@@ -147,7 +147,7 @@ agentnb runs cancel @active
 ```
 
 - `runs show` reads the latest stored snapshot
-- `runs follow` replays all output so far then streams new events; use `--tail` to skip history
+- `runs follow` replays all output so far then streams new events; use `--tail` to skip history, and use `--timeout T` to bound the observation window without turning an active run into an error
 - `runs wait` blocks until the run finishes
 - `runs cancel` requests cancellation for an active run
 
@@ -173,6 +173,7 @@ agentnb history
 agentnb history --last 5
 agentnb history --errors
 agentnb history --latest
+agentnb history --all                # include helper/provenance entries
 agentnb history --full               # full un-truncated code and output
 agentnb history @last-error
 agentnb history @last-success
@@ -206,7 +207,9 @@ agentnb --quiet "1 + 1"
 agentnb --no-suggestions "1 + 1"
 ```
 
-If you want only one `exec` stream:
+If you want only one `exec` stream, use the output selectors; `--result-only`
+still uses bounded result rendering, so large structured values may show a
+compact preview instead of the full repr:
 
 ```bash
 agentnb --result-only "1 + 1"
@@ -231,6 +234,9 @@ agentnb doctor
 - `stop` and `start` for a dead or wedged kernel
 - `doctor` when startup or interpreter detection fails
 
+`reset` clears user variables in the current process, `exec --fresh` restarts
+then executes, and `stop` shuts the session down without executing anything.
+
 If `ipykernel` is missing, `start` and `doctor` print one explicit install
 command. Run that command in your shell, then restart cleanly with
 `agentnb --fresh "..."` or rerun `agentnb start`.
@@ -252,11 +258,14 @@ agentnb --session analysis "1 + 1"
 agentnb start --session analysis
 agentnb sessions             # same as `agentnb sessions list`
 agentnb sessions delete analysis
-agentnb sessions delete --stale      # delete sessions with dead kernels
+agentnb sessions delete --stale      # delete non-live session records
 agentnb sessions delete --all        # delete all sessions
 ```
 
-When only one live session exists, commands can infer it. Once multiple live sessions exist, pass `--session` explicitly.
+When only one live session exists, commands can infer it. Once multiple live
+sessions exist, pass `--session` explicitly. `agentnb sessions list` shows
+live sessions only and notes when older non-live records are hidden behind
+`agentnb sessions delete --stale`.
 
 ## Rules
 
@@ -268,4 +277,4 @@ When only one live session exists, commands can infer it. Once multiple live ses
 - Use `wait` for session readiness, not `status --wait-idle` (same semantics, shorter).
 - Use `--agent` or `--json` when consuming output programmatically for a stable, parseable single JSON object. The `result` field contains the Python `repr()` of the return value. When valid JSON can be extracted from the repr, a `result_json` field is also included with the parsed value. For structured data, prefer reading `result_json` when present; otherwise use `import json; json.dumps(obj)` inside the kernel and read `result_json` from the response.
 - Use `vars` and `inspect` to check live state rather than `print()` — they produce bounded output regardless of object size.
-- Treat the kernel as project-scoped state. Stop it when the task is complete or stale state could confuse later work. Use `agentnb sessions list` to check for stale sessions and `agentnb sessions delete --stale` or `agentnb sessions delete --all` to clean them up.
+- Treat the kernel as project-scoped state. Stop it when the task is complete or stale state could confuse later work. `agentnb sessions list` shows live sessions only and will note when non-live records are hidden; use `agentnb sessions delete --stale` or `agentnb sessions delete --all` to clean them up.

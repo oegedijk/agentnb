@@ -339,8 +339,8 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                     markers: list[str] = []
                     if session.get("is_default"):
                         markers.append("default")
-                    if session.get("is_current"):
-                        markers.append("current")
+                    if session.get("is_preferred"):
+                        markers.append("preferred")
                     marker = f" ({', '.join(markers)})" if markers else ""
                     python = session.get("python")
                     python_text = f" using {python}" if python else ""

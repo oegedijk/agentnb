@@ -614,6 +614,7 @@ def test_render_human_sessions_views() -> None:
                     "python": "python",
                     "is_default": True,
                     "is_current": False,
+                    "is_preferred": False,
                 },
                 {
                     "session_id": "analysis",
@@ -621,6 +622,7 @@ def test_render_human_sessions_views() -> None:
                     "python": None,
                     "is_default": False,
                     "is_current": True,
+                    "is_preferred": True,
                 },
             ]
         },
@@ -639,7 +641,7 @@ def test_render_human_sessions_views() -> None:
     )
 
     assert render_human(list_response, options=RenderOptions()) == (
-        "default (default): pid 11 using python\nanalysis (current): pid 22"
+        "default (default): pid 11 using python\nanalysis (preferred): pid 22"
     )
     assert render_human(empty_response, options=RenderOptions()) == "No sessions found."
     assert (
@@ -922,6 +924,20 @@ def test_render_human_quiet_hides_success_chatter_but_keeps_primary_output() -> 
     )
 
     assert render_human(response, options=RenderOptions(quiet_human=True)) == "2"
+
+
+def test_render_human_no_suggestions_keeps_switch_note() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="analysis",
+        data={"stdout": "2\n", "switched_session": "analysis"},
+        suggestions=["Run `agentnb vars --json` next."],
+    )
+
+    assert render_human(response, options=RenderOptions(suppress_suggestions=True)) == (
+        "2\n(now targeting session: analysis)"
+    )
 
 
 def test_render_human_quiet_keeps_error_suggestions() -> None:

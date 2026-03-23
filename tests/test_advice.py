@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agentnb.advice import AdviceContext, AdvicePolicy, _extract_module_name
@@ -129,6 +131,32 @@ def test_advice_policy_interpolates_execution_id_for_background_exec() -> None:
         "Run `agentnb runs wait run-7 --json` to wait for the final result.",
         "Run `agentnb runs show run-7 --json` to inspect the current run record.",
         "Run `agentnb runs cancel run-7 --json` to stop the background run.",
+    ]
+
+
+def test_advice_policy_preserves_cross_project_scope_for_follow_ups() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="ok",
+            data={"execution_id": "run-7"},
+            session_id="analysis",
+            session_source="explicit",
+            project_override=Path("/tmp/other"),
+        )
+    )
+
+    assert suggestions == [
+        (
+            "Run `agentnb vars --session analysis --recent 5 --project /tmp/other --json` "
+            "to inspect namespace changes."
+        ),
+        (
+            "Run `agentnb history --session analysis run-7 --project /tmp/other --json` "
+            "to review this execution."
+        ),
     ]
 
 
@@ -310,7 +338,7 @@ def test_advice_policy_name_error_with_session_suggests_vars() -> None:
     assert suggestions == [
         "Run `agentnb vars --session analysis --json` to inspect the namespace.",
         "Run `agentnb sessions list --json` to see all live sessions.",
-        "Run `agentnb history @last-error --json` to review the latest failure.",
+        "Run `agentnb history --session analysis @last-error --json` to review the latest failure.",
     ]
 
 

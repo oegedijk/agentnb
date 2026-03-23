@@ -230,13 +230,24 @@ def json_option(func):
     return click.option("--json", "as_json", is_flag=True, help="Output as JSON")(func)
 
 
+def _request_kwargs(project: Path | None) -> dict[str, Path]:
+    return {
+        "project_root": resolve_project_root(cwd=Path.cwd(), override=project),
+        **({"project_override": project} if project is not None else {}),
+    }
+
+
 def session_option(func):
     return click.option(
         "--session",
         "session_id",
         default=None,
         callback=_session_option_callback,
-        help="Session name. If omitted, agentnb uses the only live session or `default`.",
+        help=(
+            "Session name. If omitted, read commands use the only live session when "
+            "unambiguous; otherwise commands fall back to `default` or require "
+            "explicit selection."
+        ),
     )(func)
 
 
@@ -407,7 +418,7 @@ def start(
     """
 
     request = StartRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         python_executable=python_executable,
     )
@@ -523,6 +534,25 @@ def exec_cmd(
             runtime.stop(project_root=project_root, session_id=target_session)
 
     try:
+        if filepath is None and code is not None:
+            candidate = Path(code)
+            resolved_candidate = candidate if candidate.is_absolute() else Path.cwd() / candidate
+            if (
+                "\n" not in code
+                and resolved_candidate.is_file()
+                and resolved_candidate.suffix == ".py"
+            ):
+                raise AgentNBException(
+                    code="INVALID_INPUT",
+                    message=(
+                        "It looks like you passed a Python file path as inline code. "
+                        "Use `exec --file PATH` or the top-level `agentnb PATH` form instead."
+                    ),
+                    data={
+                        "input_shape": "exec_file_path",
+                        "source_path": str(resolved_candidate.resolve()),
+                    },
+                )
         source = invocations.resolve_exec_source(code=code, filepath=filepath, stdin=sys.stdin)
     except AgentNBException as exc:
         project_root = resolve_project_root(cwd=Path.cwd(), override=project)
@@ -535,14 +565,29 @@ def exec_cmd(
             ename=exc.ename,
             evalue=exc.evalue,
             traceback=exc.traceback,
+            data=exc.data,
             suggestions=application.advisor.suggestions(
                 AdviceContext(
                     command_name="exec",
                     response_status="error",
-                    data={},
+                    data=exc.data,
                     error_code=exc.code,
                     error_name=exc.ename,
                     error_value=exc.evalue,
+                    session_id=session_id,
+                    project_override=project_root if project is not None else None,
+                )
+            ),
+            suggestion_actions=application.advisor.suggestion_actions(
+                AdviceContext(
+                    command_name="exec",
+                    response_status="error",
+                    data=exc.data,
+                    error_code=exc.code,
+                    error_name=exc.ename,
+                    error_value=exc.evalue,
+                    session_id=session_id,
+                    project_override=project_root if project is not None else None,
                 )
             ),
         )
@@ -553,7 +598,7 @@ def exec_cmd(
         return
 
     request = ExecRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         code=source.code,
         session_id=session_id,
         timeout_s=timeout,
@@ -588,7 +633,12 @@ def _execute_streaming_exec(
 
 @main.command("vars")
 @click.option("--types/--no-types", "include_types", default=True, help="Show type information")
-@click.option("--match", "match_text", default=None, help="Only show variables whose names match")
+@click.option(
+    "--match",
+    "match_text",
+    default=None,
+    help="Only show variables whose names contain this substring",
+)
 @click.option(
     "--recent",
     type=click.IntRange(min=1),
@@ -610,13 +660,14 @@ def vars_cmd(
 
     Type information is included by default. Pass --no-types to hide it.
     Imported helper routines and classes are omitted, and common dataframe or
-    container values are summarized compactly. Use --recent or --match when
-    the namespace gets noisy. This command auto-starts a missing session when
-    targeting is unambiguous and waits behind active same-session work.
+    container values are summarized compactly. `--match` uses case-insensitive
+    substring matching. Use --recent or --match when the namespace gets noisy.
+    This command auto-starts a missing session when targeting is unambiguous
+    and waits behind active same-session work.
     """
 
     request = VarsRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         include_types=include_types,
         match_text=match_text,
@@ -641,7 +692,7 @@ def inspect_cmd(name: str, project: Path | None, session_id: str | None, as_json
     """
 
     request = InspectRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         name=name,
     )
@@ -668,7 +719,7 @@ def reload_cmd(
     """
 
     request = ReloadRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         module_name=module,
     )
@@ -715,7 +766,7 @@ def status(
 
     wait_for = "idle" if wait_idle else "ready" if wait else None
     request = StatusRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         wait_for=wait_for,
         timeout_s=timeout,
@@ -749,7 +800,7 @@ def wait(
     """
 
     request = WaitRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         timeout_s=timeout,
     )
@@ -790,7 +841,7 @@ def history(
     """
 
     request = HistoryRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         reference=reference,
         errors=errors,
@@ -811,7 +862,7 @@ def interrupt(project: Path | None, session_id: str | None, as_json: bool) -> No
     """Interrupt the currently running execution without stopping the kernel."""
 
     request = InterruptRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
     )
     _emit(application.interrupt(request), as_json=as_json)
@@ -826,7 +877,7 @@ def reset(timeout: float, project: Path | None, session_id: str | None, as_json:
     """Clear user state from the kernel while keeping the process alive."""
 
     request = ResetRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         timeout_s=timeout,
     )
@@ -841,7 +892,7 @@ def stop(project: Path | None, session_id: str | None, as_json: bool) -> None:
     """Shut down the project's kernel and clear the saved session metadata."""
 
     request = StopRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
     )
     _emit(application.stop(request), as_json=as_json)
@@ -867,7 +918,7 @@ def doctor(
     """
 
     request = DoctorRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         python_executable=python_executable,
     )
@@ -894,9 +945,7 @@ def sessions_group(ctx: click.Context, project: Path | None, as_json: bool) -> N
 def sessions_list(project: Path | None, as_json: bool) -> None:
     """List live sessions recorded for the current project."""
 
-    request = SessionsListRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project)
-    )
+    request = SessionsListRequest(**_request_kwargs(project))
     _emit(application.sessions_list(request), as_json=as_json)
 
 
@@ -932,6 +981,7 @@ def sessions_delete(
     if session_name is not None:
         request = SessionsDeleteRequest(
             project_root=project_root,
+            **({"project_override": project} if project is not None else {}),
             session_name=session_name,
         )
         _emit(application.sessions_delete(request), as_json=as_json)
@@ -939,6 +989,7 @@ def sessions_delete(
 
     bulk_request = SessionsDeleteBulkRequest(
         project_root=project_root,
+        **({"project_override": project} if project is not None else {}),
         stale_only=delete_stale,
     )
     _emit(application.sessions_delete_bulk(bulk_request), as_json=as_json)
@@ -974,7 +1025,7 @@ def runs_list(
     if last is None and not options.as_json:
         last = 20
     request = RunsListRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         session_id=session_id,
         errors=errors,
         last=last,
@@ -996,7 +1047,7 @@ def runs_show(run_reference: RunReference | None, project: Path | None, as_json:
     """
 
     request = RunLookupRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         run_reference=run_reference,
     )
     _emit(application.runs_show(request), as_json=as_json)
@@ -1020,7 +1071,7 @@ def runs_wait(
     """
 
     request = RunsWaitRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         run_reference=run_reference,
         timeout_s=timeout,
     )
@@ -1050,6 +1101,7 @@ def runs_follow(
     stream: ExecutionSink = JsonExecutionStream() if options.as_json else HumanExecutionStream()
     request = RunsFollowRequest(
         project_root=project_root,
+        **({"project_override": project} if project is not None else {}),
         run_reference=run_reference,
         timeout_s=timeout,
         tail=tail,
@@ -1070,7 +1122,7 @@ def runs_cancel(run_reference: RunReference | None, project: Path | None, as_jso
     """
 
     request = RunsCancelRequest(
-        project_root=resolve_project_root(cwd=Path.cwd(), override=project),
+        **_request_kwargs(project),
         run_reference=run_reference,
     )
     _emit(application.runs_cancel(request), as_json=as_json)

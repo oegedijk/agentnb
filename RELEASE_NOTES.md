@@ -1,3 +1,40 @@
+# v0.3.9 — Targeting Truthfulness And Workflow-Scope Guidance
+
+## Improvements
+
+**Suggestions now preserve the workflow scope the user established** — Human
+`Next:` guidance and machine-readable `suggestion_actions` now derive from one
+scoped command builder instead of hardcoded strings. Cross-project follow-ups
+now carry `--project`, explicit session-scoped workflows preserve `--session`
+when omitting it would lose the intended target, and execution-id `runs`
+commands remain project-scoped without leaking session flags into the wrong
+surface.
+
+**Session targeting cues are now more truthful in multi-session workflows** —
+`sessions list` no longer presents the remembered session preference as
+`(current)`, which overpromised omitted-command targeting behavior when
+multiple live sessions existed. Human output now labels the remembered session
+as `(preferred)`, while omitted session-bound commands continue to require
+explicit `--session` selection when live targeting is ambiguous.
+
+**Common file-execution misguesses recover at the CLI boundary** — `agentnb exec
+path.py` no longer falls through to Python evaluation and a confusing
+`NameError`. When the CLI can tell the argument is an existing Python file, it
+now returns a targeted `INVALID_INPUT` response that points directly to
+`exec --file PATH` and the top-level `agentnb PATH` hot path.
+
+**Help text and matcher contracts now describe the real behavior** — The
+`--session` help now explains the actual omitted-targeting rules instead of
+implying a default live-session fallback that does not exist under ambiguity.
+`vars --match` now explicitly documents case-insensitive substring semantics in
+both option help and command help text.
+
+**`--quiet` and `--no-suggestions` are now easier to distinguish in success
+paths** — `--quiet` continues to suppress non-essential success chatter such as
+switch notes, while `--no-suggestions` now keeps the normal human response body
+and suppresses only the `Next:` block. This makes it clearer which flag to use
+for lower-noise output versus suggestion suppression.
+
 # v0.3.8 — Follow Semantics, Discoverability, And Cleanup Polish
 
 ## Improvements

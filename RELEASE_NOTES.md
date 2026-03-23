@@ -1,3 +1,45 @@
+# v0.3.10 — Friction Closure And Hot-Path Trust Fixes
+
+## Improvements
+
+**Suggestions and recovery actions now come from one validated policy path** —
+Human `Next:` guidance and machine-readable `suggestion_actions` now share one
+internal builder. This removes drift between the two surfaces, fixes the bogus
+post-`reset` `setup_code` suggestion, and makes suggestion regressions easier
+to catch with focused tests.
+
+**Same-session background admission is now fail-fast and deterministic** —
+Background run startup now persists its `running` record and worker pid
+immediately, so a same-session foreground follow-up sees the active run through
+the durable run store instead of racing a partially persisted state. In live
+CLI use, `exec` after `--background` now returns a consistent `SESSION_BUSY`
+error with direct `runs wait/show` guidance.
+
+**`runs follow` now follows from the current tail instead of replaying old
+output** — The follow path now treats prior output as `runs show` territory and
+streams only unseen events. Final follow snapshots omit replayed stdout/stderr/
+result fields when history is intentionally skipped, so `runs show` followed by
+`runs follow` no longer forces agents to re-parse the same output twice.
+
+**Missing-module recovery is more literal and more correct** — Import-name to
+package-name normalization now handles common mismatches such as
+`sklearn -> scikit-learn`, both in human suggestions and structured shell
+actions. Agents can now follow the suggested install command directly without a
+second failure caused by the wrong package name.
+
+**History and result previews are more scan-friendly in compact loops** —
+Compact history labels now preserve multiline structure with bounded line-aware
+previews instead of flattening everything into one whitespace-collapsed string.
+Large structured exec results now prefer bounded shape/sample summaries in both
+`--result-only` and default human output, reducing table-dump noise while still
+showing enough shape information for the next decision.
+
+**Missing-`ipykernel` smoke coverage is repo-owned and reproducible again** —
+The smoke path no longer depends on an external drifting project state. A
+fixture project now deterministically reports a selected interpreter with
+missing `ipykernel`, so `doctor` and `start` exercise the documented manual
+recovery path in both tests and targeted smoke runs.
+
 # v0.3.8 — Follow Semantics, Discoverability, And Cleanup Polish
 
 ## Improvements

@@ -132,6 +132,41 @@ def test_advice_policy_interpolates_execution_id_for_background_exec() -> None:
     ]
 
 
+def test_advice_policy_background_exec_text_and_actions_share_the_same_steps() -> None:
+    policy = AdvicePolicy()
+    context = AdviceContext(
+        command_name="exec",
+        response_status="ok",
+        data={"background": True, "execution_id": "run-7"},
+    )
+
+    assert policy.suggestions(context) == [
+        "Run `agentnb runs wait run-7 --json` to wait for the final result.",
+        "Run `agentnb runs show run-7 --json` to inspect the current run record.",
+        "Run `agentnb runs cancel run-7 --json` to stop the background run.",
+    ]
+    assert policy.suggestion_actions(context) == [
+        {
+            "kind": "command",
+            "label": "Wait for run",
+            "command": "agentnb",
+            "args": ["runs", "wait", "run-7", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Show run",
+            "command": "agentnb",
+            "args": ["runs", "show", "run-7", "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Cancel run",
+            "command": "agentnb",
+            "args": ["runs", "cancel", "run-7", "--json"],
+        },
+    ]
+
+
 def test_advice_policy_module_not_found_error_suggests_install() -> None:
     policy = AdvicePolicy()
 
@@ -216,7 +251,10 @@ def test_advice_policy_module_not_found_extracts_top_level_package() -> None:
     )
 
     assert suggestions == [
-        "Install the missing module: run `uv add sklearn` in your shell (not inside the session).",
+        (
+            "Install the missing module: run `uv add scikit-learn` "
+            "in your shell (not inside the session)."
+        ),
         "Then retry the execution.",
     ]
 
@@ -554,6 +592,24 @@ def test_advice_policy_dead_kernel_suggests_start_and_doctor(error_code: str) ->
     assert suggestions == [
         "Run `agentnb start --json` to start the kernel.",
         "Run `agentnb doctor --json` if startup has been failing.",
+    ]
+
+
+def test_advice_policy_reset_suggests_real_exec_command() -> None:
+    policy = AdvicePolicy()
+
+    context = AdviceContext(command_name="reset", response_status="ok", data={})
+
+    assert policy.suggestions(context) == [
+        'Run `agentnb exec "..." --json` to rebuild the state you need.'
+    ]
+    assert policy.suggestion_actions(context) == [
+        {
+            "kind": "command",
+            "label": "Rebuild state",
+            "command": "agentnb",
+            "args": ["exec", "...", "--json"],
+        }
     ]
 
 

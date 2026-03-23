@@ -390,6 +390,10 @@ class LocalRunManager(RunManager):
                 plan=plan,
                 run=run,
             )
+            run.replace(
+                status=record.status,
+                worker_pid=record.worker_pid,
+            )
         except Exception as exc:
             if run.started:
                 run.finalize_error(exc)
@@ -406,7 +410,7 @@ class LocalRunManager(RunManager):
                     ) from exc
             raise
 
-        return ManagedExecution(record=record, start_outcome=start_outcome)
+        return ManagedExecution(record=run.record, start_outcome=start_outcome)
 
     def _store(self, project_root: Path) -> ExecutionStore:
         return ExecutionStore(project_root)

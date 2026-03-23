@@ -1,8 +1,11 @@
 # agentnb Roadmap
 
-This roadmap is forward-looking. It is not a changelog.
+This roadmap is forward-looking. It is not a changelog or release-notes file.
 
-`agentnb` is a persistent, project-scoped Python kernel for coding agents doing interactive work. The product wins when an agent can enter and stay in a productive loop with minimal token spend, minimal syntax overhead, minimal output parsing, and minimal recovery friction.
+`agentnb` is a persistent, project-scoped Python kernel for coding agents doing
+interactive work. The product wins when an agent can enter and stay in a
+productive loop with minimal token spend, minimal syntax overhead, minimal
+output parsing, and minimal recovery friction.
 
 ## Product Lens
 
@@ -14,13 +17,16 @@ The main optimization target is agent token efficiency:
 - how rarely it must call `--help`, `sessions list`, `runs list`, or `history` just to decide the next command
 - how little output it must parse to recover the one fact needed for the next step
 
-The primary usability target is coding agents; human ergonomics matter insofar as they reinforce the same low-friction path.
+The primary usability target is coding agents; human ergonomics matter insofar
+as they reinforce the same low-friction path.
 
-Human ergonomics still matter, but they follow this same direction: fewer steps, clearer defaults, quieter output, and better recovery guidance.
+Human ergonomics still matter, but they follow this same direction: fewer
+steps, clearer defaults, quieter output, and better recovery guidance.
 
 ## Design Rules
 
-Deterministic targeting and machine-readable recovery take priority over permissive convenience behavior.
+Deterministic targeting and machine-readable recovery take priority over
+permissive convenience behavior.
 
 1. Optimize the core interactive loop before adding reproducibility, export, or extensibility features.
 2. Keep full `--json` as the exact machine contract, but do not treat it as the default working mode.
@@ -40,388 +46,98 @@ The roadmap assumes the existing persistent-kernel baseline remains intact:
 - stable machine-readable responses
 - app, state, kernel, introspection, and run-control boundaries that can absorb new behavior without leaking low-level details upward
 
-## v0.3 - Agent Loop Efficiency (shipped)
+## Current Focus
 
-v0.3 shipped the core agent loop: implicit exec, auto-start, compact `--agent` mode, sticky sessions, symbolic selectors, lower-noise output, and the help/discoverability rewrite.
+The current priority is not adding major new surface area. It is tightening the
+remaining places where the CLI still creates avoidable retries for agents:
 
-### Architecture Seams
+- targeting should be truthful and unambiguous
+- suggestions should preserve the scope the user established
+- invocation-shape mistakes should recover to the right command quickly
+- help text should describe actual matcher and selector behavior, not an approximation
 
-These boundaries now own specific categories of complexity. New feature work should land in the appropriate seam rather than spreading policy across CLI handlers.
+## v0.3.9 - Targeting Truthfulness And Workflow-Scope Hints
 
-- `InvocationResolver`: hot-path syntax, argv/stdin/file-path inference, implicit exec routing.
-- `ExecInvocationPolicy`: default execution ergonomics (startup, background, output selection).
-- `ResponseProjector`: compact `--agent` vs full `--json` response shapes.
-- Selector resolvers: `@latest`, `@active`, `@last-error`, `@last-success` expansion for runs and history.
-- `StateRepository` + `KernelRuntime`: sticky session preferences and precedence rules.
-- `AdvicePolicy`: next-step suggestions, success-path quieting, recovery guidance.
-
-If a feature does not fit one of these seams cleanly, define or deepen the owning module first instead of adding a CLI-local special case.
-
-## v0.3.1 - Output Correctness And Ergonomic Fixes (shipped)
-
-v0.3.1 fixed the output-path bugs that most affected agent consumption and corrected the ergonomic rough edges identified in smoke testing.
-
-### Shipped
-
-- Fixed duplicate error output: errors now always go to stdout; the `err=True` routing in `_emit()` was the root cause of double output when stderr was captured alongside stdout.
-- Fixed `reset` output message: `reset` now prints `"Namespace cleared."` instead of `"Execution completed."` to distinguish it from code execution.
-- Context-aware suggestions in `AdvicePolicy`: `SESSION_BUSY` now suggests `agentnb wait` as the primary recovery path; `NO_KERNEL` and `BACKEND_ERROR` now suggest `agentnb start` / `agentnb doctor` instead of the generic exec fallback.
-- Fixed `--session` and `--project` prefix position for group commands: `agentnb --session X runs list` and `agentnb --project /path runs list` now work by detecting group command names (`runs`, `sessions`) in `InvocationResolver` and moving prefix exec tokens after the first subcommand positional.
-- Added session name to `status` and `wait` output: both commands now include `session: NAME` alongside the pid so the agent can identify which session was checked.
-- Added stdout/stderr truncation notice in `--agent` mode: when output is truncated in `compact_execution_payload`, the summary now ends with `[N chars truncated]` so the agent knows the value is incomplete.
-- Fixed missing-ipykernel command selection for pip-less venvs: `ensure_ipykernel()` now probes pip availability before choosing the manual recovery command; it falls back to `uv add ipykernel` (when `uv.lock` is present) or `uv pip install ipykernel>=6.0`.
-
-## v0.3.2 - Friction Fixes From Agent Smoke Testing (shipped)
-
-v0.3.2 addressed friction points discovered by running all 17 smoke scenarios end-to-end as an agent. Each item maps to a concrete failure or confusion observed during that run.
-
-### Shipped
-
-- Staleness hint in `sessions list` human output: each session now shows relative last-activity age (e.g. "5m ago", "2d ago"). The `last_activity` timestamp was already present in JSON output; this surfaces it for human readers and makes stale sessions visible without probing each one.
-- Fixed `ModuleNotFoundError` install suggestion for pip-less venvs: suggestion now recommends `uv add X` (run in your shell, not inside the session) and drops the bare `pip install` form that would silently install into the wrong environment.
-- Added `importlib.reload()` hint when `reload` finds no project-local modules: when reload finds nothing to reload, the suggestion now points at `importlib.reload(module)` as a manual recovery path.
-- Added kernel health check to `doctor`: `doctor` now probes whether the session kernel is alive and reports `kernel_alive`/`kernel_pid` in its payload. Human output shows `[OK] kernel` or `[WARN] kernel` alongside the prerequisite checks. This distinguishes "env is broken" from "kernel is dead" without requiring a separate `status` call.
-- Truncated `inspect` head rows for wide DataFrames: `_safe_head_rows` now caps columns at 10 before converting to dict, consistent with how `dtypes` and `nulls` are already bounded. `compact_dataframe_preview` applies the same cap as a safety measure.
-- Fixed `history @latest` suggestion after `exec`: the post-exec suggestion now uses the concrete `execution_id` (e.g. `history abc123`) instead of the relative `@latest` selector, so it remains correct even if the agent runs other commands before following the suggestion.
-
-### Validated and removed from scope
-
-- `--session`/`--project` prefix fix for plain subcommands: live testing confirmed the `InvocationResolver` else branch already handles all non-group subcommands correctly. The v0.3.1 group-command fix was the only gap; plain commands were never broken.
-- Route `--agent`/`--json` error output to stdout: confirmed already fixed. `_emit()` routes all JSON errors to stdout; the only remaining `err=True` is for human-mode streaming, which is correct terminal behavior.
-
-## v0.3.3 - Bugs And Ergonomic Friction From Second Smoke Run (shipped)
-
-v0.3.3 fixed bugs and friction discovered by running all 17 smoke scenarios end-to-end a second time, after v0.3.2 shipped.
-
-### Shipped
-
-- Fixed duration always `0ms` in timeout, cancel, and background progress paths: `_ExecutionProgressSink` now tracks elapsed time, `ExecutionTimedOutError` carries `duration_ms`, and cancel/worker-exit paths compute wall-clock duration as fallback. Journal entries from `error_record` now also receive the computed duration.
-- Fixed stdout swallowed on error in human mode: `_render_error()` now prepends stdout/stderr from `response.data` before the error block, matching the behavior of `--agent` and `--json` modes.
-- Added `result_json` field to `--agent` exec responses: when the `result` repr string (or its inner content after stripping surrounding quotes) is valid JSON, a `result_json` field is included with the parsed value. The `result` field still contains the Python repr for backward compatibility.
-- Fixed `--result-only` and `--stdout-only` leaking session targeting message: the `(now targeting session: ...)` notice is now suppressed when an output selector is active.
-- Added `--no-truncate` flag to `exec`: skips stdout/stderr/result truncation in `--agent` mode. Threaded through `ExecInvocationPolicy` → `compact_execution_payload`.
-- Improved `inspect` nested dict preview consistency: both kernel-side `_json_safe()` and client-side `_compact_jsonish()` now use `str()` instead of `repr()` for depth >= 2 leaves, and `_json_safe` checks depth before expanding nested mappings.
-- Added bulk session cleanup: `sessions delete --all` and `sessions delete --stale` flags. `--stale` skips sessions with alive kernels.
-- Added `--fresh` flag to `exec`: stops and restarts the target session before executing, ensuring a clean namespace.
-- Added `history --full` flag: shows complete un-truncated code for each history entry instead of the compact summary.
-
-### Deferred
-
-- Silent serialization / `waited_ms` field: the `SESSION_BUSY` error fires correctly, but the response has no `waited_ms` field to distinguish lock-wait time from computation time. Deferred because it requires a behavior decision (wait-then-run vs fail-fast) and a contract extension to `ExecPayload`.
-
-## v0.3.4 - Smoke-Driven CLI Consistency And Recovery Fixes (shipped)
-
-v0.3.4 closed the consistency and recovery gaps found by the latest full smoke run. The emphasis stayed on making existing command paths behave reliably under real agent workflows rather than adding major new surface area.
-
-### Shipped
-
-- Fixed dead-kernel detection on hard exits: when the kernel dies during an exec (`os._exit(1)`, crash, worker disappearance), the triggering command now fails quickly with `KERNEL_DEAD` instead of hanging until an external timeout or later `status` call reveals the problem.
-- Made runtime state visible in `status` / `wait`: machine payloads now expose `runtime_state` and `session_exists`, and human output distinguishes `starting` / `dead` instead of flattening them into "not running".
-- Added a structured "session busy" contract: command-lock files now persist acquisition metadata, `RuntimeState` carries current lock facts, `status` exposes `lock_pid` / `lock_acquired_at` / `busy_for_ms`, and `SESSION_BUSY` exec/reset failures include `wait_behavior`, `waited_ms`, and current lock metadata.
-- Made `history @last-error` prefer real execution failures over incidental control-plane errors: journal queries now bias toward kernel-side execution errors when available, while still falling back to the latest control-plane error if no execution failure exists.
-- Fixed missing-ipykernel recovery targeting for uv-managed projects: the suggested install command is derived from the target project root, and the `uv pip` fallback binds installation to the selected interpreter.
-- Completed startup-state handling for read-only helper commands: `vars`, `inspect`, and `reload` now return structured `KERNEL_NOT_READY` responses with `runtime_state=starting` while a same-session startup is still in flight, instead of collapsing into generic no-kernel behavior.
-- Tightened `runs show` snapshot semantics: active run snapshots now carry an explicit `snapshot_stale` flag in machine output, matching the existing human warning that persisted state may lag live follow output.
-- Clarified same-session foreground/background serialization on the full CLI path: overlapping `exec` / `reset` attempts now fail fast against active persisted run records before startup checks run, implicit session resolution no longer blocks on backend status probes first, `SESSION_BUSY` responses include the blocking `active_execution_id`, and recovery suggestions point directly at `runs wait/show` for that run.
-- Improved current-session visibility in multi-session workflows: implicit session-bound commands now refresh the saved current-session preference and surface a switch notice when agentnb resolves to a different known session than the one previously targeted.
-
-### Validated Historical Smoke Notes
-
-These were plausible smoke findings at the time they were recorded, but representative current-path checks no longer reproduce them on the release tree.
-
-- Root-position `--project` / `--session` placement for representative command families is already working through `CommandShape` + `InvocationResolver`: live smoke confirmed `agentnb --project PATH history`, `agentnb --project PATH runs show`, `agentnb --project PATH runs wait`, and `agentnb --session NAME --project PATH history/vars` all resolve correctly.
-- Run-control help text and targeting are already aligned for execution-id based commands: `runs show/follow/wait/cancel --help` no longer advertises `--session`, and live smoke confirmed root-position `--project` works for those subcommands.
-- Missing-module recovery guidance is already uv-aware: real CLI smoke confirmed `ModuleNotFoundError` suggestions now recommend `uv add PACKAGE` in the shell, not inside the live session.
-
-### Deferred To v0.4
-
-- Partial file rerun remains valuable, but it is new file-execution surface area rather than consistency polish. Keep it with the broader file execution work already planned in v0.4.
-
-## v0.3.5 - Agent Correctness And Machine-Contract Frictions (shipped)
-
-v0.3.5 closed the highest-friction agent issues around helper reads, session ambiguity, and machine-readable recovery.
-
-### Shipped
-
-- Read-only helpers now auto-start unambiguous sessions, wait behind same-session work, and report `started_new_session`, `waited`, `waited_for`, `waited_ms`, `initial_runtime_state`, and `blocking_execution_id`.
-- Omitted-session `exec` and implicit top-level exec now fail with hard `AMBIGUOUS_SESSION` errors when multiple live sessions exist.
-- Compact `--agent` responses now preserve structured `suggestion_actions` for ambiguity and recovery flows.
-- Bare `sessions` now behaves like `sessions list`, including `--project` and `--json`, and the docs/examples now match.
-- Helper access metadata now lives in a typed contract and flows through introspection, ops, app shaping, and run-control boundaries instead of ad hoc payload mutation.
-
-### Follow-up cleanup shipped in the v0.3.6 release cut
-
-- Exec-like payloads now derive bounded structured `result_preview` summaries through the shared execution-output / compact seam, while keeping `result` as the compatibility field.
-- Error envelopes now normalize tracebacks once through the shared error contract, keeping `--json`, `--agent`, and human output aligned.
-- Human wait output now explicitly says when the command waited, what it waited for, and the initial runtime state when known.
-- Pip-less provisioning failures now surface one concrete manual recovery command, and `start` / `doctor` now converge on the same suggested command for the same interpreter state.
-
-## v0.3.6 - Command Surface Simplification And Footgun Removal (shipped)
-
-v0.3.6 shipped the command-surface simplification pass for the remaining
-agent-confusing behaviors. The release kept the major feature surface stable
-while making the public grammar smaller, the canonical forms clearer, and the
-default recovery paths more reliable.
-
-### Shipped
-
-- Narrowed omitted-session command targeting: bare session-bound commands now raise `AMBIGUOUS_SESSION` when multiple live sessions exist, and implicitly resolved read/control commands no longer rewrite remembered current-session preference.
-
-- Made `wait` the primary documented blocking readiness command: `status --wait` and `status --wait-idle` remain supported compatibility forms, but help, README, and recovery wording now steer agents toward `wait`.
-
-- Kept history selectors first-class and added `--successes`: `history --successes --latest` now matches `history @last-success`, and equivalent selector/flag combinations normalize while contradictory combinations fail.
-
-- Made `sessions list` the canonical documented form while keeping bare `sessions` as a supported alias.
-
-- Documented one canonical CLI grammar for subcommands and added standard top-level affordances including root `--version`.
-
-- Fixed human-mode ambiguity for read helpers in multi-session contexts by including stable session identity in `vars` and `inspect` output.
-
-- Fixed `status --wait-idle` as a readiness gate for background work: it now waits for both runtime idleness and any active persisted run on the target session before reporting ready.
-
-- Deepened `SessionTargetingPolicy` as the owning seam for command-target provenance, explicit-preference persistence, run-scope preference reads, and switch-notice decisions.
-
-### Remaining
-
-- No additional `0.3.6` implementation work remains.
-
-### API / Contract Notes
-
-- Implicitly resolved read/control commands do not rewrite remembered current-session preference.
-- `wait` is the primary blocking command, while `status --wait` and `status --wait-idle` remain compatibility surface.
-- `history @latest`, `@last-error`, and `@last-success` stay, and `--successes --latest` is the flag equivalent of `@last-success`.
-- Bare `sessions` remains a supported alias, while `sessions list` is the canonical documented form.
-
-### Acceptance Notes
-
-- Tests proving implicit read/control commands do not mutate current-session preference.
-- Tests for `history @last-success` parity with `history --successes --latest`.
-- Docs/help parity tests for `sessions`, `wait`, canonical command shapes, and root `--version`.
-
-### Implementation Seams
-
-- `SessionTargetingPolicy`:
-  - owns command-target provenance, explicit-preference persistence, run-scope preference reads, and switch-notice decisions
-
-- `StateRepository` + `KernelRuntime`:
-  - own persisted preference storage, low-level session resolution facts, and actual runtime busy/idle truth
-
-- `AgentNBApp`:
-  - owns command-level blocking semantics, background follow-up guidance, and the demoted `status --wait*` documentation path
-
-- Selector resolvers and history query validation:
-  - own selector/flag equivalence, contradiction checks, and the `--successes` addition
-
-- `InvocationResolver` plus CLI help and docs:
-  - own canonical command grammar, root-flag placement guidance, support for compatibility aliases, and the top-level `--version` / help wording cleanup
-
-- `ResponseProjector` / output rendering:
-  - include `session_id` in human-mode output headers when more than one session is alive for the project
-
-- Docs/help parity tests:
-  - ensure README, `--help`, and agent skill examples stay aligned with the actual surface and the intended primary command paths
-
-## v0.3.7 - Smoke-Test Contract And Recovery Polish (shipped)
-
-v0.3.7 should close the highest-value ergonomic issues that still showed up in the latest end-to-end smoke run. The focus is not feature expansion; it is removing the places where an agent still has to hesitate, guess, or special-case command behavior.
-
-### Shipped
-
-- Standardized top-level status access for run lookup JSON payloads: `runs show`, `runs wait`, and `runs follow` now expose `data.status` alongside `data.run.status`, so parsers do not need command-family-specific field paths.
-
-- Tightened top-level grammar guidance for `runs` subcommands: help text now distinguishes project-scoped execution-id commands from session-scoped subcommands instead of implying one universal post-subcommand placement rule.
-
-- Made dead-kernel auto-recovery explicit about state loss: successful recovery now surfaces a restart notice when the previous session had to be replaced after dead or stale kernel state.
-
-- Shifted missing-module recovery toward live-session repair: recovery guidance now prefers `uv pip install --python ...` when the session interpreter is known, while still offering `uv add` as the durable dependency path.
-
-- Removed startup/doctor install-automation remnants from the live contract: auto-install and auto-fix behavior is gone from the CLI, Python API, and internal plumbing; startup and doctor now consistently report one explicit install command plus a `--fresh` restart hint.
-
-- Clarified readiness wording after `status --wait-idle`: human output now says `Kernel is idle ...` after idle waits instead of reusing the more ambiguous `running` label.
-
-- Improved nested `inspect` previews for JSON-like structures: bounded mapping/sequence previews now preserve substantially more nested structure before degrading into text.
-
-- Added safe dotted and constant-subscript references to `inspect`: commands such as `inspect "df.a"` and `inspect "payload['items'][0]"` now work without requiring an extra assignment step.
-
-- Advertised selector vocabulary in `history --help`: help text now explicitly calls out selectors such as `@latest`, `@last-error`, and `@last-success`.
-
-- Made quiet file execution report namespace changes: file execs that end in assignments instead of a final expression now return a compact namespace-delta summary instead of the generic completion message.
-
-- Cleared remembered current-session preference on `stop`: stopping a named session no longer leaves a stale saved preference that can silently revive the wrong session identity later.
-
-- Preserved multi-line stdout in human `runs show` output: run snapshots now keep line breaks instead of collapsing line-oriented logs into one line.
-
-- Sharpened the `--quiet` / `--no-suggestions` distinction: quiet mode now trims success-path chatter while still preserving error recovery guidance, and `--no-suggestions` remains the explicit way to suppress the `Next:` block.
-
-### Deferred
-
-- Session cleanup still becomes awkward after many exploratory branches.
-  Reproduce:
-  - Run many scenarios with multiple named sessions.
-  - Call `uv run agentnb sessions list`, then try a bare `uv run agentnb "1 + 1"` in a project with many leftover sessions.
-  - Observe that ambiguity and cleanup pressure arrive before the actual work starts.
-  - Then try to clean up only the no-longer-needed sessions efficiently.
-  - Observe that the cleanup path is still noisy enough to discourage active session hygiene.
-  Why this is a problem for ergonomic use:
-  - Agents benefit from branching, but the system should not punish that behavior by making later targeting and cleanup harder.
-  - Session clutter increases ambiguity pressure and drives unnecessary `sessions list` calls.
-  - When targeting is unclear, session-scoped flags such as `--fresh` can appear unreliable simply because the agent is operating on a different session than expected.
-
-### Release Goal
-
-Make the latest smoke-run findings disappear by tightening the machine contract, clarifying recovery state, and reducing the number of follow-up probes an agent must issue just to regain confidence about what session it is talking to.
-
-## v0.3.8 - Low-Noise Discoverability And Inspection Polish
-
-v0.3.8 should pick up the remaining smoke frictions that are real but lower-severity than the contract and recovery issues in v0.3.7. The theme is reducing unnecessary guessing and output churn once the core command behavior is already correct.
-
-### Re-opened Issues
-
-- Re-opened: stale-session reconciliation makes `sessions delete --stale` effectively invisible in normal use.
-  Previously marked done:
-  - `v0.3.3` added `sessions delete --all` and `sessions delete --stale`.
-  Reproduce:
-  - Run `uv run agentnb --project /tmp/agentnb_validate_stale --session stale-a --fresh "import os; os.getpid()"`.
-  - Kill the kernel pid externally.
-  - Run `uv run agentnb sessions list --project /tmp/agentnb_validate_stale`.
-  - Run `uv run agentnb sessions delete --stale --project /tmp/agentnb_validate_stale`.
-  - Observe that listing already removed the stale session, and `delete --stale` reports `No sessions to delete.`
-  Why this is a problem for ergonomic use:
-  - The cleanup feature exists, but the user-facing model is unclear because stale sessions may disappear before the dedicated cleanup command can act.
-  - Agents should be able to reason about whether stale cleanup is automatic, manual, or both.
-
-- Re-opened: current-session preference after `stop` can still revive a previously stopped named session on a later bare exec.
-  Previously marked done:
-  - `v0.3.4` improved current-session visibility in multi-session workflows.
-  - `v0.3.6` narrowed omitted-session targeting and session-preference mutation rules.
-  Reproduce:
-  - In an isolated project, run `uv run agentnb --project /tmp/agentnb_validate_stop --session alpha --fresh "'alpha'"`.
-  - Run `uv run agentnb --project /tmp/agentnb_validate_stop --session beta --fresh "'beta'"`.
-  - Stop both with `uv run agentnb stop --project /tmp/agentnb_validate_stop --session alpha` and `... --session beta`.
-  - Run a bare `uv run agentnb --project /tmp/agentnb_validate_stop "import os; {'pid': os.getpid()}"`.
-  - Run `uv run agentnb sessions list --project /tmp/agentnb_validate_stop` and observe that `alpha` was revived.
-  Why this is a problem for ergonomic use:
-  - After `stop`, an agent expects a neutral default or an explicit ambiguity, not reuse of an old stopped workflow name.
-  - Wrong-session revival turns later missing-variable errors into confusing state-targeting failures.
-
-- Re-opened: `history --help` still omits selector discoverability even though selector support is first-class.
-  Previously marked done:
-  - `v0.3.6` kept history selectors first-class and documented the canonical command surface.
-  Reproduce:
-  - Run `uv run agentnb history --help`.
-  - Compare with `uv run agentnb runs show --help`.
-  - Observe that `runs show --help` lists selectors, while `history --help` only shows `[REFERENCE]`.
-  Why this is a problem for ergonomic use:
-  - Agents reach for help specifically to avoid guessing.
-  - If selectors are central to history recovery flows, they need to be discoverable from `history --help` itself.
-
-- Re-opened: human `runs show` output still collapses multiline stdout into one line.
-  Previously marked done:
-  - No exact shipped item claimed this, but the surrounding run-snapshot polish in `v0.3.4` implied the human snapshot path was in good shape.
-  Reproduce:
-  - Start a background run that prints multiple lines.
-  - Wait for completion with `uv run agentnb runs wait <execution_id>`.
-  - Show the snapshot with `uv run agentnb runs show <execution_id>`.
-  - Observe `stdout:` rendered as `line-0 line-1 line-2` instead of preserving line breaks.
-  Why this is a problem for ergonomic use:
-  - Agents often use run snapshots to understand progress and intermediate output.
-  - Flattening line-oriented output removes structure that was already present in the run.
+v0.3.9 should close the remaining smoke-tested gaps where the CLI surface says
+or implies one thing while the actual targeting or invocation behavior does
+another.
 
 ### Planned Issues
 
-- Issue: `runs follow` is awkward for bounded, programmatic observation.
+- Issue: multi-session help text and the `(current)` marker overpromise default targeting.
   Reproduce:
-  - Start a long-running background run.
-  - Run `uv run agentnb runs follow <execution_id>`.
-  - Observe that the command is optimized for an open-ended terminal stream rather than "follow for a short window, then return control."
-  Why this is a problem for ergonomic use:
-  - Agents often want a brief observation window, not an unbounded blocking stream.
-  - Without a bounded follow mode, the agent has to choose between hanging on the stream or falling back to repeated polling.
+  - Start at least two named sessions, for example `curA` and `curB`.
+  - Run `uv run agentnb sessions list` and observe `curA (current)`.
+  - Run `uv run agentnb vars` and observe `Error: Multiple live sessions exist; pass --session to select one explicitly.`
+  - Run `uv run agentnb vars --help` and observe `Session name. If omitted, agentnb uses the only live session or \`default\`.`
+  Why this is a problem for practical agentnb workflows:
+  - Agents trust the CLI surface. A `(current)` marker plus help text that sounds like a default-resolution rule encourages the next omitted-session command, which then fails.
+  - This adds hesitation to every branching workflow because the agent cannot tell whether `current` is real targeting state or just a display hint.
+  - Targeting truthfulness matters more than preserving a vague notion of "current" in human output.
 
-- Issue: timeout recovery suggestions are still more cautious than they need to be.
+- Issue: cross-project `Next:` suggestions lose the `--project` context.
   Reproduce:
-  - Run `uv run agentnb --session smoke-timeout --timeout 1 "import time; time.sleep(2)"`.
-  - Observe that the error suggests `agentnb interrupt` even when the kernel may already be idle again by the time the response is rendered.
-  Why this is a problem for ergonomic use:
-  - Agents may spend extra commands on defensive cleanup that is no longer necessary.
-  - Recovery suggestions are most useful when they are both safe and tightly matched to current runtime state.
+  - Create or pick another project and run `uv run agentnb --project /tmp/other --session sugg15 "answer = 42"`.
+  - Observe the success response.
+  - Observe that `Next:` suggests `agentnb vars --recent 5` and `agentnb history ...` without carrying `--project /tmp/other`.
+  Why this is a problem for practical agentnb workflows:
+  - Agents follow the suggested next command literally. Dropping `--project` points the very next action back at the caller project and silently breaks the workflow boundary the user just established.
+  - This is especially costly in cross-project debugging because the wrong suggestion can inspect or mutate the wrong repo with no syntax error to warn the user.
 
-- Issue: `--fresh`, `reset`, and `stop` still require too much comparative reading to choose correctly.
+- Issue: `exec path.py` is still a high-probability file-execution footgun.
   Reproduce:
-  - Read the help text for normal exec, `reset`, and `stop`.
-  - Try to answer "which one clears variables, which one restarts the interpreter, and which one just shuts everything down?"
-  - Observe that the distinctions are spread across separate help surfaces rather than compared directly.
-  Why this is a problem for ergonomic use:
-  - Agents should not need three separate help reads to select the right cleanup primitive.
-  - Cleanup choices are common enough that a compact comparison belongs on the hot path.
+  - Write a small script, for example `/tmp/agentnb-invoke19.py`.
+  - Run `uv run agentnb exec --session inv19 /tmp/agentnb-invoke19.py`.
+  - Observe that `agentnb` treats the path as Python code and fails with a `NameError` instead of executing the file.
+  - Then run either `uv run agentnb exec --session inv19 --file /tmp/agentnb-invoke19.py` or `uv run agentnb --session inv19 /tmp/agentnb-invoke19.py` and observe that both work.
+  Why this is a problem for practical agentnb workflows:
+  - Agents naturally unify "exec code" and "exec file" into one command family, so `exec script.py` is a predictable first guess.
+  - Falling into a Python parse/eval traceback instead of a targeted "did you mean `--file`?" recovery path wastes a full correction turn on a very common workflow.
+  - File-to-interactive use is one of the core value paths for `agentnb`, so its main footgun deserves direct CLI guidance.
 
-- Issue: session-targeting notices are still noisier than they need to be in repeated human-mode loops.
+- Issue: `vars --match` semantics are under-documented and easy to misguess.
   Reproduce:
-  - Run several human-mode execs in the same session.
-  - Observe repeated `(now targeting session: NAME)` output even when the session has not changed.
-  Why this is a problem for ergonomic use:
-  - The notice is valuable when targeting changes, but low-value repetition adds noise to iterative loops.
-  - This is especially visible when an agent stays in human mode for compact interactive work.
+  - Create variables such as `by_day` and `by_user`.
+  - Run `uv run agentnb vars --session matchval --match "by_*"` and observe `No user variables found.`
+  - Run `uv run agentnb vars --session matchval --match "by"` and observe both variables listed.
+  Why this is a problem for practical agentnb workflows:
+  - Agents are likely to assume glob or regex-like matching from the flag name.
+  - A failed `--match "prefix_*"` query looks like missing state rather than a matcher-semantics mistake, which can send the agent down the wrong recovery path.
+  - This does not necessarily require new matching power, but it does require a truthful contract about whether `--match` is substring, glob, or regex.
 
-- Issue: command typo recovery still falls back to generic Click errors without agent-oriented hints.
+- Issue: explicit session-targeting notices are still too repetitive in human-mode loops.
   Reproduce:
-  - Run a common misguess such as `uv run agentnb list` or `uv run agentnb log`.
-  - Observe the generic unknown-command error with no specific "did you mean?" guidance.
-  Why this is a problem for ergonomic use:
-  - Discoverability should help agents recover from plausible guesses without a full help re-read.
-  - Common misguesses are predictable enough that the CLI can steer them cheaply.
+  - Run several human-mode commands with an explicit `--session`, for example `uv run agentnb --session curA "1"` followed by more commands against the same session.
+  - Observe repeated `(now targeting session: curA)` output even though the agent already specified the session and nothing about targeting changed.
+  Why this is a problem for practical agentnb workflows:
+  - The notice is valuable when targeting changes or is inferred, but low-value repetition adds noise to compact human-mode loops.
+  - Agents already pay attention to session targeting; repeating the same notice every turn makes the real signal harder to spot.
 
-- Issue: `inspect` truncation still hides too much about what was omitted.
+- Issue: `--quiet` and `--no-suggestions` are still weakly differentiated in common success paths.
   Reproduce:
-  - Inspect a wide DataFrame or nested JSON-like structure.
-  - Observe truncated `columns`, `dtypes`, `nulls`, or nested sample values without a clear indicator of how much was omitted.
-  Why this is a problem for ergonomic use:
-  - Agents can mistake a bounded preview for a complete view.
-  - Bounded output works better when truncation is explicit rather than implicit.
+  - Run a simple successful expression with `uv run agentnb --quiet ...`.
+  - Run the same expression with `uv run agentnb --no-suggestions ...`.
+  - Observe that the outputs are often nearly identical in practice.
+  Why this is a problem for practical agentnb workflows:
+  - Agents should be able to predict which flag to use when they want less chatter versus when they want to suppress only the `Next:` block.
+  - If the distinction is too subtle, the surface area costs more than the choice it provides.
 
-- Issue: `--result-only` behavior on large values is still not clearly explained by the help text.
+- Issue: file and invocation-shape guidance is still spread across help surfaces instead of converging on the cheapest correct choice.
   Reproduce:
-  - Run `uv run agentnb --result-only` against a large list or DataFrame-like value.
-  - Observe that the output may be a bounded summary rather than the literal full repr.
-  Why this is a problem for ergonomic use:
-  - The flag name suggests "just the result," but the implementation sensibly returns a compact projection.
-  - Agents need the documented expectation to match the actual output shape.
-
-- Issue: file-exec truncation does not yet steer users toward the right escape hatch.
-  Reproduce:
-  - Run a file that produces analysis output large enough to truncate in default human mode.
-  - Observe the truncated output without a targeted hint about `--no-truncate` or a better inspection path.
-  Why this is a problem for ergonomic use:
-  - Agents need a fast path from "this output was cut off" to "here is the correct next command."
-  - File-driven workflows lose momentum if the first response hides results and does not name the escape hatch.
-
-- Issue: stale-session reconciliation and stale-session deletion are still conceptually muddy.
-  Reproduce:
-  - Accumulate sessions, kill one externally, then run `uv run agentnb sessions list` and `uv run agentnb sessions delete --stale`.
-  - Observe that stale cleanup may already have happened before deletion, making the feature hard to reason about.
-  Why this is a problem for ergonomic use:
-  - Agents should be able to tell whether stale sessions are auto-reconciled, manually cleaned, or both.
-  - Cleanup commands feel more trustworthy when their scope is legible.
-
-- Issue: session log retention is still unbounded enough to create `.agentnb` clutter over time.
-  Reproduce:
-  - Run many sessions and inspect `.agentnb/` after repeated smoke-style workflows.
-  - Observe that old kernel logs accumulate even after session cleanup.
-  Why this is a problem for ergonomic use:
-  - Persistent clutter in the state directory undermines the feeling of clean lifecycle management.
-  - Long-running agent workflows need basic retention hygiene even before richer artifact persistence exists.
-
-- Issue: `history --all` remains weakly differentiated from normal `history` in common debugging flows.
-  Reproduce:
-  - Trigger a failure and compare `uv run agentnb history @last-error` with `uv run agentnb history --all --last 5`.
-  - Observe that the extra internal entries may look like near-duplicates with unclear added value.
-  Why this is a problem for ergonomic use:
-  - Agents should know when `--all` is worth the extra output cost.
-  - If the flag is useful only in narrow cases, that value should be surfaced more clearly.
+  - Compare the top-level hot path (`agentnb script.py`), heredoc/stdin, and `exec --file` flows on code that contains braces and quotes.
+  - Observe that the CLI does work, but the agent still has to infer when it should abandon inline form and when `exec --file` is required.
+  - Observe that the targeted recovery hint for the `exec path.py` misguess is currently missing.
+  Why this is a problem for practical agentnb workflows:
+  - Invocation-shape mistakes are common in exploratory work because the same analysis naturally moves between inline snippets, heredocs, and files.
+  - The tool already has the right escape hatches; the missing piece is tighter guidance at the moment the agent guesses wrong.
 
 ### Release Goal
 
-Make the human-mode and discoverability surfaces feel more intentional: less repetitive noise, clearer truncation, better typo recovery, and lower hesitation when choosing inspection and cleanup commands.
+Make targeting and invocation guidance fully truthful under real smoke-tested
+agent workflows: no misleading current-session cues, no cross-project
+suggestions that lose scope, and no common file-execution misguess that falls
+through to a Python traceback when the CLI could have redirected the agent
+immediately.
 
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 
@@ -450,10 +166,10 @@ Make the human-mode and discoverability surfaces feel more intentional: less rep
   - a clearer value proposition for `history --all` versus normal semantic history
 
 - Selective recovery controls:
-  - selective reset (`reset --keep df,weather`): current `reset` is all-or-nothing. The friction is in the rebuild cost after reset, which is exactly this milestone's theme. Design questions (keep by name? by type? by pattern?) should not be rushed.
+  - selective reset (`reset --keep df,weather`)
 
 - File execution improvements:
-  - partial file execution (`exec --lines 17-20 script.py`): run specific lines from a file without re-executing the whole script. The workaround (copy-paste lines as inline code) is functional but breaks the file-to-interactive workflow.
+  - partial file execution (`exec --lines 17-20 script.py`)
   - richer file-to-interactive handoff summaries once the file-execution surface grows
 
 - Session-local environment and shell affordances:
@@ -479,11 +195,14 @@ Make the human-mode and discoverability surfaces feel more intentional: less rep
 - Verification workflows first:
   - `agentnb verify` to restart a clean session and replay selected history or snapshot state
   - verification responses identify the first failed step and the source execution that produced it
+
 - Session snapshots:
   - `agentnb snapshot create|list|restore`
+
 - Replay workflows:
   - replay history to a new session
   - `agentnb replay --to-session <name>`
+
 - Export follow-up:
   - export to `.ipynb`
   - export to markdown transcript
@@ -560,67 +279,3 @@ Make the human-mode and discoverability surfaces feel more intentional: less rep
 - Give plugins, policy, and reliability hooks one deep home instead of growing ad hoc methods across runtime and CLI layers.
 - Define typed execution lifecycle events and extension context objects before adding plugin loading.
 - Keep extension APIs event/context-based rather than mirroring runtime internals.
-
-### API / Contract Notes
-
-- Version the plugin API surface explicitly.
-- Policy violations return stable typed error codes.
-- Alternate control surfaces should reuse existing app boundaries instead of inventing parallel behavior.
-
-## v0.8+ - Runtime Backends And Collaboration
-
-### Goals
-
-- Decouple from local-only execution while keeping the CLI contract stable.
-- Support headless and sharable workflows without regressing the single-agent local loop.
-
-### Planned Features
-
-- Alternate backends:
-  - containerized local backend
-  - remote backend connector
-- Collaboration and CI modes:
-  - headless CI run mode
-  - import/export sharable session bundles
-
-### Internal Design Constraints
-
-- Grow the capability contract into the app, run-control, and extension boundary before adding non-local backends.
-- Keep features branching on declared capabilities rather than backend type checks or local-only assumptions.
-
-### API / Contract Notes
-
-- Keep backend capability negotiation explicit (`supports_stream`, `supports_artifacts`, and similar capabilities).
-- Preserve compatibility for local backend users.
-
-## Cross-Cutting Work
-
-- Documentation:
-  - keep a tiny hot-path quickstart
-  - keep deeper troubleshooting and integration docs available but off the critical path
-  - maintain an agent-focused smoke-scenario catalog for deep iterative workflows
-- Contract hardening:
-  - schema regression tests
-  - explicit deprecation policy for JSON fields
-  - tests for compact `--agent` contracts once introduced
-- Performance:
-  - benchmark startup latency, round-trip execution latency, and memory overhead
-  - measure token-oriented output size for common loops, not just runtime latency
-- Output and noise control:
-  - keep machine-oriented modes predictable during streaming and control-plane errors
-  - optimize default responses for one-step-later decision-making
-- Command-surface discipline:
-  - prefer a small set of composable commands over feature-specific command growth
-  - prefer defaults, selectors, and output shaping before adding new verbs
-- State ownership:
-  - keep session preferences, retention rules, and future sharable-bundle rules inside `StateRepository`
-
-## Near-Term Priority Queue
-
-Command-surface simplification is part of near-term recovery efficiency because agents pay for ambiguity with extra probing and wrong-session risk.
-
-1. Recovery/debugging improvements that reduce session drops and extra probing
-2. Verification workflows
-3. Snapshots
-4. Replay
-5. Exports and artifacts

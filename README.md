@@ -201,7 +201,7 @@ agentnb runs cancel @active
 
 How to read them:
 - `runs show` returns the latest persisted snapshot for a run
-- `runs follow` replays all output so far, then streams new events until done; use `--tail` to skip history and only stream new events
+- `runs follow` replays all output so far, then streams new events; use `--tail` to skip history, and use `--timeout T` to bound the observation window without turning an active run into an error
 - `runs wait` blocks until a run finishes and returns its final state
 - `runs cancel` requests cancellation for an active run
 
@@ -243,7 +243,7 @@ agentnb history --successes --latest
 agentnb history --latest
 agentnb history @last-error
 agentnb history @last-success
-agentnb history --all
+agentnb history --all                 # include helper/provenance entries
 agentnb history --full                # full un-truncated code and output
 ```
 
@@ -335,7 +335,8 @@ Example:
 ```
 
 If you truly want only one stream from `exec`, use the output selectors
-instead:
+instead; `--result-only` still uses bounded result rendering, so large
+structured values may appear as a compact preview instead of the full repr:
 
 ```bash
 agentnb --result-only "1 + 1"
@@ -393,6 +394,9 @@ Use:
 - `stop` and then `start` when the kernel is dead or badly wedged
 - `doctor` when startup or environment detection fails
 
+`reset` clears user variables in the current process, `exec --fresh` restarts
+then executes, and `stop` shuts the session down without executing anything.
+
 On `agentnb start`, the runtime selects an interpreter in this order:
 
 1. `--python`
@@ -427,12 +431,14 @@ agentnb start --session analysis
 agentnb sessions list
 agentnb sessions             # supported alias for `sessions list`
 agentnb sessions delete analysis
-agentnb sessions delete --stale      # delete sessions with dead kernels
+agentnb sessions delete --stale      # delete non-live session records
 agentnb sessions delete --all        # delete all sessions
 ```
 
 When only one live session exists, kernel-bound commands can infer it. Once
-multiple live sessions exist, pass `--session NAME` explicitly.
+multiple live sessions exist, pass `--session NAME` explicitly. `sessions
+list` shows live sessions only and notes when older non-live records are
+hidden behind `agentnb sessions delete --stale`.
 
 ## How It Works
 

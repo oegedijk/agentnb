@@ -80,6 +80,9 @@ class ResponseProjector:
                 "lock_acquired_at",
                 "busy_for_ms",
                 "active_execution_id",
+                "stdout_truncated",
+                "stderr_truncated",
+                "result_truncated",
             )
             for key in ("result", "stdout", "stderr", "selected_output", "selected_text"):
                 value = data.get(key)
@@ -112,6 +115,13 @@ class ResponseProjector:
                 status = data.get("status")
                 if isinstance(status, str):
                     projected["status"] = status
+                completion_reason = data.get("completion_reason")
+                if isinstance(completion_reason, str):
+                    projected["completion_reason"] = completion_reason
+                for key in ("replayed_event_count", "emitted_event_count"):
+                    value = data.get(key)
+                    if isinstance(value, int):
+                        projected[key] = value
                 return projected
             return {}
         if command_name == "runs-wait":

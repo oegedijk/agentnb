@@ -27,6 +27,8 @@ from agentnb.execution_output import OutputItem
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
+from agentnb.payloads import RunSnapshot
+from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelWaitResult
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
@@ -1057,12 +1059,14 @@ def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None
 
 def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(main, ["--help"])
+    normalized_output = " ".join(result.output.split())
     assert result.exit_code == 0
     assert "Persistent project-scoped Python REPL for agent workflows." in result.output
     assert 'agentnb "import json"' in result.output
     assert "Canonical grammar:" in result.output
     assert "status --wait-idle" in result.output
-    assert "execution-id `runs` subcommands" in result.output
+    assert "execution-id `runs`" in result.output
+    assert "intentionally do not accept `--session`." in normalized_output
     assert "runs show @latest" in result.output
     assert "@last-error" in result.output
     assert "--quiet" in result.output
@@ -1072,6 +1076,7 @@ def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     assert "Control Session:" in result.output
     assert "Background Runs:" in result.output
     assert "Sessions:" in result.output
+    assert "Cleanup primitives:" in result.output
     assert "exec  Execute code in the live kernel." in result.output
     assert "wait       Wait until the target session is usable" in result.output
     assert "runs  Inspect persisted execution records for" in result.output
@@ -1083,7 +1088,54 @@ def test_cli_history_help_mentions_selectors(cli_runner: CliRunner) -> None:
     assert result.exit_code == 0
     assert "@latest" in result.output
     assert "@last-error" in result.output
-    assert "@last-success" in result.output
+    assert "last-" in result.output
+    assert "success` are supported" in result.output
+    assert "helper/provenance entries" in result.output
+
+
+def test_cli_exec_help_describes_output_selectors_and_cleanup_primitives(
+    cli_runner: CliRunner,
+) -> None:
+    result = cli_runner.invoke(main, ["exec", "--help"])
+
+    assert result.exit_code == 0
+    assert "Show only stdout from the execution." in result.output
+    assert "Show only stderr from the execution." in result.output
+    assert "compact preview rather than the full" in result.output
+    assert "exec --fresh: stop and restart the session, then execute code." in result.output
+
+
+def test_cli_runs_follow_help_describes_observation_window(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(main, ["runs", "follow", "--help"])
+
+    assert result.exit_code == 0
+    assert "--timeout FLOAT" in result.output
+    assert "bounds the observation window for `runs follow`" in result.output
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            ["list"],
+            "Unknown command 'list'. Did you mean `agentnb sessions list` or `agentnb runs list`?",
+        ),
+        (
+            ["log"],
+            "Unknown command 'log'. Did you mean `agentnb history`?",
+        ),
+    ],
+)
+def test_cli_unknown_command_reports_deterministic_guidance(
+    cli_runner: CliRunner,
+    argv: list[str],
+    expected: str,
+) -> None:
+    result = cli_runner.invoke(main, argv)
+
+    assert result.exit_code == 2
+    assert expected in result.output
+    assert "NameError" not in result.output
 
 
 def test_cli_json_response_includes_suggestions(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -2279,25 +2331,24 @@ def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir:
             "follow",
             lambda cli: setattr(
                 cli.executions,
-                "follow_run",
+                "observe_run",
                 lambda **kwargs: (
                     _event_sink(kwargs).started(
                         execution_id="run-1",
                         session_id="default",
                     ),
-                    {
-                        "execution_id": "run-1",
-                        "session_id": "default",
-                        "status": "ok",
-                        "result": "2",
-                        "outputs": [
+                    RunObservationResult(
+                        run=cast(
+                            RunSnapshot,
                             {
-                                "kind": "result",
-                                "text": "2",
-                                "mime": {"text/plain": "2"},
-                            }
-                        ],
-                    },
+                                "execution_id": "run-1",
+                                "session_id": "default",
+                                "status": "ok",
+                                "result": "2",
+                            },
+                        ),
+                        completion_reason="terminal",
+                    ),
                 )[-1],
             ),
         ),
@@ -2334,23 +2385,29 @@ def test_cli_runs_follow_stream_json_emits_events_and_final(
 ) -> None:
     import agentnb.cli as cli
 
-    def follow_stub(**kwargs: object) -> dict[str, object]:
+    def follow_stub(**kwargs: object) -> RunObservationResult:
         sink = _event_sink(kwargs)
         sink.started(execution_id="run-1", session_id="default")
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         sink.accept(ExecutionEvent(kind="result", content="2"))
-        return {
-            "execution_id": "run-1",
-            "session_id": "default",
-            "status": "ok",
-            "result": "2",
-            "events": [
-                {"kind": "stdout", "content": "hello\n", "metadata": {}},
-                {"kind": "result", "content": "2", "metadata": {}},
-            ],
-        }
+        return RunObservationResult(
+            run=cast(
+                RunSnapshot,
+                {
+                    "execution_id": "run-1",
+                    "session_id": "default",
+                    "status": "ok",
+                    "result": "2",
+                    "events": [
+                        {"kind": "stdout", "content": "hello\n", "metadata": {}},
+                        {"kind": "result", "content": "2", "metadata": {}},
+                    ],
+                },
+            ),
+            completion_reason="terminal",
+        )
 
-    cli.executions.follow_run = follow_stub  # type: ignore[method-assign]
+    cli.executions.observe_run = follow_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -2365,6 +2422,80 @@ def test_cli_runs_follow_stream_json_emits_events_and_final(
     assert frames[-1]["type"] == "final"
     assert frames[-1]["response"]["command"] == "runs-follow"
     assert frames[-1]["response"]["data"]["run"]["execution_id"] == "run-1"
+
+
+def test_cli_runs_follow_window_elapsed_returns_ok_final_frame(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.observe_run = lambda **_: RunObservationResult(  # type: ignore[method-assign]
+        run=cast(
+            RunSnapshot,
+            {
+                "execution_id": "run-1",
+                "session_id": "default",
+                "command_type": "exec",
+                "status": "running",
+                "duration_ms": 12,
+                "events": [],
+            },
+        ),
+        completion_reason="window_elapsed",
+        replayed_event_count=1,
+        emitted_event_count=0,
+    )
+
+    result = cli_runner.invoke(
+        main,
+        ["runs", "follow", "run-1", "--project", str(project_dir), "--json"],
+    )
+
+    assert result.exit_code == 0
+    frames = [_frame(line) for line in result.output.splitlines() if line.strip()]
+    assert frames[-1]["type"] == "final"
+    assert frames[-1]["response"]["status"] == "ok"
+    assert frames[-1]["response"]["data"]["completion_reason"] == "window_elapsed"
+    assert frames[-1]["response"]["data"]["replayed_event_count"] == 1
+    assert frames[-1]["response"]["data"]["emitted_event_count"] == 0
+
+
+def test_cli_runs_follow_human_window_elapsed_reuses_snapshot_renderer(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    import agentnb.cli as cli
+
+    cli.executions.observe_run = lambda **_: RunObservationResult(  # type: ignore[method-assign]
+        run=cast(
+            RunSnapshot,
+            {
+                "execution_id": "run-1",
+                "session_id": "default",
+                "command_type": "exec",
+                "status": "running",
+                "duration_ms": 12,
+                "stdout": "tick\n",
+                "events": [],
+            },
+        ),
+        completion_reason="window_elapsed",
+    )
+
+    result = cli_runner.invoke(
+        main,
+        ["--no-suggestions", "runs", "follow", "run-1", "--project", str(project_dir)],
+    )
+
+    assert result.exit_code == 0
+    assert result.output == (
+        "Run run-1 [running] exec on session default.\n"
+        "duration: 12ms\n"
+        "stdout: tick\n"
+        "events: 0 recorded\n"
+        "Observation window elapsed; the run is still active.\n"
+    )
 
 
 def test_cli_runs_cancel_requests_interrupt(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -2545,7 +2676,7 @@ def test_cli_background_overlap_fails_fast_with_blocking_run_id(
     assert wait_result.exit_code == 0
 
 
-def test_cli_status_human_reports_implicit_session_switch(
+def test_cli_status_human_suppresses_implicit_session_switch_for_non_live_preference(
     cli_runner: CliRunner,
     runtime,
     project_dir: Path,
@@ -2560,7 +2691,7 @@ def test_cli_status_human_reports_implicit_session_switch(
 
     assert result.exit_code == 0
     assert "session: analysis" in result.output
-    assert "(now targeting session: analysis)" in result.output
+    assert "(now targeting session: analysis)" not in result.output
 
 
 def test_cli_doctor_uses_target_project_root(

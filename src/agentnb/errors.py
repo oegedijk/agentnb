@@ -126,15 +126,19 @@ class RunWaitTimedOutError(AgentNBException):
 
 
 class ExecutionTimedOutError(AgentNBException):
-    def __init__(self, timeout_s: float, *, duration_ms: int = 0) -> None:
+    def __init__(
+        self,
+        timeout_s: float,
+        *,
+        duration_ms: int = 0,
+        data: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(
             code="TIMEOUT",
-            message=(
-                f"Execution timed out after {timeout_s:g}s. Use --timeout to increase, "
-                "or run: agentnb interrupt"
-            ),
+            message=f"Execution timed out after {timeout_s:g}s.",
             ename="TimeoutError",
             evalue=f"Execution exceeded timeout of {timeout_s:g}s",
+            data=data,
         )
         self.duration_ms = duration_ms
 

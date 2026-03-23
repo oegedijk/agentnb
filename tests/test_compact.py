@@ -53,6 +53,9 @@ def test_compact_execution_payload_truncates_large_fields_and_preserves_selected
     assert "..." in compacted["stdout"] and "chars truncated" in compacted["stdout"]
     assert "..." in compacted["stderr"] and "chars truncated" in compacted["stderr"]
     assert compacted["result"].endswith("...")
+    assert compacted["stdout_truncated"] is True
+    assert compacted["stderr_truncated"] is True
+    assert compacted["result_truncated"] is True
 
 
 def test_compact_execution_payload_truncation_notice_includes_char_count() -> None:
@@ -68,6 +71,7 @@ def test_compact_execution_payload_truncation_notice_includes_char_count() -> No
 
     assert "stdout" in compacted
     assert "[100 chars truncated]" in compacted["stdout"]
+    assert compacted["stdout_truncated"] is True
 
 
 def test_compact_execution_payload_no_truncation_notice_for_short_stdout() -> None:
@@ -81,6 +85,7 @@ def test_compact_execution_payload_no_truncation_notice_for_short_stdout() -> No
     compacted = compact_execution_payload(payload)
 
     assert compacted.get("stdout") == "hello world"
+    assert "stdout_truncated" not in compacted
 
 
 def test_compact_execution_payload_preserves_structured_result_preview() -> None:

@@ -174,6 +174,33 @@ def test_resolve_invocation_intent_help_without_command_stays_command_intent() -
     assert command_intent.argv == ("--help",)
 
 
+def test_resolve_invocation_intent_treats_predictable_command_typos_as_commands() -> None:
+    resolver = InvocationResolver()
+
+    intent = resolver.resolve_invocation_intent(
+        ["log"],
+        known_commands=KNOWN_COMMANDS,
+        cwd=Path("/tmp/project"),
+        stdin=FakeStdin("", is_tty=True),
+    )
+
+    assert intent.kind == "command"
+    command_intent = cast(CommandIntent, intent)
+    assert command_intent.command_name is None
+    assert command_intent.argv == ("log",)
+
+
+def test_unknown_command_advice_returns_deterministic_guidance() -> None:
+    resolver = InvocationResolver()
+
+    advice = resolver.unknown_command_advice("list")
+
+    assert advice is not None
+    assert advice.message("list") == (
+        "Unknown command 'list'. Did you mean `agentnb sessions list` or `agentnb runs list`?"
+    )
+
+
 def test_resolve_exec_source_prefers_argument() -> None:
     resolver = InvocationResolver()
 

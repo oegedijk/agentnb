@@ -70,6 +70,15 @@ HELP_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 class AgentGroup(click.Group):
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        command = super().get_command(ctx, cmd_name)
+        if command is not None:
+            return command
+        advice = invocations.unknown_command_advice(cmd_name)
+        if advice is not None:
+            raise click.UsageError(advice.message(cmd_name))
+        return None
+
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         if args and args[0] == "help":
             args = ["--help", *args[1:]]
@@ -437,9 +446,28 @@ def start(
     is_flag=True,
     help="Stop and restart the target session before executing.",
 )
-@click.option("--stdout-only", "output_selector", flag_value="stdout", default=None)
-@click.option("--stderr-only", "output_selector", flag_value="stderr")
-@click.option("--result-only", "output_selector", flag_value="result")
+@click.option(
+    "--stdout-only",
+    "output_selector",
+    flag_value="stdout",
+    default=None,
+    help="Show only stdout from the execution.",
+)
+@click.option(
+    "--stderr-only",
+    "output_selector",
+    flag_value="stderr",
+    help="Show only stderr from the execution.",
+)
+@click.option(
+    "--result-only",
+    "output_selector",
+    flag_value="result",
+    help=(
+        "Show only the result channel. Large structured values may still render as "
+        "a compact preview rather than the full repr."
+    ),
+)
 @click.option(
     "--no-truncate",
     is_flag=True,
@@ -1027,17 +1055,6 @@ def runs_follow(
         tail=tail,
     )
     response = application.runs_follow(request, event_sink=stream)
-    if response.error is not None and response.error.code == "TIMEOUT":
-        if options.as_json:
-            _emit_json_stream_frame(
-                {
-                    "type": "final",
-                    "response": projector.project(response, profile=options.profile.value),
-                }
-            )
-        else:
-            click.echo("Following stopped (timeout).")
-        raise click.exceptions.Exit(2)
     _emit_stream_completion(response, as_json=as_json, stream=stream)
 
 
@@ -1080,6 +1097,45 @@ def _current_render_options(*, local_as_json: bool) -> RenderOptions:
     if local_as_json:
         options = options.with_local_json()
     return options
+
+
+def _append_help_text(command: click.Command, extra: str) -> None:
+    base = (command.help or "").rstrip()
+    command.help = f"{base}\n\n{extra}".strip()
+
+
+_CLEANUP_PRIMITIVE_COMPARISON = (
+    "Cleanup primitives:\n"
+    "  reset: clear user variables in the current process.\n"
+    "  exec --fresh: stop and restart the session, then execute code.\n"
+    "  stop: shut the session down without executing anything."
+)
+
+_HISTORY_ALL_GUIDE = (
+    "`history` shows semantic user-visible steps by default. Use `--all` when you need "
+    "helper/provenance entries such as the internal calls behind `vars`, `inspect`, "
+    "or `reload`."
+)
+
+_SESSIONS_VISIBILITY_GUIDE = (
+    "Normal listing shows live sessions only. Non-live session records remain on disk "
+    "until you remove them explicitly with `agentnb sessions delete --stale`."
+)
+
+_RUNS_FOLLOW_WINDOW_GUIDE = (
+    "`--timeout` bounds the observation window for `runs follow`. If the window ends "
+    "before the run finishes, agentnb returns the latest snapshot instead of failing "
+    "with a timeout error."
+)
+
+_append_help_text(main, _CLEANUP_PRIMITIVE_COMPARISON)
+_append_help_text(exec_cmd, _CLEANUP_PRIMITIVE_COMPARISON)
+_append_help_text(reset, _CLEANUP_PRIMITIVE_COMPARISON)
+_append_help_text(stop, _CLEANUP_PRIMITIVE_COMPARISON)
+_append_help_text(history, _HISTORY_ALL_GUIDE)
+_append_help_text(sessions_list, _SESSIONS_VISIBILITY_GUIDE)
+_append_help_text(sessions_delete, _SESSIONS_VISIBILITY_GUIDE)
+_append_help_text(runs_follow, _RUNS_FOLLOW_WINDOW_GUIDE)
 
 
 if __name__ == "__main__":

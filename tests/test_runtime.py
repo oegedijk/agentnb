@@ -20,6 +20,7 @@ from agentnb.errors import (
 )
 from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.history import HistoryStore
+from agentnb.kernel.backend import BackendExecutionTimeout
 from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState, SessionResolutionPolicy
 from agentnb.session import SessionInfo, SessionStore
 from tests.conftest import TestLocalIPythonBackend
@@ -271,6 +272,48 @@ def test_runtime_delete_session_stops_alive_kernel(project_dir: Path) -> None:
     backend.stop.assert_called_once()
     assert store.load_session() is None
     assert not store.connection_file.exists()
+    assert not store.log_file.exists()
+
+
+def test_runtime_list_sessions_filters_stale_without_deleting_record(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="analysis")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=999_999,
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+
+    sessions = KernelRuntime(backend=Mock()).list_sessions(project_root=project_dir)
+
+    assert sessions == []
+    assert store.load_session() is not None
+
+
+def test_runtime_cleanup_stale_sessions_removes_stale_records(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="analysis")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="analysis",
+            pid=999_999,
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.log_file.write_text("stale", encoding="utf-8")
+
+    deleted = KernelRuntime(backend=Mock()).cleanup_stale_sessions(project_root=project_dir)
+
+    assert deleted == ["analysis"]
+    assert store.load_session() is None
     assert not store.log_file.exists()
 
 
@@ -638,6 +681,38 @@ def test_runtime_execute_session_busy_reports_lock_metadata(project_dir: Path) -
     assert error_data["lock_pid"] == os.getpid()
     assert error_data["lock_acquired_at"] == acquired_at
     assert isinstance(error_data["busy_for_ms"], int)
+
+
+def test_runtime_execute_timeout_records_recovery_facts(project_dir: Path) -> None:
+    store = SessionStore(project_dir, session_id="default")
+    store.ensure_state_dir()
+    store.save_session(
+        SessionInfo(
+            session_id="default",
+            pid=os.getpid(),
+            connection_file=str(store.connection_file),
+            python_executable="python",
+            project_root=str(project_dir),
+            started_at="2026-03-09T00:00:00+00:00",
+        )
+    )
+    store.connection_file.write_text("{}", encoding="utf-8")
+
+    backend = Mock()
+    backend.execute.side_effect = BackendExecutionTimeout()
+    backend.status.return_value = KernelStatus(alive=True, pid=os.getpid(), python="python")
+    runtime = KernelRuntime(backend=backend)
+
+    with pytest.raises(ExecutionTimedOutError) as exc_info:
+        runtime.execute(project_root=project_dir, code="1 + 1", timeout_s=0.1)
+
+    assert exc_info.value.data == {
+        "current_runtime_state": "ready",
+        "session_busy": False,
+        "interrupt_recommended": False,
+        "active_execution_id": None,
+    }
+    backend.interrupt.assert_called_once()
 
 
 def test_runtime_state_reports_starting_when_connection_exists_without_session(

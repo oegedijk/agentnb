@@ -566,7 +566,7 @@ def test_local_run_manager_follow_run_replays_incremental_events(project_dir: Pa
     mocker.patch("agentnb.runs.local_manager.time.sleep", side_effect=sleep_stub)
 
     sink = Sink()
-    run = LocalRunManager(_runtime()).follow_run(
+    observation = LocalRunManager(_runtime()).follow_run(
         project_root=project_dir,
         execution_id="run-1",
         timeout_s=1.0,
@@ -574,12 +574,31 @@ def test_local_run_manager_follow_run_replays_incremental_events(project_dir: Pa
         observer=sink,
     )
 
-    assert run["status"] == "ok"
+    assert observation.completion_reason == "terminal"
+    assert observation.replayed_event_count == 1
+    assert observation.emitted_event_count == 1
+    assert observation.run["status"] == "ok"
     assert sink.started_calls == [("run-1", "default")]
     assert sink.events == [
         ExecutionEvent(kind="stdout", content="hello\n"),
         ExecutionEvent(kind="result", content="2"),
     ]
+
+
+def test_local_run_manager_follow_run_reports_elapsed_window(project_dir: Path, mocker) -> None:
+    mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    ExecutionStore(project_dir).append(_active_record())
+
+    observation = LocalRunManager(_runtime()).follow_run(
+        project_root=project_dir,
+        execution_id="run-1",
+        timeout_s=0.0,
+        poll_interval_s=0.0,
+    )
+
+    assert observation.completion_reason == "window_elapsed"
+    assert observation.run["status"] == "running"
+    assert observation.run["snapshot_stale"] is True
 
 
 def test_local_run_manager_cancel_run_interrupts_session(project_dir: Path, mocker) -> None:

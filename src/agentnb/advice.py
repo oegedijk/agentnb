@@ -80,6 +80,8 @@ class AdvicePolicy:
             ]
         if command_name == "exec":
             if context.response_status == "ok":
+                if _file_exec_truncated(data, session_id=context.session_id):
+                    return _file_exec_truncation_suggestions(data, session_id=context.session_id)
                 if data.get("background"):
                     execution_id = _execution_id(data)
                     return [
@@ -99,6 +101,18 @@ class AdvicePolicy:
                 return []
             if context.error_code == "INVALID_INPUT":
                 return []
+            if context.error_code == "TIMEOUT":
+                suggestions = [
+                    "Run `agentnb history @last-error --json` to review the latest failure.",
+                ]
+                if data.get("interrupt_recommended"):
+                    suggestions.append(
+                        "Run `agentnb interrupt --json` if execution may still be stuck."
+                    )
+                suggestions.append(
+                    "Run `agentnb reset --json` if the namespace needs a clean slate."
+                )
+                return suggestions
             if context.error_name == "ModuleNotFoundError":
                 module = _extract_module_name(context.error_value)
                 if module:
@@ -231,6 +245,19 @@ class AdvicePolicy:
                 ]
             return []
         if command_name == "runs-follow":
+            run = data.get("run")
+            run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
+            run_status = run_payload.get("status") if run_payload is not None else None
+            if _run_is_active(run_status):
+                execution_id = _execution_id(run_payload)
+                return [
+                    f"Run `{_run_command('wait', execution_id)}` to wait for the final snapshot.",
+                    (
+                        f"Run `{_run_command('show', execution_id)}` "
+                        "to inspect the latest run snapshot."
+                    ),
+                    f"Run `{_run_command('cancel', execution_id)}` to stop the background run.",
+                ]
             return []
         if command_name == "runs-wait":
             return []
@@ -319,6 +346,10 @@ class AdvicePolicy:
                     _agentnb_action("Show run", "runs", "show", execution_id, "--json"),
                     _agentnb_action("Cancel run", "runs", "cancel", execution_id, "--json"),
                 ]
+            if context.response_status == "ok" and _file_exec_truncated(
+                data, session_id=context.session_id
+            ):
+                return _file_exec_truncation_actions(data, session_id=context.session_id)
             if context.error_name == "ModuleNotFoundError":
                 module = _extract_module_name(context.error_value)
                 if module:
@@ -354,6 +385,17 @@ class AdvicePolicy:
                     ]
                 if package:
                     return [_shell_action("Install dependency", "uv", "add", package)]
+        if command_name == "runs-follow":
+            run = data.get("run")
+            run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
+            run_status = run_payload.get("status") if run_payload is not None else None
+            if _run_is_active(run_status):
+                execution_id = _execution_id(run_payload)
+                return [
+                    _agentnb_action("Wait for run", "runs", "wait", execution_id, "--json"),
+                    _agentnb_action("Show run", "runs", "show", execution_id, "--json"),
+                    _agentnb_action("Cancel run", "runs", "cancel", execution_id, "--json"),
+                ]
         return []
 
 
@@ -424,6 +466,46 @@ def _exec_output_is_empty(data: Mapping[str, object]) -> bool:
     return not entries
 
 
+def _file_exec_truncated(
+    data: Mapping[str, object],
+    *,
+    session_id: str | None,
+) -> bool:
+    del session_id
+    if data.get("source_kind") != "file":
+        return False
+    truncation_keys = ("stdout_truncated", "stderr_truncated", "result_truncated")
+    return any(data.get(key) is True for key in truncation_keys)
+
+
+def _file_exec_truncation_suggestions(
+    data: Mapping[str, object],
+    *,
+    session_id: str | None,
+) -> list[str]:
+    return [
+        (
+            f"Run `{_no_truncate_file_command(data, session_id=session_id)}` "
+            "to rerun the file without truncation."
+        ),
+        _vars_recent_command(session_id=session_id),
+    ]
+
+
+def _file_exec_truncation_actions(
+    data: Mapping[str, object],
+    *,
+    session_id: str | None,
+) -> list[SuggestionAction]:
+    return [
+        _agentnb_action(
+            "Rerun without truncation",
+            *_no_truncate_file_args(data, session_id=session_id),
+        ),
+        _agentnb_action("Inspect recent vars", *_vars_recent_args(session_id=session_id)),
+    ]
+
+
 def _agentnb_action(label: str, *args: str) -> SuggestionAction:
     return {
         "kind": "command",
@@ -440,3 +522,32 @@ def _shell_action(label: str, command: str, *args: str) -> SuggestionAction:
         "command": command,
         "args": list(args),
     }
+
+
+def _no_truncate_file_command(data: Mapping[str, object], *, session_id: str | None) -> str:
+    args = _no_truncate_file_args(data, session_id=session_id)
+    return "agentnb " + " ".join(args)
+
+
+def _no_truncate_file_args(data: Mapping[str, object], *, session_id: str | None) -> list[str]:
+    args = ["exec"]
+    if session_id:
+        args.extend(["--session", session_id])
+    args.append("--no-truncate")
+    source_path = data.get("source_path")
+    if isinstance(source_path, str) and source_path:
+        args.extend(["--file", source_path])
+    return args
+
+
+def _vars_recent_command(*, session_id: str | None) -> str:
+    command = "agentnb " + " ".join(_vars_recent_args(session_id=session_id))
+    return f"Run `{command}` to inspect the newest live variables."
+
+
+def _vars_recent_args(*, session_id: str | None) -> list[str]:
+    args = ["vars"]
+    if session_id:
+        args.extend(["--session", session_id])
+    args.extend(["--recent", "5", "--json"])
+    return args

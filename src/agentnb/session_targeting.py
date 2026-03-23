@@ -22,6 +22,8 @@ class SessionTargetRuntime(Protocol):
 
     def remember_current_session(self, *, project_root: Path, session_id: str) -> None: ...
 
+    def is_live_session(self, *, project_root: Path, session_id: str) -> bool: ...
+
 
 @dataclass(slots=True, frozen=True)
 class SessionTargetDecision:
@@ -46,6 +48,13 @@ class SessionTargetingPolicy:
         announce_switch: bool,
     ) -> SessionTargetDecision:
         previous_preference = self.current_run_preference(project_root=project_root)
+        previous_preference_live = (
+            previous_preference is not None
+            and self._runtime.is_live_session(
+                project_root=project_root,
+                session_id=previous_preference,
+            )
+        )
         session_id = self._runtime.resolve_session_id(
             project_root=project_root,
             requested_session_id=requested_session_id,
@@ -68,6 +77,7 @@ class SessionTargetingPolicy:
             )
         switched_session = self._switched_session(
             previous_preference=previous_preference,
+            previous_preference_live=previous_preference_live,
             resolved_session_id=session_id,
             source=source,
             announce_switch=announce_switch,
@@ -105,6 +115,7 @@ class SessionTargetingPolicy:
     def _switched_session(
         *,
         previous_preference: str | None,
+        previous_preference_live: bool,
         resolved_session_id: str,
         source: ResolutionSource,
         announce_switch: bool,
@@ -114,5 +125,7 @@ class SessionTargetingPolicy:
         if previous_preference is None or previous_preference == resolved_session_id:
             return None
         if source == "remembered":
+            return None
+        if source != "explicit" and not previous_preference_live:
             return None
         return resolved_session_id

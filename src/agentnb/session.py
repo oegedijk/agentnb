@@ -6,13 +6,14 @@ import re
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .errors import InvalidInputError
 from .state import CommandLockInfo, StateRepository
 
 DEFAULT_SESSION_ID = "default"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+StaleSessionReason = Literal["missing_process", "missing_connection_file"]
 
 
 @dataclass(slots=True)
@@ -38,6 +39,14 @@ class SessionInfo:
             project_root=str(payload["project_root"]),
             started_at=str(payload["started_at"]),
         )
+
+
+@dataclass(slots=True, frozen=True)
+class SessionStaleness:
+    session_id: str
+    stale: bool
+    reason: StaleSessionReason | None = None
+    connection_file_exists: bool = False
 
 
 def resolve_project_root(cwd: Path | None = None, override: Path | None = None) -> Path:
@@ -112,7 +121,7 @@ class SessionStore:
         self._safe_unlink(self.session_file)
 
     def clear_runtime_files(self) -> None:
-        self.state.clear_runtime_files()
+        self.repository.prune_session_runtime_artifacts(self.session_id)
 
     def delete_session(self) -> None:
         self.clear_runtime_files()
@@ -127,19 +136,41 @@ class SessionStore:
     def command_lock_info(self) -> CommandLockInfo | None:
         return self.state.command_lock_info()
 
+    def staleness(self, session: SessionInfo | None = None) -> SessionStaleness:
+        current = session or self.load_session()
+        if current is None:
+            return SessionStaleness(session_id=self.session_id, stale=False)
+
+        connection_file_exists = self.connection_file.exists()
+        if not pid_exists(current.pid):
+            return SessionStaleness(
+                session_id=current.session_id,
+                stale=True,
+                reason="missing_process",
+                connection_file_exists=connection_file_exists,
+            )
+        if not connection_file_exists:
+            return SessionStaleness(
+                session_id=current.session_id,
+                stale=True,
+                reason="missing_connection_file",
+                connection_file_exists=False,
+            )
+        return SessionStaleness(
+            session_id=current.session_id,
+            stale=False,
+            connection_file_exists=True,
+        )
+
     def cleanup_stale(self) -> bool:
         session = self.load_session()
         if session is None:
             return False
 
-        connection = Path(session.connection_file)
-        stale = not pid_exists(session.pid) or not connection.exists()
-        if not stale:
+        if not self.staleness(session).stale:
             return False
 
-        if connection.exists():
-            connection.unlink()
-        self.clear_session()
+        self.delete_session()
         return True
 
     def ensure_gitignore_entry(self) -> bool:

@@ -539,6 +539,35 @@ def test_render_human_inspect_mapping_preview() -> None:
     )
 
 
+def test_render_human_inspect_preview_surfaces_omission_metadata() -> None:
+    response = success_response(
+        command="inspect",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "inspect": {
+                "name": "payload",
+                "type": "dict",
+                "preview": {
+                    "kind": "mapping-like",
+                    "length": 6,
+                    "keys": ["alpha", "beta", "gamma"],
+                    "keys_shown": 3,
+                    "sample": {"alpha": 1, "beta": {"nested": [1, 2, 3]}},
+                    "sample_items_shown": 2,
+                    "sample_truncated": True,
+                },
+            }
+        },
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "session: default\nname: payload\ntype: dict\nlength: 6\n"
+        "keys: alpha, beta, gamma (+3 more)\n"
+        'sample: {"alpha": 1, "beta": {"nested": [1, 2, 3]}} (+4 more, truncated)'
+    )
+
+
 def test_render_human_history_formats_internal_and_exec_fallback_labels() -> None:
     response = success_response(
         command="history",
@@ -619,6 +648,49 @@ def test_render_human_sessions_views() -> None:
     )
 
 
+def test_render_human_sessions_list_reports_hidden_non_live_records() -> None:
+    response = success_response(
+        command="sessions-list",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "sessions": [
+                {
+                    "session_id": "default",
+                    "pid": 11,
+                    "python": "python",
+                    "is_default": True,
+                    "is_current": False,
+                }
+            ],
+            "hidden_non_live_count": 2,
+        },
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "default (default): pid 11 using python\n"
+        "2 non-live session records are hidden; "
+        "use `agentnb sessions delete --stale` to remove them."
+    )
+
+
+def test_render_human_sessions_list_empty_mentions_hidden_non_live_records() -> None:
+    response = success_response(
+        command="sessions-list",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "sessions": [],
+            "hidden_non_live_count": 1,
+        },
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "No live sessions found.\n"
+        "1 non-live session record is hidden; use `agentnb sessions delete --stale` to remove it."
+    )
+
+
 def test_render_human_runs_list_and_wait_error_shape() -> None:
     list_response = success_response(
         command="runs-list",
@@ -666,6 +738,34 @@ def test_render_human_runs_list_and_wait_error_shape() -> None:
         "result: partial\n"
         "error: RuntimeError: boom\n"
         "events: 0 recorded"
+    )
+
+
+def test_render_human_runs_follow_reuses_snapshot_renderer_and_window_note() -> None:
+    response = success_response(
+        command="runs-follow",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "run": {
+                "execution_id": "run-2",
+                "status": "running",
+                "command_type": "exec",
+                "session_id": "default",
+                "duration_ms": 12,
+                "stdout": "tick\n",
+                "events": [],
+            },
+            "completion_reason": "window_elapsed",
+        },
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "Run run-2 [running] exec on session default.\n"
+        "duration: 12ms\n"
+        "stdout: tick\n"
+        "events: 0 recorded\n"
+        "Observation window elapsed; the run is still active."
     )
 
 

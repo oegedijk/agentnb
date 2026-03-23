@@ -55,6 +55,15 @@ class CommandShape:
     subcommands: tuple[str, ...] = ()
 
 
+@dataclass(slots=True, frozen=True)
+class UnknownCommandAdvice:
+    suggestions: tuple[str, ...]
+
+    def message(self, command_name: str) -> str:
+        suggestion_text = _join_suggestions(self.suggestions)
+        return f"Unknown command '{command_name}'. Did you mean {suggestion_text}?"
+
+
 INVOCATION_OPTION_SPECS = (
     *(InvocationOptionSpec(names=(spec.flag,), kind="root") for spec in ROOT_OPTION_SPECS),
     InvocationOptionSpec(names=("--help", "-h"), kind="help"),
@@ -100,6 +109,12 @@ COMMAND_SHAPES = (
         subcommands=("list", "delete", "help"),
     ),
 )
+
+_UNKNOWN_COMMAND_ADVICE = {
+    "list": UnknownCommandAdvice(suggestions=("agentnb sessions list", "agentnb runs list")),
+    "log": UnknownCommandAdvice(suggestions=("agentnb history",)),
+    "logs": UnknownCommandAdvice(suggestions=("agentnb history",)),
+}
 
 
 class StdinReader(Protocol):
@@ -195,6 +210,7 @@ class InvocationResolver:
         known_command_names = frozenset(known_commands)
         root_flags = (*scanned.prefix_root_flags, *scanned.tail_root_flags)
         command_name = scanned.command_candidate
+        typo_advice = self.unknown_command_advice(command_name)
 
         if command_name in known_command_names:
             if scanned.saw_unknown_option:
@@ -208,6 +224,9 @@ class InvocationResolver:
                 root_flags=tuple(root_flags),
             )
 
+        if typo_advice is not None:
+            return CommandIntent(argv=tuple(raw_args), command_name=None)
+
         if self._should_infer_implicit_exec(scanned, stdin=stdin):
             return self._implicit_exec_intent(
                 scanned=scanned,
@@ -219,6 +238,14 @@ class InvocationResolver:
             argv=tuple(raw_args),
             command_name=command_name if command_name in known_command_names else None,
         )
+
+    def unknown_command_advice(self, command_name: str | None) -> UnknownCommandAdvice | None:
+        if not isinstance(command_name, str):
+            return None
+        normalized = command_name.strip().lower()
+        if not normalized:
+            return None
+        return _UNKNOWN_COMMAND_ADVICE.get(normalized)
 
     def resolve_exec_source(
         self,
@@ -485,3 +512,13 @@ class InvocationResolver:
             return bool(str(data).strip())
 
         return False
+
+
+def _join_suggestions(suggestions: Sequence[str]) -> str:
+    rendered = tuple(f"`{suggestion}`" for suggestion in suggestions if suggestion)
+    if len(rendered) == 1:
+        return rendered[0]
+    if not rendered:
+        return "`agentnb --help`"
+    head = ", ".join(rendered[:-1])
+    return f"{head} or {rendered[-1]}"

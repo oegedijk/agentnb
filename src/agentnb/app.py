@@ -381,7 +381,10 @@ class AgentNBApp:
             requested_session_id=None,
             require_live_session=False,
             handler=lambda _: _sessions_list_payload(
-                self.runtime.list_sessions(project_root=request.project_root)
+                self.runtime.list_sessions(project_root=request.project_root),
+                hidden_non_live_count=self.runtime.hidden_non_live_session_count(
+                    project_root=request.project_root
+                ),
             ),
         )
 
@@ -407,14 +410,13 @@ class AgentNBApp:
         )
 
     def _sessions_delete_bulk_payload(self, request: SessionsDeleteBulkRequest) -> BulkDeleteResult:
-        sessions = self.runtime.list_sessions(project_root=request.project_root)
+        if request.stale_only:
+            deleted = self.runtime.cleanup_stale_sessions(project_root=request.project_root)
+            return {"deleted": deleted, "count": len(deleted)}
+
         deleted: list[str] = []
-        for session in sessions:
-            sid = session.get("session_id")
-            if not isinstance(sid, str):
-                continue
-            if request.stale_only and session.get("alive"):
-                continue
+        for session in self.runtime.session_inventory(project_root=request.project_root):
+            sid = session.session_id
             try:
                 self.runtime.delete_session(project_root=request.project_root, session_id=sid)
                 deleted.append(sid)
@@ -825,14 +827,16 @@ class AgentNBApp:
             ),
             default_behavior=default_behavior,
         )
+        observation = None
         if event_sink is not None:
-            run = self.executions.follow_run(
+            observation = self.executions.observe_run(
                 project_root=project_root,
                 execution_id=execution_id,
                 timeout_s=30.0 if timeout_s is None else timeout_s,
                 event_sink=event_sink,
                 skip_history=skip_history,
             )
+            run = observation.run
         elif timeout_s is not None:
             run = self.executions.wait_for_run(
                 project_root=project_root,
@@ -848,6 +852,10 @@ class AgentNBApp:
         status = run.get("status")
         if isinstance(status, str):
             payload["status"] = status
+        if observation is not None:
+            payload["completion_reason"] = observation.completion_reason
+            payload["replayed_event_count"] = observation.replayed_event_count
+            payload["emitted_event_count"] = observation.emitted_event_count
         return payload
 
     def _validate_exec_request(self, request: ExecRequest) -> CommandResponse | None:
@@ -1176,8 +1184,15 @@ def _runtime_state_from_status(status: KernelStatus) -> RuntimeStateKind:
     return "ready"
 
 
-def _sessions_list_payload(sessions: list[SessionSummary]) -> SessionsListPayload:
-    return {"sessions": sessions}
+def _sessions_list_payload(
+    sessions: list[SessionSummary],
+    *,
+    hidden_non_live_count: int = 0,
+) -> SessionsListPayload:
+    payload: SessionsListPayload = {"sessions": sessions}
+    if hidden_non_live_count > 0:
+        payload["hidden_non_live_count"] = hidden_non_live_count
+    return payload
 
 
 @dataclass(slots=True)

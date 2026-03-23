@@ -5,7 +5,7 @@ from typing import Protocol
 
 from ..contracts import HelperAccessMetadata
 from ..payloads import CancelRunResult, RunSnapshot
-from .models import RunObserver, RunSpec
+from .models import RunObservationResult, RunObserver, RunSpec
 from .store import ManagedExecution
 
 
@@ -40,7 +40,7 @@ class RunManager(Protocol):
         poll_interval_s: float = 0.1,
         observer: RunObserver | None = None,
         skip_history: bool = False,
-    ) -> RunSnapshot: ...
+    ) -> RunObservationResult: ...
 
     def cancel_run(
         self,

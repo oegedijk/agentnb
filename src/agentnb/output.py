@@ -325,9 +325,14 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 lines.append("[WARN] kernel: Session exists but kernel is not running.")
             body = "\n".join(lines)
         elif command == "sessions-list":
-            sessions = cast(SessionsListPayload, data).get("sessions", [])
+            sessions_payload = cast(SessionsListPayload, data)
+            sessions = sessions_payload.get("sessions", [])
+            hidden_non_live_count = sessions_payload.get("hidden_non_live_count")
             if not sessions:
-                body = "No sessions found."
+                body = "No live sessions found." if hidden_non_live_count else "No sessions found."
+                hidden_note = _render_hidden_session_note(hidden_non_live_count)
+                if hidden_note is not None:
+                    body = f"{body}\n{hidden_note}"
             else:
                 lines = []
                 for session in sessions:
@@ -346,6 +351,9 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                         f"{session_label}{marker}: pid {session.get('pid')}"
                         f"{python_text}{activity_text}"
                     )
+                hidden_note = _render_hidden_session_note(hidden_non_live_count)
+                if hidden_note is not None:
+                    lines.append(hidden_note)
                 body = "\n".join(lines)
         elif command == "sessions-delete":
             stopped = " and stopped its kernel" if data.get("stopped_running_kernel") else ""
@@ -373,7 +381,7 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                         f"{run.get('command_type')} {run.get('duration_ms')}ms"
                     )
                 body = "\n".join(lines)
-        elif command == "runs-show" or command == "runs-wait":
+        elif command in {"runs-show", "runs-wait", "runs-follow"}:
             run_lookup = cast(RunLookupPayload, data)
             run_data = run_lookup.get("run")
             if not isinstance(run_data, dict):
@@ -382,6 +390,10 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 cast(RunSnapshot, run_data),
                 snapshot_only=(command == "runs-show"),
             )
+            if command == "runs-follow":
+                follow_note = _render_follow_completion_note(run_lookup)
+                if follow_note is not None:
+                    body = f"{body}\n{follow_note}" if body else follow_note
         elif command == "runs-cancel":
             if data.get("cancel_requested"):
                 if data.get("status") == "ok":
@@ -697,31 +709,58 @@ def _render_run_snapshot(run: RunSnapshot, *, snapshot_only: bool) -> str:
     return "\n".join(lines)
 
 
+def _render_follow_completion_note(run_lookup: RunLookupPayload) -> str | None:
+    completion_reason = run_lookup.get("completion_reason")
+    if completion_reason != "window_elapsed":
+        return None
+    run = run_lookup.get("run")
+    status = run.get("status") if isinstance(run, dict) else None
+    if status in {"starting", "running"}:
+        return "Observation window elapsed; the run is still active."
+    return "Observation window elapsed."
+
+
 def _render_dataframe_preview(preview: DataframePreview) -> list[str]:
     lines: list[str] = []
     shape = preview.get("shape")
+    row_count = shape[0] if isinstance(shape, list) and len(shape) == 2 else None
     if isinstance(shape, list) and len(shape) == 2:
         lines.append(f"shape: ({shape[0]}, {shape[1]})")
 
     columns = preview.get("columns")
     if isinstance(columns, list) and columns:
-        lines.append("columns: " + ", ".join(str(column) for column in columns[:20]))
+        columns_text = ", ".join(str(column) for column in columns)
+        omission = _omission_suffix(preview.get("column_count"), preview.get("columns_shown"))
+        if omission:
+            columns_text = f"{columns_text}{omission}"
+        lines.append("columns: " + columns_text)
 
     dtypes = preview.get("dtypes")
     if isinstance(dtypes, dict) and dtypes:
-        dtype_items = list(dtypes.items())[:10]
-        dtype_text = ", ".join(f"{name}={dtype}" for name, dtype in dtype_items)
+        dtype_text = ", ".join(f"{name}={dtype}" for name, dtype in dtypes.items())
+        omission = _omission_suffix(preview.get("column_count"), preview.get("dtypes_shown"))
+        if omission:
+            dtype_text = f"{dtype_text}{omission}"
         lines.append(f"dtypes: {dtype_text}")
 
     null_counts = preview.get("null_counts")
     if isinstance(null_counts, dict) and null_counts:
-        null_items = list(null_counts.items())[:10]
-        null_text = ", ".join(f"{name}={count}" for name, count in null_items)
+        null_text = ", ".join(f"{name}={count}" for name, count in null_counts.items())
+        omission = _omission_suffix(
+            preview.get("column_count"),
+            preview.get("null_count_fields_shown"),
+        )
+        if omission:
+            null_text = f"{null_text}{omission}"
         lines.append(f"nulls: {null_text}")
 
     head = preview.get("head")
     if isinstance(head, list):
-        lines.append("head: " + json.dumps(head, ensure_ascii=True))
+        head_text = json.dumps(head, ensure_ascii=True)
+        omission = _omission_suffix(row_count, preview.get("head_rows_shown"), unit="rows")
+        if omission:
+            head_text = f"{head_text}{omission}"
+        lines.append("head: " + head_text)
 
     return lines
 
@@ -808,7 +847,11 @@ def _render_collection_preview(preview: MappingPreview | SequencePreview) -> lis
 
     keys = preview.get("keys")
     if isinstance(keys, list) and keys:
-        lines.append("keys: " + ", ".join(str(key) for key in keys[:10]))
+        keys_text = ", ".join(str(key) for key in keys[:10])
+        omission = _omission_suffix(preview.get("length"), preview.get("keys_shown"))
+        if omission:
+            keys_text = f"{keys_text}{omission}"
+        lines.append("keys: " + keys_text)
 
     sample_keys = preview.get("sample_keys")
     if isinstance(sample_keys, list) and sample_keys:
@@ -816,6 +859,47 @@ def _render_collection_preview(preview: MappingPreview | SequencePreview) -> lis
 
     sample = preview.get("sample")
     if sample is not None:
-        lines.append("sample: " + json.dumps(sample, ensure_ascii=True))
+        sample_text = json.dumps(sample, ensure_ascii=True)
+        omission = _omission_suffix(
+            preview.get("length"),
+            preview.get("sample_items_shown"),
+            truncated=bool(preview.get("sample_truncated")),
+        )
+        if omission:
+            sample_text = sample_text + omission
+        lines.append("sample: " + sample_text)
 
     return lines
+
+
+def _omitted_count(total: object, shown: object) -> int:
+    if not isinstance(total, int) or not isinstance(shown, int):
+        return 0
+    return max(total - shown, 0)
+
+
+def _omission_suffix(
+    total: object,
+    shown: object,
+    *,
+    unit: str | None = None,
+    truncated: bool = False,
+) -> str:
+    omitted = _omitted_count(total, shown)
+    if omitted <= 0:
+        return " (truncated)" if truncated else ""
+    label = "more" if not unit else f"more {unit}"
+    if truncated:
+        return f" (+{omitted} {label}, truncated)"
+    return f" (+{omitted} {label})"
+
+
+def _render_hidden_session_note(hidden_non_live_count: object) -> str | None:
+    if not isinstance(hidden_non_live_count, int) or hidden_non_live_count <= 0:
+        return None
+    noun = "record is" if hidden_non_live_count == 1 else "records are"
+    pronoun = "it" if hidden_non_live_count == 1 else "them"
+    return (
+        f"{hidden_non_live_count} non-live session {noun} hidden; "
+        f"use `agentnb sessions delete --stale` to remove {pronoun}."
+    )

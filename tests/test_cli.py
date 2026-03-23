@@ -1492,6 +1492,20 @@ def test_cli_exec_existing_python_path_suggests_file_execution(
             "to use the top-level file-execution hot path."
         ),
     ]
+    assert payload["suggestion_actions"] == [
+        {
+            "kind": "command",
+            "label": "Use exec --file",
+            "command": "agentnb",
+            "args": ["exec", "--file", str(script), "--project", str(project_dir), "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Use top-level file exec",
+            "command": "agentnb",
+            "args": [str(script), "--project", str(project_dir), "--json"],
+        },
+    ]
 
 
 def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: Path) -> None:

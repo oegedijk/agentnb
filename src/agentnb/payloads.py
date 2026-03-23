@@ -103,24 +103,34 @@ class DataframePreview(TypedDict, total=False):
     shape: list[int]
     columns: list[str]
     column_count: int
+    columns_shown: int
     dtypes: dict[str, str] | None
+    dtypes_shown: int
     head: list[dict[str, JSONValue]] | None
+    head_rows_shown: int
     null_counts: dict[str, int]
+    null_count_fields_shown: int
 
 
-class MappingPreview(TypedDict):
+class MappingPreview(TypedDict, total=False):
     kind: Literal["mapping-like"]
     length: int
     keys: list[str]
+    keys_shown: int
     sample: dict[str, JSONValue]
+    sample_items_shown: int
+    sample_truncated: bool
 
 
 class SequencePreview(TypedDict, total=False):
     kind: Literal["sequence-like"]
     length: int
     sample: list[JSONValue]
+    sample_items_shown: int
+    sample_truncated: bool
     item_type: str
     sample_keys: list[str]
+    sample_keys_shown: int
 
 
 InspectPreview: TypeAlias = DataframePreview | MappingPreview | SequencePreview

@@ -163,6 +163,44 @@ def test_session_runtime_files_read_structured_lock_metadata(project_dir) -> Non
     assert lock_info.acquired_at == "2026-03-19T12:00:00+00:00"
 
 
+def test_state_repository_prunes_session_runtime_artifacts(project_dir) -> None:
+    repository = StateRepository(project_dir)
+    runtime_files = repository.session_runtime("analysis")
+    runtime_files.ensure_state_dir()
+    runtime_files.connection_file.write_text("{}", encoding="utf-8")
+    runtime_files.log_file.write_text("log", encoding="utf-8")
+    runtime_files.command_lock_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    repository.prune_session_runtime_artifacts("analysis")
+
+    assert not runtime_files.connection_file.exists()
+    assert not runtime_files.log_file.exists()
+    assert not runtime_files.command_lock_file.exists()
+
+
+def test_state_repository_prunes_orphaned_runtime_artifacts(project_dir) -> None:
+    repository = StateRepository(project_dir)
+    default_runtime = repository.session_runtime("default")
+    orphan_runtime = repository.session_runtime("orphan")
+    default_runtime.ensure_state_dir()
+    default_runtime.log_file.write_text("keep", encoding="utf-8")
+    orphan_runtime.connection_file.write_text("{}", encoding="utf-8")
+    orphan_runtime.log_file.write_text("drop", encoding="utf-8")
+    orphan_runtime.command_lock_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    removed = repository.prune_orphaned_runtime_artifacts(active_session_ids={"default"})
+
+    assert removed == [
+        "command.lock-orphan",
+        "kernel-orphan.json",
+        "kernel-orphan.log",
+    ]
+    assert default_runtime.log_file.exists()
+    assert not orphan_runtime.connection_file.exists()
+    assert not orphan_runtime.log_file.exists()
+    assert not orphan_runtime.command_lock_file.exists()
+
+
 def test_state_repository_allocates_and_commits_snapshot_descriptors(project_dir) -> None:
     repository = StateRepository(project_dir)
     manifest = StateManifest(

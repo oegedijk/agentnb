@@ -539,6 +539,35 @@ def test_render_human_inspect_mapping_preview() -> None:
     )
 
 
+def test_render_human_inspect_preview_surfaces_omission_metadata() -> None:
+    response = success_response(
+        command="inspect",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "inspect": {
+                "name": "payload",
+                "type": "dict",
+                "preview": {
+                    "kind": "mapping-like",
+                    "length": 6,
+                    "keys": ["alpha", "beta", "gamma"],
+                    "keys_shown": 3,
+                    "sample": {"alpha": 1, "beta": {"nested": [1, 2, 3]}},
+                    "sample_items_shown": 2,
+                    "sample_truncated": True,
+                },
+            }
+        },
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "session: default\nname: payload\ntype: dict\nlength: 6\n"
+        "keys: alpha, beta, gamma (+3 more)\n"
+        'sample: {"alpha": 1, "beta": {"nested": [1, 2, 3]}} (+4 more, truncated)'
+    )
+
+
 def test_render_human_history_formats_internal_and_exec_fallback_labels() -> None:
     response = success_response(
         command="history",

@@ -5,7 +5,7 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -34,6 +34,9 @@ ResourceLifecycle = Literal["allocating", "ready", "failed", "deleted"]
 
 _RESOURCE_ID_PATTERN = re.compile(r"^[a-f0-9]{16}$")
 _SESSION_RECORD_FILE_PATTERN = re.compile(r"^session-[a-f0-9]{12}\.json$")
+_KERNEL_CONNECTION_FILE_PATTERN = re.compile(r"^kernel-(.+)\.json$")
+_KERNEL_LOG_FILE_PATTERN = re.compile(r"^kernel-(.+)\.log$")
+_COMMAND_LOCK_ARTIFACT_PATTERN = re.compile(r"^command\.lock-(.+)$")
 
 
 @dataclass(slots=True, frozen=True)
@@ -416,6 +419,25 @@ class StateRepository:
 
     def command_lock_file(self, session_id: str) -> Path:
         return self.session_state(session_id).command_lock_file
+
+    def prune_session_runtime_artifacts(self, session_id: str) -> None:
+        self.session_state(session_id).clear_runtime_files()
+
+    def prune_orphaned_runtime_artifacts(self, *, active_session_ids: Collection[str]) -> list[str]:
+        active = {str(session_id) for session_id in active_session_ids}
+        removed: list[str] = []
+        if not self.state_dir.exists():
+            return removed
+
+        for path in sorted(self.state_dir.iterdir()):
+            if not path.is_file():
+                continue
+            session_id = _runtime_artifact_session_id(path.name)
+            if session_id is None or session_id in active:
+                continue
+            _safe_unlink(path)
+            removed.append(path.name)
+        return removed
 
     def session_files(self) -> list[Path]:
         if not self.state_dir.exists():
@@ -1104,6 +1126,18 @@ def _safe_unlink(path: Path) -> None:
         pass
     except OSError:
         pass
+
+
+def _runtime_artifact_session_id(name: str) -> str | None:
+    for pattern in (
+        _KERNEL_CONNECTION_FILE_PATTERN,
+        _KERNEL_LOG_FILE_PATTERN,
+        _COMMAND_LOCK_ARTIFACT_PATTERN,
+    ):
+        match = pattern.fullmatch(name)
+        if match is not None:
+            return match.group(1)
+    return None
 
 
 def _pid_exists(pid: int) -> bool:

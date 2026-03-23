@@ -314,6 +314,30 @@ def test_advice_policy_name_error_with_session_suggests_vars() -> None:
     ]
 
 
+def test_advice_policy_timeout_uses_runtime_recovery_facts() -> None:
+    policy = AdvicePolicy()
+
+    suggestions = policy.suggestions(
+        AdviceContext(
+            command_name="exec",
+            response_status="error",
+            data={
+                "current_runtime_state": "ready",
+                "session_busy": False,
+                "interrupt_recommended": False,
+                "active_execution_id": None,
+            },
+            error_code="TIMEOUT",
+            error_name="TimeoutError",
+        )
+    )
+
+    assert suggestions == [
+        "Run `agentnb history @last-error --json` to review the latest failure.",
+        "Run `agentnb reset --json` if the namespace needs a clean slate.",
+    ]
+
+
 def test_advice_policy_doctor_ready_with_kernel_alive() -> None:
     policy = AdvicePolicy()
 

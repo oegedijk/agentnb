@@ -37,6 +37,114 @@ def test_kernel_introspection_returns_payload_and_records_history(
     assert all(entry.status == "ok" for entry in entries)
 
 
+def test_kernel_introspection_parses_preview_omission_metadata(
+    project_dir,
+    mocker: MockerFixture,
+) -> None:
+    runtime = KernelRuntime(backend=mocker.Mock())
+    mocker.patch.object(
+        runtime,
+        "execute",
+        return_value=ExecutionResult(
+            status="ok",
+            stdout=(
+                '{"name": "payload", "type": "dict", "preview": {'
+                '"kind": "mapping-like", '
+                '"length": 6, '
+                '"keys": ["alpha", "beta", "gamma"], '
+                '"keys_shown": 3, '
+                '"sample": {"alpha": 1, "beta": {"nested": [1, 2, 3]}}, '
+                '"sample_items_shown": 2, '
+                '"sample_truncated": true'
+                "}}\n"
+            ),
+            duration_ms=5,
+        ),
+    )
+
+    result = KernelIntrospection(runtime).inspect_var(project_root=project_dir, name="payload")
+
+    preview = result.payload["preview"]
+    assert preview["kind"] == "mapping-like"
+    assert preview["keys_shown"] == 3
+    assert preview["sample_items_shown"] == 2
+    assert preview["sample_truncated"] is True
+
+
+def test_kernel_introspection_parses_dataframe_preview_counts(
+    project_dir,
+    mocker: MockerFixture,
+) -> None:
+    runtime = KernelRuntime(backend=mocker.Mock())
+    mocker.patch.object(
+        runtime,
+        "execute",
+        return_value=ExecutionResult(
+            status="ok",
+            stdout=(
+                '{"name": "df", "type": "DataFrame", "preview": {'
+                '"kind": "dataframe-like", '
+                '"shape": [100, 12], '
+                '"columns": ["a", "b", "c"], '
+                '"column_count": 12, '
+                '"columns_shown": 3, '
+                '"dtypes": {"a": "int64", "b": "int64"}, '
+                '"dtypes_shown": 2, '
+                '"null_counts": {"a": 0, "b": 1}, '
+                '"null_count_fields_shown": 2, '
+                '"head": [{"a": 1, "b": 2}], '
+                '"head_rows_shown": 1'
+                "}}\n"
+            ),
+            duration_ms=5,
+        ),
+    )
+
+    result = KernelIntrospection(runtime).inspect_var(project_root=project_dir, name="df")
+
+    preview = result.payload["preview"]
+    assert preview["kind"] == "dataframe-like"
+    assert preview["columns_shown"] == 3
+    assert preview["dtypes_shown"] == 2
+    assert preview["null_count_fields_shown"] == 2
+    assert preview["head_rows_shown"] == 1
+
+
+def test_kernel_introspection_parses_sequence_preview_counts(
+    project_dir,
+    mocker: MockerFixture,
+) -> None:
+    runtime = KernelRuntime(backend=mocker.Mock())
+    mocker.patch.object(
+        runtime,
+        "execute",
+        return_value=ExecutionResult(
+            status="ok",
+            stdout=(
+                '{"name": "items", "type": "list", "preview": {'
+                '"kind": "sequence-like", '
+                '"length": 8, '
+                '"sample": [{"id": 1}, {"id": 2}], '
+                '"sample_items_shown": 2, '
+                '"sample_truncated": true, '
+                '"item_type": "dict", '
+                '"sample_keys": ["id"], '
+                '"sample_keys_shown": 1'
+                "}}\n"
+            ),
+            duration_ms=5,
+        ),
+    )
+
+    result = KernelIntrospection(runtime).inspect_var(project_root=project_dir, name="items")
+
+    preview = result.payload["preview"]
+    assert preview["kind"] == "sequence-like"
+    assert preview["sample_items_shown"] == 2
+    assert preview["sample_truncated"] is True
+    assert preview["sample_keys_shown"] == 1
+
+
 @pytest.mark.parametrize(
     ("stdout", "expected_message", "expected_error_type"),
     [

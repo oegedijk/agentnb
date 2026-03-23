@@ -591,6 +591,9 @@ def _parse_inspect_preview(payload: JSONValue) -> InspectPreview | None:
         column_count = payload.get("column_count")
         if isinstance(column_count, int):
             preview["column_count"] = column_count
+        columns_shown = payload.get("columns_shown")
+        if isinstance(columns_shown, int):
+            preview["columns_shown"] = columns_shown
         dtypes = payload.get("dtypes")
         if isinstance(dtypes, dict):
             preview["dtypes"] = {
@@ -598,11 +601,17 @@ def _parse_inspect_preview(payload: JSONValue) -> InspectPreview | None:
                 for key, value in dtypes.items()
                 if isinstance(key, str) and isinstance(value, str)
             }
+        dtypes_shown = payload.get("dtypes_shown")
+        if isinstance(dtypes_shown, int):
+            preview["dtypes_shown"] = dtypes_shown
         head = payload.get("head")
         if isinstance(head, list):
             preview["head"] = [
                 cast(dict[str, JSONValue], row) for row in head if isinstance(row, dict)
             ]
+        head_rows_shown = payload.get("head_rows_shown")
+        if isinstance(head_rows_shown, int):
+            preview["head_rows_shown"] = head_rows_shown
         null_counts = payload.get("null_counts")
         if isinstance(null_counts, dict):
             preview["null_counts"] = {
@@ -610,6 +619,9 @@ def _parse_inspect_preview(payload: JSONValue) -> InspectPreview | None:
                 for key, value in null_counts.items()
                 if isinstance(key, str) and isinstance(value, int)
             }
+        null_count_fields_shown = payload.get("null_count_fields_shown")
+        if isinstance(null_count_fields_shown, int):
+            preview["null_count_fields_shown"] = null_count_fields_shown
         return preview
 
     if kind == "mapping-like":
@@ -622,12 +634,21 @@ def _parse_inspect_preview(payload: JSONValue) -> InspectPreview | None:
             or not isinstance(sample, dict)
         ):
             return None
-        return MappingPreview(
-            kind="mapping-like",
-            length=length,
-            keys=[key for key in keys if isinstance(key, str)],
-            sample=cast(dict[str, JSONValue], sample),
-        )
+        preview: MappingPreview = {
+            "kind": "mapping-like",
+            "length": length,
+            "keys": [key for key in keys if isinstance(key, str)],
+            "sample": cast(dict[str, JSONValue], sample),
+        }
+        keys_shown = payload.get("keys_shown")
+        if isinstance(keys_shown, int):
+            preview["keys_shown"] = keys_shown
+        sample_items_shown = payload.get("sample_items_shown")
+        if isinstance(sample_items_shown, int):
+            preview["sample_items_shown"] = sample_items_shown
+        if isinstance(payload.get("sample_truncated"), bool):
+            preview["sample_truncated"] = cast(bool, payload.get("sample_truncated"))
+        return preview
 
     if kind == "sequence-like":
         sample = payload.get("sample")
@@ -645,6 +666,14 @@ def _parse_inspect_preview(payload: JSONValue) -> InspectPreview | None:
         sample_keys = payload.get("sample_keys")
         if isinstance(sample_keys, list):
             preview["sample_keys"] = [key for key in sample_keys if isinstance(key, str)]
+        sample_items_shown = payload.get("sample_items_shown")
+        if isinstance(sample_items_shown, int):
+            preview["sample_items_shown"] = sample_items_shown
+        sample_keys_shown = payload.get("sample_keys_shown")
+        if isinstance(sample_keys_shown, int):
+            preview["sample_keys_shown"] = sample_keys_shown
+        if isinstance(payload.get("sample_truncated"), bool):
+            preview["sample_truncated"] = cast(bool, payload.get("sample_truncated"))
         return preview
 
     return None
@@ -920,11 +949,11 @@ def _safe_head_rows(value, limit, max_columns=10):
     return rows
 
 
-def _dtype_summary(value):
+def _dtype_summary(value, limit):
     try:
         dtypes = value.dtypes
     except Exception:
-        return None
+        return None, 0
 
     try:
         if hasattr(dtypes, "astype"):
@@ -935,11 +964,12 @@ def _dtype_summary(value):
     try:
         mapping = dtypes.to_dict()
     except Exception:
-        return None
+        return None, 0
 
     if not isinstance(mapping, dict):
-        return None
-    return {{str(key): str(item) for key, item in mapping.items()}}
+        return None, 0
+    items = list(mapping.items())[:limit]
+    return ({{str(key): str(item) for key, item in items}}, len(items))
 
 
 def _null_counts(value, limit):
@@ -951,13 +981,13 @@ def _null_counts(value, limit):
     try:
         mapping = counts.to_dict()
     except Exception:
-        return None
+        return None, 0
 
     if not isinstance(mapping, dict):
-        return None
+        return None, 0
 
     items = list(mapping.items())[:limit]
-    return {{str(key): int(item) for key, item in items}}
+    return ({{str(key): int(item) for key, item in items}}, len(items))
 
 
 def _dataframe_preview(value):
@@ -975,23 +1005,40 @@ def _dataframe_preview(value):
     except Exception:
         columns = []
 
+    dtypes, dtypes_shown = _dtype_summary(value, 10)
+    head = _safe_head_rows(value, 5)
+
     preview = {{
         "kind": "dataframe-like",
         "shape": list(shape),
         "columns": columns,
         "column_count": len(getattr(value, "columns", [])),
-        "dtypes": _dtype_summary(value),
-        "head": _safe_head_rows(value, 5),
+        "columns_shown": len(columns),
+        "head": head,
+        "head_rows_shown": len(head) if isinstance(head, list) else 0,
     }}
-    nulls = _null_counts(value, 20)
+    if dtypes is not None:
+        preview["dtypes"] = dtypes
+        preview["dtypes_shown"] = dtypes_shown
+    nulls, nulls_shown = _null_counts(value, 10)
     if nulls is not None:
         preview["null_counts"] = nulls
+        preview["null_count_fields_shown"] = nulls_shown
     return preview
+
+
+_sample_truncated = False
+
+
+def _mark_sample_truncated():
+    global _sample_truncated
+    _sample_truncated = True
 
 
 def _simple_text(value, limit):
     text = str(value)
     if len(text) > limit:
+        _mark_sample_truncated()
         return text[: limit - 3] + "..."
     return text
 
@@ -1002,9 +1049,12 @@ def _json_safe(value, depth=0):
     if isinstance(value, str):
         return _simple_text(value, 80)
     if depth >= 6:
+        _mark_sample_truncated()
         return _truncate_text(value, 80)
     _mapping = _mapping_items(value)
     if _mapping is not None:
+        if len(_mapping) > 5:
+            _mark_sample_truncated()
         _sample = {{}}
         for _index, (_key, _item) in enumerate(_mapping):
             if _index >= 5:
@@ -1012,6 +1062,8 @@ def _json_safe(value, depth=0):
             _sample[str(_key)] = _json_safe(_item, depth + 1)
         return _sample
     if isinstance(value, dict):
+        if len(value) > 5:
+            _mark_sample_truncated()
         _sample = {{}}
         for _index, (_key, _item) in enumerate(value.items()):
             if _index >= 5:
@@ -1019,7 +1071,10 @@ def _json_safe(value, depth=0):
             _sample[str(_key)] = _json_safe(_item, depth + 1)
         return _sample
     if isinstance(value, (list, tuple, set)):
+        if len(value) > 3:
+            _mark_sample_truncated()
         return [_json_safe(_item, depth + 1) for _item in list(value)[:3]]
+    _mark_sample_truncated()
     return _truncate_text(value, 80)
 
 
@@ -1036,6 +1091,8 @@ def _mapping_items(value):
 
 
 def _mapping_preview(value):
+    global _sample_truncated
+    _sample_truncated = False
     _items = _mapping_items(value)
     if _items is None:
         return None
@@ -1051,11 +1108,20 @@ def _mapping_preview(value):
         "kind": "mapping-like",
         "length": len(_items),
         "keys": _keys,
+        "keys_shown": len(_keys),
         "sample": _sample,
+        "sample_items_shown": len(_sample),
+        "sample_truncated": (
+            _sample_truncated
+            or len(_items) > len(_keys)
+            or len(_items) > len(_sample)
+        ),
     }}
 
 
 def _sequence_preview(value):
+    global _sample_truncated
+    _sample_truncated = False
     if not isinstance(value, (list, tuple, set)):
         return None
 
@@ -1065,12 +1131,15 @@ def _sequence_preview(value):
         "kind": "sequence-like",
         "length": len(_items),
         "sample": _sample,
+        "sample_items_shown": len(_sample),
+        "sample_truncated": _sample_truncated or len(_items) > len(_sample),
     }}
     if _items:
         _preview["item_type"] = type(_items[0]).__name__
         _sample_keys = _mapping_items(_items[0])
         if _sample_keys is not None:
             _preview["sample_keys"] = [str(_key) for _key, _ in _sample_keys[:10]]
+            _preview["sample_keys_shown"] = len(_preview["sample_keys"])
     return _preview
 
 

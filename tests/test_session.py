@@ -41,6 +41,10 @@ def test_session_store_roundtrip_and_stale_cleanup(project_dir: Path) -> None:
     store.save_session(session)
 
     assert store.load_session() is not None
+    staleness = store.staleness()
+    assert staleness.stale is True
+    assert staleness.reason == "missing_process"
+    assert store.load_session() is not None
     assert store.cleanup_stale() is True
     assert store.load_session() is None
     assert not connection_file.exists()
@@ -66,6 +70,7 @@ def test_session_store_ignores_untrusted_connection_file_path(project_dir: Path)
 
     assert loaded is not None
     assert loaded.connection_file == str(store.connection_file)
+    assert store.staleness(loaded).reason == "missing_process"
     assert store.cleanup_stale() is True
     assert victim.exists()
 

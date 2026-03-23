@@ -196,7 +196,11 @@ def preview_text(preview: InspectPreview) -> str:
             parts.append(f"shape=({shape[0]}, {shape[1]})")
         columns = dataframe.get("columns")
         if isinstance(columns, list) and columns:
-            parts.append(f"columns={', '.join(str(column) for column in columns[:5])}")
+            shown = ", ".join(str(column) for column in columns[:5])
+            column_count = dataframe.get("column_count")
+            if isinstance(column_count, int) and column_count > len(columns):
+                shown = shown + ", ..."
+            parts.append(f"columns={shown}")
         return " ".join(parts)
     if kind == "mapping-like":
         mapping = cast(MappingPreview, preview)
@@ -220,7 +224,17 @@ def preview_text(preview: InspectPreview) -> str:
 
 def compact_dataframe_preview(preview: DataframePreview) -> DataframePreview:
     compacted: DataframePreview = {"kind": "dataframe-like"}
-    for key in ("shape", "columns", "dtypes", "null_counts"):
+    for key in (
+        "shape",
+        "columns",
+        "column_count",
+        "columns_shown",
+        "dtypes",
+        "dtypes_shown",
+        "null_counts",
+        "null_count_fields_shown",
+        "head_rows_shown",
+    ):
         value = preview.get(key)
         if value:
             compacted[key] = value
@@ -254,8 +268,16 @@ def compact_collection_preview(
         keys = preview.get("keys")
         if isinstance(keys, list) and keys:
             compacted["keys"] = [str(item) for item in keys[:_PREVIEW_DICT_LIMIT]]
+        keys_shown = preview.get("keys_shown")
+        if isinstance(keys_shown, int):
+            compacted["keys_shown"] = keys_shown
         if isinstance(sample, dict):
             compacted["sample"] = cast(dict[str, JSONValue], _compact_jsonish(sample))
+        sample_items_shown = preview.get("sample_items_shown")
+        if isinstance(sample_items_shown, int):
+            compacted["sample_items_shown"] = sample_items_shown
+        if isinstance(preview.get("sample_truncated"), bool):
+            compacted["sample_truncated"] = cast(bool, preview.get("sample_truncated"))
         return compacted
 
     compacted: SequencePreview = {
@@ -268,8 +290,16 @@ def compact_collection_preview(
     sample_keys = preview.get("sample_keys")
     if isinstance(sample_keys, list) and sample_keys:
         compacted["sample_keys"] = [str(item) for item in sample_keys[:_PREVIEW_DICT_LIMIT]]
+    sample_keys_shown = preview.get("sample_keys_shown")
+    if isinstance(sample_keys_shown, int):
+        compacted["sample_keys_shown"] = sample_keys_shown
     if isinstance(sample, list):
         compacted["sample"] = cast(list[JSONValue], _compact_jsonish(sample))
+    sample_items_shown = preview.get("sample_items_shown")
+    if isinstance(sample_items_shown, int):
+        compacted["sample_items_shown"] = sample_items_shown
+    if isinstance(preview.get("sample_truncated"), bool):
+        compacted["sample_truncated"] = cast(bool, preview.get("sample_truncated"))
     return compacted
 
 

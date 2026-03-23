@@ -99,6 +99,18 @@ class AdvicePolicy:
                 return []
             if context.error_code == "INVALID_INPUT":
                 return []
+            if context.error_code == "TIMEOUT":
+                suggestions = [
+                    "Run `agentnb history @last-error --json` to review the latest failure.",
+                ]
+                if data.get("interrupt_recommended"):
+                    suggestions.append(
+                        "Run `agentnb interrupt --json` if execution may still be stuck."
+                    )
+                suggestions.append(
+                    "Run `agentnb reset --json` if the namespace needs a clean slate."
+                )
+                return suggestions
             if context.error_name == "ModuleNotFoundError":
                 module = _extract_module_name(context.error_value)
                 if module:

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .contracts import ExecutionSink, HelperAccessMetadata
+from .errors import RunWaitTimedOutError
 from .payloads import CancelRunResult, RunSnapshot
 from .recording import CommandRecorder
 from .runs import (
@@ -13,6 +14,7 @@ from .runs import (
     LocalRunManager,
     ManagedExecution,
     RunManager,
+    RunObservationResult,
     RunSpec,
     StartOutcome,
     _ExecutionProgressSink,
@@ -125,6 +127,25 @@ class ExecutionService:
             poll_interval_s=poll_interval_s,
         )
 
+    def observe_run(
+        self,
+        *,
+        project_root: Path,
+        execution_id: str,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+        event_sink: ExecutionSink | None = None,
+        skip_history: bool = False,
+    ) -> RunObservationResult:
+        return self._run_manager.follow_run(
+            project_root=project_root,
+            execution_id=execution_id,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            observer=event_sink,
+            skip_history=skip_history,
+        )
+
     def follow_run(
         self,
         *,
@@ -135,14 +156,17 @@ class ExecutionService:
         event_sink: ExecutionSink | None = None,
         skip_history: bool = False,
     ) -> RunSnapshot:
-        return self._run_manager.follow_run(
+        observation = self.observe_run(
             project_root=project_root,
             execution_id=execution_id,
             timeout_s=timeout_s,
             poll_interval_s=poll_interval_s,
-            observer=event_sink,
+            event_sink=event_sink,
             skip_history=skip_history,
         )
+        if observation.completion_reason == "window_elapsed":
+            raise RunWaitTimedOutError(timeout_s)
+        return observation.run
 
     def cancel_run(
         self,

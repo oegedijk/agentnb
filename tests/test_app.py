@@ -28,6 +28,8 @@ from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry
 from agentnb.ops import NotebookOps
+from agentnb.payloads import RunSnapshot
+from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
 from agentnb.selectors import parse_history_reference, parse_run_reference
 from agentnb.state import CommandLockInfo
@@ -786,12 +788,15 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     executions = Mock(spec=ExecutionService)
     sink = DummySink()
-    executions.follow_run.return_value = {
-        "execution_id": "run-1",
-        "session_id": "analysis",
-        "status": "ok",
-        "result": "2",
-    }
+    executions.observe_run.return_value = RunObservationResult(
+        run={
+            "execution_id": "run-1",
+            "session_id": "analysis",
+            "status": "ok",
+            "result": "2",
+        },
+        completion_reason="terminal",
+    )
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     response = app.runs_follow(
@@ -806,9 +811,9 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     assert response.status == "ok"
     assert response.session_id == "analysis"
     assert response.data["run"]["execution_id"] == "run-1"
-    executions.follow_run.assert_called_once()
+    executions.observe_run.assert_called_once()
     _assert_called_with_subset(
-        executions.follow_run,
+        executions.observe_run,
         project_root=project_dir.resolve(),
         execution_id="run-1",
         timeout_s=4.0,
@@ -897,9 +902,21 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
         "recorded_ename": "KeyboardInterrupt",
         "outputs": [{"kind": "result", "text": "2", "mime": {"text/plain": "2"}}],
     }
+    observed_run: RunSnapshot = {
+        "execution_id": "run-1",
+        "session_id": "analysis",
+        "status": "error",
+        "result": "2",
+        "terminal_reason": "cancelled",
+        "cancel_requested": True,
+        "recorded_ename": "KeyboardInterrupt",
+    }
     executions.get_run.return_value = dict(run_payload)
     executions.wait_for_run.return_value = dict(run_payload)
-    executions.follow_run.return_value = dict(run_payload)
+    executions.observe_run.return_value = RunObservationResult(
+        run=observed_run,
+        completion_reason="terminal",
+    )
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     if command_name == "show":
@@ -917,7 +934,7 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
         )
     else:
         response = app.runs_follow(request_factory(project_dir), event_sink=sink)
-        executions.follow_run.assert_called_once_with(
+        executions.observe_run.assert_called_once_with(
             project_root=project_dir.resolve(),
             execution_id="run-1",
             timeout_s=4.0,
@@ -933,6 +950,34 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
     assert response.data["run"]["terminal_reason"] == "cancelled"
     assert response.data["run"]["cancel_requested"] is True
     assert response.data["run"]["recorded_ename"] == "KeyboardInterrupt"
+
+
+def test_app_runs_follow_translates_elapsed_window_into_timeout(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    executions = Mock(spec=ExecutionService)
+    sink = DummySink()
+    executions.observe_run.return_value = RunObservationResult(
+        run={
+            "execution_id": "run-1",
+            "session_id": "analysis",
+            "status": "running",
+        },
+        completion_reason="window_elapsed",
+    )
+    app = AgentNBApp(runtime=runtime, executions=executions)
+
+    response = app.runs_follow(
+        RunsFollowRequest(
+            project_root=project_dir,
+            run_reference=parse_run_reference("run-1"),
+            timeout_s=4.0,
+        ),
+        event_sink=sink,
+    )
+
+    assert response.status == "error"
+    assert response.error is not None
+    assert response.error.code == "TIMEOUT"
 
 
 def test_app_sessions_list_routes_through_handle_command(project_dir) -> None:

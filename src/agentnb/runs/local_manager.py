@@ -20,7 +20,7 @@ from ..recording import CommandRecorder, CommandRecording
 from ..session import pid_exists
 from .executor import LocalRunExecutor, RunExecutor
 from .manager import RunManager
-from .models import RunObserver, RunPlan, RunSpec
+from .models import RunObservationResult, RunObserver, RunPlan, RunSpec
 from .store import (
     ExecutionRecord,
     ExecutionRun,
@@ -114,11 +114,14 @@ class LocalRunManager(RunManager):
         poll_interval_s: float = 0.1,
         observer: RunObserver | None = None,
         skip_history: bool = False,
-    ) -> RunSnapshot:
+    ) -> RunObservationResult:
         """Replay and then stream events for a run until it finishes."""
         deadline = time.monotonic() + timeout_s
         emitted_events = 0
         started_observer = False
+        replayed_event_count = 0
+        emitted_event_count = 0
+        initial_replay_pending = False
         while True:
             record = self._load_run(project_root=project_root, execution_id=execution_id)
             if record is None:
@@ -132,16 +135,36 @@ class LocalRunManager(RunManager):
                     session_id=record.session_id,
                 )
                 started_observer = True
+                initial_replay_pending = not skip_history
                 if skip_history:
                     emitted_events = len(record.events)
             if observer is not None:
-                for event in record.events[emitted_events:]:
+                new_events = record.events[emitted_events:]
+                for event in new_events:
                     observer.accept(event)
+                if initial_replay_pending:
+                    replayed_event_count += len(new_events)
+                    initial_replay_pending = False
+                else:
+                    emitted_event_count += len(new_events)
                 emitted_events = len(record.events)
             if record.status not in _ACTIVE_RUN_STATUSES:
-                return record.to_dict()
+                payload = record.to_dict()
+                return RunObservationResult(
+                    run=payload,
+                    completion_reason="terminal",
+                    replayed_event_count=replayed_event_count,
+                    emitted_event_count=emitted_event_count,
+                )
             if time.monotonic() >= deadline:
-                raise RunWaitTimedOutError(timeout_s)
+                payload = record.to_dict()
+                payload["snapshot_stale"] = True
+                return RunObservationResult(
+                    run=payload,
+                    completion_reason="window_elapsed",
+                    replayed_event_count=replayed_event_count,
+                    emitted_event_count=emitted_event_count,
+                )
             time.sleep(poll_interval_s)
 
     def cancel_run(

@@ -23,7 +23,7 @@ from .contracts import (
     error_response,
     success_response,
 )
-from .errors import AgentNBException, KernelWaitTimedOutError
+from .errors import AgentNBException, KernelWaitTimedOutError, RunWaitTimedOutError
 from .execution import ExecutionService, ManagedExecution
 from .execution_invocation import ExecInvocationPolicy, ExecSourceKind, OutputSelector
 from .introspection import HelperExecutionPolicy
@@ -407,14 +407,13 @@ class AgentNBApp:
         )
 
     def _sessions_delete_bulk_payload(self, request: SessionsDeleteBulkRequest) -> BulkDeleteResult:
-        sessions = self.runtime.list_sessions(project_root=request.project_root)
+        if request.stale_only:
+            deleted = self.runtime.cleanup_stale_sessions(project_root=request.project_root)
+            return {"deleted": deleted, "count": len(deleted)}
+
         deleted: list[str] = []
-        for session in sessions:
-            sid = session.get("session_id")
-            if not isinstance(sid, str):
-                continue
-            if request.stale_only and session.get("alive"):
-                continue
+        for session in self.runtime.session_inventory(project_root=request.project_root):
+            sid = session.session_id
             try:
                 self.runtime.delete_session(project_root=request.project_root, session_id=sid)
                 deleted.append(sid)
@@ -826,13 +825,16 @@ class AgentNBApp:
             default_behavior=default_behavior,
         )
         if event_sink is not None:
-            run = self.executions.follow_run(
+            observation = self.executions.observe_run(
                 project_root=project_root,
                 execution_id=execution_id,
                 timeout_s=30.0 if timeout_s is None else timeout_s,
                 event_sink=event_sink,
                 skip_history=skip_history,
             )
+            if observation.completion_reason == "window_elapsed":
+                raise RunWaitTimedOutError(30.0 if timeout_s is None else timeout_s)
+            run = observation.run
         elif timeout_s is not None:
             run = self.executions.wait_for_run(
                 project_root=project_root,

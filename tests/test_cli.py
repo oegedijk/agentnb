@@ -27,6 +27,8 @@ from agentnb.execution_output import OutputItem
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
+from agentnb.payloads import RunSnapshot
+from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelWaitResult
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
@@ -2279,25 +2281,24 @@ def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir:
             "follow",
             lambda cli: setattr(
                 cli.executions,
-                "follow_run",
+                "observe_run",
                 lambda **kwargs: (
                     _event_sink(kwargs).started(
                         execution_id="run-1",
                         session_id="default",
                     ),
-                    {
-                        "execution_id": "run-1",
-                        "session_id": "default",
-                        "status": "ok",
-                        "result": "2",
-                        "outputs": [
+                    RunObservationResult(
+                        run=cast(
+                            RunSnapshot,
                             {
-                                "kind": "result",
-                                "text": "2",
-                                "mime": {"text/plain": "2"},
-                            }
-                        ],
-                    },
+                                "execution_id": "run-1",
+                                "session_id": "default",
+                                "status": "ok",
+                                "result": "2",
+                            },
+                        ),
+                        completion_reason="terminal",
+                    ),
                 )[-1],
             ),
         ),
@@ -2334,23 +2335,29 @@ def test_cli_runs_follow_stream_json_emits_events_and_final(
 ) -> None:
     import agentnb.cli as cli
 
-    def follow_stub(**kwargs: object) -> dict[str, object]:
+    def follow_stub(**kwargs: object) -> RunObservationResult:
         sink = _event_sink(kwargs)
         sink.started(execution_id="run-1", session_id="default")
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         sink.accept(ExecutionEvent(kind="result", content="2"))
-        return {
-            "execution_id": "run-1",
-            "session_id": "default",
-            "status": "ok",
-            "result": "2",
-            "events": [
-                {"kind": "stdout", "content": "hello\n", "metadata": {}},
-                {"kind": "result", "content": "2", "metadata": {}},
-            ],
-        }
+        return RunObservationResult(
+            run=cast(
+                RunSnapshot,
+                {
+                    "execution_id": "run-1",
+                    "session_id": "default",
+                    "status": "ok",
+                    "result": "2",
+                    "events": [
+                        {"kind": "stdout", "content": "hello\n", "metadata": {}},
+                        {"kind": "result", "content": "2", "metadata": {}},
+                    ],
+                },
+            ),
+            completion_reason="terminal",
+        )
 
-    cli.executions.follow_run = follow_stub  # type: ignore[method-assign]
+    cli.executions.observe_run = follow_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,

@@ -27,12 +27,17 @@ from .kernel.backend import (
 )
 from .kernel.provisioner import KernelProvisioner
 from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
-from .session import DEFAULT_SESSION_ID, SessionInfo, SessionStore, pid_exists
+from .session import (
+    DEFAULT_SESSION_ID,
+    SessionInfo,
+    SessionStore,
+    StaleSessionReason,
+)
 from .state import CommandLockInfo, StateRepository
 
 WaitedFor = Literal["ready", "idle"]
 RuntimeStateKind = Literal["missing", "starting", "ready", "busy", "dead", "stale"]
-RuntimeStaleReason = Literal["missing_process", "missing_connection_file"]
+RuntimeStaleReason = StaleSessionReason
 
 
 @dataclass(slots=True, frozen=True)
@@ -86,6 +91,42 @@ class RuntimeState:
 
 
 @dataclass(slots=True, frozen=True)
+class SessionInventoryEntry:
+    session_id: str
+    runtime_state: RuntimeStateKind
+    session: SessionInfo
+    kernel_status: KernelStatus
+    command_lock: CommandLockInfo | None = None
+    stale_reason: RuntimeStaleReason | None = None
+    cleanup_actionable: bool = False
+
+    @property
+    def alive(self) -> bool:
+        return self.runtime_state in {"ready", "busy"}
+
+    @property
+    def stale(self) -> bool:
+        return self.runtime_state == "stale"
+
+
+@dataclass(slots=True, frozen=True)
+class TimeoutRecovery:
+    current_runtime_state: RuntimeStateKind
+    session_busy: bool
+    interrupt_recommended: bool
+    active_execution_id: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "current_runtime_state": self.current_runtime_state,
+            "session_busy": self.session_busy,
+            "interrupt_recommended": self.interrupt_recommended,
+        }
+        payload["active_execution_id"] = self.active_execution_id
+        return payload
+
+
+@dataclass(slots=True, frozen=True)
 class SessionResolutionPolicy:
     require_live_session: bool
     prefer_current_session: bool = True
@@ -134,7 +175,7 @@ class KernelRuntime:
         if state.kind in {"ready", "busy"}:
             return state.to_kernel_status(), False
         if state.session is not None:
-            store.clear_session()
+            store.delete_session()
 
         provisioner = self._provisioner_factory(store.project_root)
         provisioned = provisioner.provision(preferred_python=python_executable)
@@ -151,18 +192,16 @@ class KernelRuntime:
         return status, True
 
     def status(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> KernelStatus:
-        store, state = self._resolve_runtime_state(
+        _, state = self._resolve_runtime_state(
             project_root=project_root,
             session_id=session_id,
         )
-        if state.kind == "dead":
-            store.clear_session()
         return state.to_kernel_status()
 
     def stop(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
         store, session = self._require_session(project_root=project_root, session_id=session_id)
         self._backend.stop(session)
-        store.clear_session()
+        store.delete_session()
         self.clear_current_session_id(project_root=project_root, expected_session_id=session_id)
         self._hooks.on_kernel_stop(store.project_root, store.session_id, session)
 
@@ -183,6 +222,21 @@ class KernelRuntime:
     ) -> tuple[KernelStatus, bool]:
         return self.start(project_root=project_root, session_id=session_id)
 
+    def session_inventory(
+        self,
+        project_root: Path,
+        *,
+        probe_backend: bool = True,
+    ) -> list[SessionInventoryEntry]:
+        return [
+            self._session_inventory_entry(
+                project_root=project_root,
+                session=session,
+                probe_backend=probe_backend,
+            )
+            for session in SessionStore.list_sessions(project_root)
+        ]
+
     def list_sessions(
         self,
         project_root: Path,
@@ -191,31 +245,11 @@ class KernelRuntime:
     ) -> list[SessionSummary]:
         current_session_id = self.current_session_id(project_root=project_root)
         entries: list[SessionSummary] = []
-        for session in SessionStore.list_sessions(project_root):
-            store = SessionStore(project_root=project_root, session_id=session.session_id)
-            if not probe_backend:
-                if not pid_exists(session.pid) or not Path(session.connection_file).exists():
-                    continue
-                command_lock = store.command_lock_info()
-                status = KernelStatus(
-                    alive=True,
-                    pid=session.pid,
-                    connection_file=session.connection_file,
-                    started_at=session.started_at,
-                    python=session.python_executable,
-                    busy=command_lock is not None,
-                )
-                current = session
-            else:
-                store, state = self._resolve_runtime_state(
-                    project_root=project_root,
-                    session_id=session.session_id,
-                )
-                if state.kind not in {"ready", "busy"} or state.session is None:
-                    store.delete_session()
-                    continue
-                status = state.to_kernel_status()
-                current = state.session
+        for entry in self.session_inventory(project_root=project_root, probe_backend=probe_backend):
+            if not entry.alive:
+                continue
+            current = entry.session
+            status = entry.kernel_status
             entries.append(
                 {
                     "session_id": current.session_id,
@@ -234,14 +268,17 @@ class KernelRuntime:
 
     def delete_session(self, project_root: Path, session_id: str) -> DeleteSessionResult:
         store = SessionStore(project_root=project_root, session_id=session_id)
-        store.cleanup_stale()
         session = store.load_session()
         if session is None:
             raise SessionNotFoundError(session_id)
 
-        status = self._backend.status(session)
-        stopped = status.alive
-        if status.alive:
+        entry = self._session_inventory_entry(
+            project_root=project_root,
+            session=session,
+            probe_backend=True,
+        )
+        stopped = entry.alive
+        if entry.alive:
             self._backend.stop(session)
 
         store.delete_session()
@@ -251,6 +288,20 @@ class KernelRuntime:
             "session_id": session_id,
             "stopped_running_kernel": stopped,
         }
+
+    def cleanup_stale_sessions(self, project_root: Path) -> list[str]:
+        deleted: list[str] = []
+        for entry in self.session_inventory(project_root=project_root, probe_backend=True):
+            if not entry.cleanup_actionable:
+                continue
+            store = SessionStore(project_root=project_root, session_id=entry.session_id)
+            store.delete_session()
+            self.clear_current_session_id(
+                project_root=project_root,
+                expected_session_id=entry.session_id,
+            )
+            deleted.append(entry.session_id)
+        return deleted
 
     def resolve_session_id(
         self,
@@ -281,8 +332,11 @@ class KernelRuntime:
                 return preferred_session_id
             return DEFAULT_SESSION_ID
 
-        sessions = self.list_sessions(project_root=project_root, probe_backend=False)
-        live_session_ids = [str(session["session_id"]) for session in sessions]
+        live_session_ids = [
+            str(session["session_id"])
+            for session in self.list_sessions(project_root=project_root, probe_backend=False)
+            if isinstance(session.get("session_id"), str) and session["session_id"]
+        ]
         if (
             live_session_ids
             and policy.error_on_multiple_live_sessions
@@ -305,8 +359,11 @@ class KernelRuntime:
     def _check_session_prefix_collision(
         self, *, project_root: Path, requested_session_id: str
     ) -> None:
-        sessions = self.list_sessions(project_root=project_root, probe_backend=False)
-        live_ids = [str(session["session_id"]) for session in sessions]
+        live_ids = [
+            str(session["session_id"])
+            for session in self.list_sessions(project_root=project_root, probe_backend=False)
+            if isinstance(session.get("session_id"), str) and session["session_id"]
+        ]
         if not live_ids:
             return
         if requested_session_id in live_ids:
@@ -314,6 +371,60 @@ class KernelRuntime:
         prefix_matches = [sid for sid in live_ids if sid.startswith(requested_session_id)]
         if prefix_matches:
             raise AmbiguousSessionError(prefix_matches)
+
+    def _session_inventory_entry(
+        self,
+        *,
+        project_root: Path,
+        session: SessionInfo,
+        probe_backend: bool,
+    ) -> SessionInventoryEntry:
+        store = SessionStore(project_root=project_root, session_id=session.session_id)
+        normalized = store._normalize_session(session)
+        if not probe_backend:
+            staleness = store.staleness(normalized)
+            command_lock = store.command_lock_info()
+            if staleness.stale:
+                return SessionInventoryEntry(
+                    session_id=normalized.session_id,
+                    runtime_state="stale",
+                    session=normalized,
+                    kernel_status=KernelStatus(alive=False),
+                    stale_reason=staleness.reason,
+                    cleanup_actionable=True,
+                )
+            status = KernelStatus(
+                alive=True,
+                pid=normalized.pid,
+                connection_file=normalized.connection_file,
+                started_at=normalized.started_at,
+                python=normalized.python_executable,
+                busy=command_lock is not None,
+            )
+            return SessionInventoryEntry(
+                session_id=normalized.session_id,
+                runtime_state="busy" if command_lock is not None else "ready",
+                session=normalized,
+                kernel_status=status,
+                command_lock=command_lock,
+            )
+
+        _, state = self._resolve_runtime_state(
+            project_root=project_root,
+            session_id=normalized.session_id,
+        )
+        runtime_state = state.kind
+        if state.session is not None:
+            normalized = state.session
+        return SessionInventoryEntry(
+            session_id=normalized.session_id,
+            runtime_state=runtime_state,
+            session=normalized,
+            kernel_status=state.to_kernel_status(),
+            command_lock=state.command_lock,
+            stale_reason=state.stale_reason,
+            cleanup_actionable=runtime_state in {"stale", "dead"},
+        )
 
     def current_session_id(self, *, project_root: Path) -> str | None:
         return StateRepository(project_root).session_preferences().current_session_id
@@ -492,9 +603,9 @@ class KernelRuntime:
             with store.acquire_command_lock() as lock_acquired:
                 if not lock_acquired:
                     raise self._session_busy_error(store)
+                if before_backend is not None:
+                    before_backend()
                 try:
-                    if before_backend is not None:
-                        before_backend()
                     result = self._backend.execute(
                         session=session,
                         code=code,
@@ -503,9 +614,20 @@ class KernelRuntime:
                     )
                 except BackendExecutionTimeout as exc:
                     self._backend.interrupt(session)
-                    elapsed_ms = int((time.monotonic() - exec_started) * 1000)
-                    raise ExecutionTimedOutError(timeout_s, duration_ms=elapsed_ms) from exc
+                    timeout_error = exc
+                else:
+                    timeout_error = None
 
+            if timeout_error is not None:
+                elapsed_ms = int((time.monotonic() - exec_started) * 1000)
+                raise self._execution_timeout_error(
+                    project_root=project_root,
+                    session_id=session_id,
+                    timeout_s=timeout_s,
+                    duration_ms=elapsed_ms,
+                ) from timeout_error
+
+            assert result is not None
             return result
         except Exception as exc:
             error = exc
@@ -577,7 +699,7 @@ class KernelRuntime:
         )
         payload = cast(DoctorPayload, report.to_dict())
         status = state.to_kernel_status()
-        payload["stale_session_cleaned"] = state.kind == "stale"
+        payload["stale_session_cleaned"] = False
         payload["session_exists"] = state.session_exists
         payload["kernel_alive"] = status.alive
         payload["kernel_pid"] = status.pid
@@ -628,19 +750,16 @@ class KernelRuntime:
                 kernel_status=KernelStatus(alive=False),
             )
 
-        if not pid_exists(session.pid) or not Path(session.connection_file).exists():
-            stale_reason: RuntimeStaleReason = (
-                "missing_process" if not pid_exists(session.pid) else "missing_connection_file"
-            )
-            store.cleanup_stale()
+        staleness = store.staleness(session)
+        if staleness.stale:
             return store, RuntimeState(
                 kind="stale",
                 session_id=session.session_id,
                 session=session,
                 kernel_status=KernelStatus(alive=False),
                 observed_session_record=observed_session_record,
-                has_connection_file=False,
-                stale_reason=stale_reason,
+                has_connection_file=staleness.connection_file_exists,
+                stale_reason=staleness.reason,
             )
 
         backend_status = self._backend.status(session)
@@ -692,4 +811,28 @@ class KernelRuntime:
             lock_pid=command_lock.pid if command_lock is not None else None,
             lock_acquired_at=command_lock.acquired_at if command_lock is not None else None,
             busy_for_ms=command_lock.busy_for_ms() if command_lock is not None else None,
+        )
+
+    def _execution_timeout_error(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        timeout_s: float,
+        duration_ms: int,
+    ) -> ExecutionTimedOutError:
+        recovery = self._timeout_recovery(project_root=project_root, session_id=session_id)
+        return ExecutionTimedOutError(
+            timeout_s,
+            duration_ms=duration_ms,
+            data=recovery.to_dict(),
+        )
+
+    def _timeout_recovery(self, *, project_root: Path, session_id: str) -> TimeoutRecovery:
+        state = self.runtime_state(project_root=project_root, session_id=session_id)
+        interrupt_recommended = state.kind in {"busy", "starting"}
+        return TimeoutRecovery(
+            current_runtime_state=state.kind,
+            session_busy=bool(state.busy),
+            interrupt_recommended=interrupt_recommended,
         )

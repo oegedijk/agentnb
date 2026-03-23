@@ -19,6 +19,7 @@ from agentnb.execution import (
 from agentnb.execution_output import OutputItem
 from agentnb.history import HistoryRecord
 from agentnb.runs import ManagedExecution, RunSpec
+from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelRuntime
 
 
@@ -484,7 +485,10 @@ def test_execution_service_wait_for_run_delegates_to_run_manager(project_dir: Pa
 def test_execution_service_follow_run_delegates_observer_to_run_manager(project_dir: Path) -> None:
     runtime = KernelRuntime(backend=Mock())
     run_manager = Mock()
-    run_manager.follow_run.return_value = {"execution_id": "run-1", "status": "ok"}
+    run_manager.follow_run.return_value = RunObservationResult(
+        run={"execution_id": "run-1", "status": "ok"},
+        completion_reason="terminal",
+    )
 
     class Sink(ExecutionSink):
         def started(self, *, execution_id: str, session_id: str) -> None:
@@ -512,6 +516,27 @@ def test_execution_service_follow_run_delegates_observer_to_run_manager(project_
         observer=sink,
         skip_history=False,
     )
+
+
+def test_execution_service_observe_run_returns_observation(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    run_manager = Mock()
+    observation = RunObservationResult(
+        run={"execution_id": "run-1", "status": "running"},
+        completion_reason="window_elapsed",
+        replayed_event_count=1,
+        emitted_event_count=0,
+    )
+    run_manager.follow_run.return_value = observation
+
+    service = ExecutionService(runtime, run_manager=run_manager)
+    result = service.observe_run(
+        project_root=project_dir,
+        execution_id="run-1",
+        timeout_s=3.0,
+    )
+
+    assert result is observation
 
 
 def test_execution_service_cancel_run_delegates_to_run_manager(project_dir: Path) -> None:

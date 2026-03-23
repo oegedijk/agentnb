@@ -9,6 +9,8 @@ from pytest_mock import MockerFixture
 from agentnb.errors import InvalidInputError, ProvisioningError
 from agentnb.kernel.provisioner import DoctorCheck, InterpreterSelection, KernelProvisioner
 
+FIXTURE_PROJECT = Path(__file__).resolve().parent / "fixtures" / "missing_ipykernel_project"
+
 
 def _touch(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,3 +232,16 @@ def test_doctor_reports_python_selection_errors(project_dir: Path, mocker: Mocke
             fix_hint="Provide a valid Python path with --python.",
         )
     ]
+
+
+def test_fixture_project_reproduces_missing_ipykernel_recovery() -> None:
+    report = KernelProvisioner(FIXTURE_PROJECT).doctor()
+
+    assert report.ready is False
+    assert report.python_source == "project_venv"
+    assert report.selected_python == str(FIXTURE_PROJECT / ".venv" / "bin" / "python")
+    ipykernel_check = next(check for check in report.checks if check.name == "ipykernel")
+    assert ipykernel_check.status == "warn"
+    assert ipykernel_check.fix_hint == (
+        'Run: uv add ipykernel. Then restart with `agentnb --fresh "..."`.'
+    )

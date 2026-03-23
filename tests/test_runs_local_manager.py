@@ -108,7 +108,7 @@ def test_local_run_manager_cancel_run_requires_interrupt_capability(project_dir:
         manager.cancel_run(project_root=project_dir, execution_id="run-1")
 
 
-def test_local_run_manager_submit_background_persists_starting_record(
+def test_local_run_manager_submit_background_persists_running_record(
     project_dir: Path, mocker
 ) -> None:
     runtime = _runtime()
@@ -128,8 +128,8 @@ def test_local_run_manager_submit_background_persists_starting_record(
 
     stored = ExecutionStore(project_dir).get(managed.record.execution_id)
     assert stored is not None
-    assert stored.status == "starting"
-    assert stored.worker_pid is None
+    assert stored.status == "running"
+    assert stored.worker_pid == 456
     assert managed.record.status == "running"
     assert managed.record.worker_pid == 456
 

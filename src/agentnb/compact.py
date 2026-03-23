@@ -5,7 +5,11 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 from .execution_output import preview_from_result_text
-from .history import summarize_history_text
+from .history import (
+    summarize_history_lines_inline,
+    summarize_history_multiline,
+    summarize_history_text,
+)
 from .journal import JournalEntry
 from .payloads import (
     CompactExecPayloadInput,
@@ -212,6 +216,11 @@ def preview_text(preview: InspectPreview) -> str:
         keys = mapping.get("keys")
         if isinstance(keys, list) and keys:
             parts.append(f"keys={', '.join(str(key) for key in keys[:5])}")
+        sample = mapping.get("sample")
+        if isinstance(sample, dict) and sample:
+            summary = summarize_history_text(str(sample), limit=80)
+            if summary is not None:
+                parts.append(f"sample={summary}")
         return " ".join(parts)
     if kind == "sequence-like":
         sequence = cast(SequencePreview, preview)
@@ -222,6 +231,11 @@ def preview_text(preview: InspectPreview) -> str:
         sample_keys = sequence.get("sample_keys")
         if isinstance(sample_keys, list) and sample_keys:
             parts.append(f"keys={', '.join(str(key) for key in sample_keys[:5])}")
+        sample = sequence.get("sample")
+        if isinstance(sample, list) and sample:
+            summary = summarize_history_text(str(sample[0]), limit=80)
+            if summary is not None:
+                parts.append(f"sample={summary}")
         return " ".join(parts)
     return str(preview)
 
@@ -366,7 +380,7 @@ def compact_history_entry(entry: JournalEntry) -> HistoryEntryPayload:
     if execution_id is not None:
         compacted["execution_id"] = execution_id
     if entry.user_visible and entry.code is not None:
-        summary = summarize_history_text(entry.code)
+        summary = summarize_history_multiline(entry.code, limit=_RESULT_LIMIT)
         if summary is not None:
             compacted["code"] = summary
     return compacted
@@ -419,7 +433,7 @@ def summarize_exec_label(value: str | None, limit: int = _HISTORY_INPUT_LIMIT) -
     if value is None:
         return None
 
-    compact = " ".join(value.strip().split())
+    compact = summarize_history_lines_inline(value, limit=limit * 2)
     if not compact:
         return None
 

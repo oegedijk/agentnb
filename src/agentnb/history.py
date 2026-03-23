@@ -274,6 +274,39 @@ def summarize_history_text(value: str | None, limit: int = _PREVIEW_LIMIT) -> st
     return compact[: limit - 3] + "..."
 
 
+def summarize_history_lines_inline(
+    value: str | None,
+    *,
+    limit: int = _PREVIEW_LIMIT,
+    separator: str = " | ",
+) -> str | None:
+    lines = _normalized_history_lines(value)
+    if not lines:
+        return None
+    compact = separator.join(lines)
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def summarize_history_multiline(
+    value: str | None,
+    *,
+    limit: int = _PREVIEW_LIMIT,
+    max_lines: int = 3,
+) -> str | None:
+    lines = _normalized_history_lines(value)
+    if not lines:
+        return None
+    preview_lines = lines[:max_lines]
+    compact = "\n".join(preview_lines)
+    if len(lines) > max_lines:
+        compact = f"{compact}\n..."
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip("\n") + "..."
+
+
 def _resolve_execution_metadata(
     *,
     execution: ExecutionResult | None,
@@ -319,6 +352,12 @@ def _resolve_execution_metadata(
         summarize_history_text(resolved_result),
         summarize_history_text(resolved_stdout),
     )
+
+
+def _normalized_history_lines(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    return [" ".join(line.split()) for line in value.strip().splitlines() if line.strip()]
 
 
 def execution_output_from_execution_result(execution: ExecutionResult):

@@ -129,7 +129,7 @@ def root_options(func):
 @click.group(
     cls=AgentGroup,
     invoke_without_command=True,
-    context_settings={"help_option_names": ["--help", "-h"]},
+    context_settings={"help_option_names": ["--help", "-h"], "max_content_width": 100},
 )
 @click.version_option(version=__version__, prog_name="agentnb")
 @root_options
@@ -503,22 +503,26 @@ def exec_cmd(
 ) -> None:
     """Execute code in the live kernel.
 
-    Provide code as an argument, with --file, or through stdin. The target
-    session starts automatically unless you pass --no-ensure-started, which
-    makes missing-session startup fail fast instead. Like a notebook cell, the
-    final expression is returned as the execution result, while `print(...)`
-    writes to stdout. Quiet file execution can return a compact namespace
-    change summary when a script ends in assignments instead of a final
-    expression. `--fresh` restarts the whole session process before executing;
-    use `reset` when you only want to clear user state in the existing
-    process.
+    \b
+    Provide code as an argument, with --file, or through stdin.
+    The target session starts automatically unless you pass --no-ensure-started.
+    Like a notebook cell, the final expression is returned as the execution result.
+    `print(...)` writes to stdout.
+    Quiet file execution can return a compact namespace change summary.
+    `--fresh` restarts the whole session process before executing.
+    Use `reset` when you only want to clear user state in the existing process.
 
+    \b
     Examples:
 
       agentnb "1 + 1" --json
+
       agentnb analysis.py --json
+
       agentnb --background "long_task()" --json
+
       agentnb exec --no-ensure-started "1 + 1" --json
+
       agentnb exec --json <<'PY'
       import pandas as pd
       df = pd.read_csv("tips.csv")
@@ -832,12 +836,18 @@ def history(
 ) -> None:
     """Show recent execution history recorded for the project.
 
-    By default, this shows semantic user-visible steps such as exec, vars,
-    inspect, reload, and reset. Pass --all to include internal helper
-    executions such as the helper calls behind `vars`, `inspect`, and
-    `reload`. Selectors such as `@latest`, `@last-error`, and
-    `@last-success` are supported for REFERENCE. History entries are compact
-    summaries by default; use --full to see complete stored code and output.
+    \b
+    By default, this shows semantic user-visible steps such as exec, vars, inspect, reload,
+    and reset.
+    Pass --all to include internal helper executions such as the helper calls behind `vars`,
+    `inspect`, and `reload`.
+
+    \b
+    Selectors for REFERENCE: `@latest`, `@last-error`, `@last-success`
+
+    \b
+    History entries are compact summaries by default.
+    Use --full to see complete stored code and output.
     """
 
     request = HistoryRequest(
@@ -1081,7 +1091,11 @@ def runs_wait(
 @runs_group.command("follow")
 @click.argument("run_reference", required=False, callback=_run_reference_callback)
 @click.option("--timeout", default=30.0, show_default=True, type=float)
-@click.option("--tail", is_flag=True, help="Skip historical events and only stream new ones.")
+@click.option(
+    "--tail",
+    is_flag=True,
+    help="Compatibility alias. `runs follow` already streams only new events.",
+)
 @project_option
 @json_option
 def runs_follow(
@@ -1091,10 +1105,11 @@ def runs_follow(
     project: Path | None,
     as_json: bool,
 ) -> None:
-    """Replay and stream events for one persisted run until it finishes.
+    """Stream new events for one persisted run until it finishes.
 
     Omit RUN_REFERENCE to follow the active relevant run when there is a safe
-    default. Use --tail to skip historical events and only stream new ones.
+    default. Historical output is available from `runs show`; `runs follow`
+    streams only unseen events. `--tail` remains as a compatibility alias.
     """
     project_root = resolve_project_root(cwd=Path.cwd(), override=project)
     options = _current_render_options(local_as_json=as_json)
@@ -1157,6 +1172,7 @@ def _append_help_text(command: click.Command, extra: str) -> None:
 
 
 _CLEANUP_PRIMITIVE_COMPARISON = (
+    "\b\n"
     "Cleanup primitives:\n"
     "  reset: clear user variables in the current process.\n"
     "  exec --fresh: stop and restart the session, then execute code.\n"
@@ -1164,9 +1180,10 @@ _CLEANUP_PRIMITIVE_COMPARISON = (
 )
 
 _HISTORY_ALL_GUIDE = (
-    "`history` shows semantic user-visible steps by default. Use `--all` when you need "
-    "helper/provenance entries such as the internal calls behind `vars`, `inspect`, "
-    "or `reload`."
+    "\b\n"
+    "`history` shows semantic user-visible steps by default.\n"
+    "Use `--all` when you need helper/provenance entries such as the internal calls\n"
+    "behind `vars`, `inspect`, or `reload`."
 )
 
 _SESSIONS_VISIBILITY_GUIDE = (
@@ -1175,9 +1192,10 @@ _SESSIONS_VISIBILITY_GUIDE = (
 )
 
 _RUNS_FOLLOW_WINDOW_GUIDE = (
-    "`--timeout` bounds the observation window for `runs follow`. If the window ends "
-    "before the run finishes, agentnb returns the latest snapshot instead of failing "
-    "with a timeout error."
+    "\b\n"
+    "`--timeout` bounds the observation window for `runs follow`.\n"
+    "If the window ends before the run finishes, agentnb returns the latest snapshot\n"
+    "instead of failing with a timeout error."
 )
 
 _append_help_text(main, _CLEANUP_PRIMITIVE_COMPARISON)

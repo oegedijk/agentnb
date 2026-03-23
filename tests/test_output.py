@@ -319,6 +319,28 @@ def test_render_human_exec_selected_output_returns_selected_text_only() -> None:
     assert render_human(response, options=RenderOptions()) == "exact output"
 
 
+def test_render_human_exec_prefers_bounded_preview_for_large_structured_result() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data={
+            "result": "[{'a': 0, 'b': 0, 'c': 0}, {'a': 1, 'b': 2, 'c': 3}]",
+            "result_preview": {
+                "kind": "sequence-like",
+                "length": 20,
+                "item_type": "dict",
+                "sample_keys": ["a", "b", "c"],
+                "sample": [{"a": 0, "b": 0, "c": 0}, {"a": 1, "b": 2, "c": 3}],
+            },
+        },
+    )
+
+    assert render_human(response, options=RenderOptions()) == (
+        "sequence len=20 item_type=dict keys=a, b, c sample={'a': 0, 'b': 0, 'c': 0}"
+    )
+
+
 def test_render_human_exec_without_output_reports_completion() -> None:
     exec_response = success_response(
         command="exec",

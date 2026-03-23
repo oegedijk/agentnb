@@ -1059,13 +1059,14 @@ def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None
 
 def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(main, ["--help"])
+    normalized_output = " ".join(result.output.split())
     assert result.exit_code == 0
     assert "Persistent project-scoped Python REPL for agent workflows." in result.output
     assert 'agentnb "import json"' in result.output
     assert "Canonical grammar:" in result.output
     assert "status --wait-idle" in result.output
     assert "execution-id `runs`" in result.output
-    assert "intentionally do not accept `--session`." in result.output
+    assert "intentionally do not accept `--session`." in normalized_output
     assert "runs show @latest" in result.output
     assert "@last-error" in result.output
     assert "--quiet" in result.output

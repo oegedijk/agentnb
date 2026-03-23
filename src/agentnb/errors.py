@@ -82,8 +82,8 @@ class SessionBusyError(AgentNBException):
 
 
 class InvalidInputError(AgentNBException):
-    def __init__(self, message: str) -> None:
-        super().__init__(code="INVALID_INPUT", message=message)
+    def __init__(self, message: str, *, data: dict[str, object] | None = None) -> None:
+        super().__init__(code="INVALID_INPUT", message=message, data=data)
 
 
 class SessionNotFoundError(AgentNBException):

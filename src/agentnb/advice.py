@@ -3,9 +3,11 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 from .contracts import SuggestionAction
+from .suggestions import SessionScopeSource, SuggestionScope
 
 
 @dataclass(slots=True, frozen=True)
@@ -17,100 +19,202 @@ class AdviceContext:
     error_name: str | None = None
     error_value: str | None = None
     session_id: str | None = None
+    project_override: Path | None = None
+    session_source: SessionScopeSource | None = None
+    output_mode: str = "json"
 
 
 class AdvicePolicy:
     def suggestions(self, context: AdviceContext) -> list[str]:
         command_name = context.command_name
         data = context.data
+        scope = _scope(context)
 
         if context.error_code == "AMBIGUOUS_SESSION":
             return [
-                "Run `agentnb sessions list --json` to see the live session names.",
+                f"Run `{scope.render_command('sessions', 'list')}` to see the live session names.",
                 (
-                    f"Retry with `agentnb {command_name} --session NAME --json` "
+                    f"Retry with `{scope.render_command(command_name, '--session', 'NAME')}` "
                     "to target one explicitly."
                 ),
             ]
         if context.error_code == "AMBIGUOUS_EXECUTION":
             return [
-                "Run `agentnb runs list --json` to inspect matching run ids.",
-                "Retry with `agentnb runs show EXECUTION_ID --json` to target one explicitly.",
+                f"Run `{scope.render_command('runs', 'list')}` to inspect matching run ids.",
+                (
+                    f"Retry with `{scope.render_command('runs', 'show', 'EXECUTION_ID')}` "
+                    "to target one explicitly."
+                ),
             ]
         if context.error_code == "SESSION_BUSY":
             execution_id = data.get("active_execution_id")
             if isinstance(execution_id, str) and execution_id:
                 return [
-                    f"Run `{_run_command('wait', execution_id)}` to wait for the blocking run.",
-                    f"Run `{_run_command('show', execution_id)}` to inspect the blocking run.",
+                    (
+                        f"Run `{scope.render_command('runs', 'wait', execution_id)}` "
+                        "to wait for the blocking run."
+                    ),
+                    (
+                        f"Run `{scope.render_command('runs', 'show', execution_id)}` "
+                        "to inspect the blocking run."
+                    ),
                 ]
-            return ["Run `agentnb wait --json` to block until the session is idle, then retry."]
+            return [
+                f"Run `{scope.render_command('wait', session_scoped=True)}` "
+                "to block until the session is idle, then retry."
+            ]
         if context.error_code == "KERNEL_NOT_READY":
             return [
-                "Run `agentnb wait --json` to wait for startup to finish.",
-                "Run `agentnb status --json` to inspect the current session state.",
+                _run_text(
+                    scope,
+                    "to wait for startup to finish.",
+                    "wait",
+                    session_scoped=True,
+                ),
+                _run_text(
+                    scope,
+                    "to inspect the current session state.",
+                    "status",
+                    session_scoped=True,
+                ),
             ]
         if context.error_code in {"NO_KERNEL", "BACKEND_ERROR", "KERNEL_DEAD"}:
             return [
-                "Run `agentnb start --json` to start the kernel.",
-                "Run `agentnb doctor --json` if startup has been failing.",
+                _run_text(scope, "to start the kernel.", "start", session_scoped=True),
+                _run_text(
+                    scope,
+                    "if startup has been failing.",
+                    "doctor",
+                    session_scoped=True,
+                ),
             ]
         if command_name == "start":
             return []
         if command_name == "status":
             runtime_state = data.get("runtime_state")
             if runtime_state == "starting":
-                return ["Run `agentnb wait --json` to wait for startup to finish."]
+                return [
+                    f"Run `{scope.render_command('wait', session_scoped=True)}` "
+                    "to wait for startup to finish."
+                ]
             if data.get("alive"):
                 if data.get("busy"):
                     return [
-                        "Run `agentnb wait --json` to wait until the session is usable.",
+                        (
+                            f"Run `{scope.render_command('wait', session_scoped=True)}` "
+                            "to wait until the session is usable."
+                        ),
                     ]
                 return []
             return [
-                "Run `agentnb start --json` to start a project-scoped kernel.",
-                "Run `agentnb doctor --json` if startup has been failing.",
+                (
+                    f"Run `{scope.render_command('start', session_scoped=True)}` "
+                    "to start a project-scoped kernel."
+                ),
+                (
+                    f"Run `{scope.render_command('doctor', session_scoped=True)}` "
+                    "if startup has been failing."
+                ),
             ]
         if command_name == "wait":
             if context.response_status == "ok":
                 return []
             return [
-                "Run `agentnb status --json` to inspect the current session state.",
-                "Run `agentnb start --json` if the target session is not running yet.",
+                (
+                    f"Run `{scope.render_command('status', session_scoped=True)}` "
+                    "to inspect the current session state."
+                ),
+                (
+                    f"Run `{scope.render_command('start', session_scoped=True)}` "
+                    "if the target session is not running yet."
+                ),
             ]
         if command_name == "exec":
             if context.response_status == "ok":
-                if _file_exec_truncated(data, session_id=context.session_id):
-                    return _file_exec_truncation_suggestions(data, session_id=context.session_id)
+                if _file_exec_truncated(data):
+                    return _file_exec_truncation_suggestions(context)
                 if data.get("background"):
                     execution_id = _execution_id(data)
                     return [
-                        f"Run `{_run_command('wait', execution_id)}` to wait for the final result.",
                         (
-                            f"Run `{_run_command('show', execution_id)}` "
+                            f"Run `{scope.render_command('runs', 'wait', execution_id)}` "
+                            "to wait for the final result."
+                        ),
+                        (
+                            f"Run `{scope.render_command('runs', 'show', execution_id)}` "
                             "to inspect the current run record."
                         ),
-                        f"Run `{_run_command('cancel', execution_id)}` to stop the background run.",
+                        (
+                            f"Run `{scope.render_command('runs', 'cancel', execution_id)}` "
+                            "to stop the background run."
+                        ),
                     ]
                 if _exec_output_is_empty(data):
                     execution_id = _execution_id(data)
                     return [
-                        "Run `agentnb vars --recent 5 --json` to inspect namespace changes.",
-                        f"Run `agentnb history {execution_id} --json` to review this execution.",
+                        _run_text(
+                            scope,
+                            "to inspect namespace changes.",
+                            "vars",
+                            "--recent",
+                            "5",
+                            session_scoped=True,
+                        ),
+                        _run_text(
+                            scope,
+                            "to review this execution.",
+                            "history",
+                            execution_id,
+                            session_scoped=True,
+                        ),
                     ]
                 return []
             if context.error_code == "INVALID_INPUT":
+                if data.get("input_shape") == "exec_file_path":
+                    file_path = str(data.get("source_path") or "PATH")
+                    return [
+                        _run_text(
+                            scope,
+                            "to execute the file through `exec --file`.",
+                            "exec",
+                            "--file",
+                            file_path,
+                            session_scoped=True,
+                        ),
+                        _run_text(
+                            scope,
+                            "to use the top-level file-execution hot path.",
+                            file_path,
+                            session_scoped=True,
+                        ),
+                    ]
                 return []
             if context.error_code == "TIMEOUT":
                 suggestions = [
-                    "Run `agentnb history @last-error --json` to review the latest failure.",
+                    _run_text(
+                        scope,
+                        "to review the latest failure.",
+                        "history",
+                        "@last-error",
+                        session_scoped=True,
+                    ),
                 ]
                 if data.get("interrupt_recommended"):
                     suggestions.append(
-                        "Run `agentnb interrupt --json` if execution may still be stuck."
+                        _run_text(
+                            scope,
+                            "if execution may still be stuck.",
+                            "interrupt",
+                            session_scoped=True,
+                        )
                     )
                 suggestions.append(
-                    "Run `agentnb reset --json` if the namespace needs a clean slate."
+                    _run_text(
+                        scope,
+                        "if the namespace needs a clean slate.",
+                        "reset",
+                        session_scoped=True,
+                    )
                 )
                 return suggestions
             if context.error_name == "ModuleNotFoundError":
@@ -125,16 +229,14 @@ class AdvicePolicy:
                                 "in your shell."
                             ),
                             (
-                                "For a durable project dependency, run "
-                                f"`uv add {module}` in your shell."
+                                f"For a durable project dependency, run `uv add {module}` "
+                                "in your shell."
                             ),
                             "Then retry the execution.",
                         ]
                     return [
-                        (
-                            f"Install the missing module: run `uv add {module}` "
-                            "in your shell (not inside the session)."
-                        ),
+                        f"Install the missing module: run `uv add {module}` in your shell "
+                        "(not inside the session).",
                         "Then retry the execution.",
                     ]
             if _missing_pip_in_called_process(context):
@@ -157,27 +259,60 @@ class AdvicePolicy:
                     f"Install the dependency from this project with {install_hint}",
                 ]
             if context.error_name == "NameError" and context.session_id:
-                session = context.session_id
                 return [
-                    f"Run `agentnb vars --session {session} --json` to inspect the namespace.",
-                    "Run `agentnb sessions list --json` to see all live sessions.",
-                    "Run `agentnb history @last-error --json` to review the latest failure.",
+                    (
+                        f"Run `{scope.render_command('vars', session_scoped=True)}` "
+                        "to inspect the namespace."
+                    ),
+                    f"Run `{scope.render_command('sessions', 'list')}` to see all live sessions.",
+                    (
+                        _run_text(
+                            scope,
+                            "to review the latest failure.",
+                            "history",
+                            "@last-error",
+                            session_scoped=True,
+                        )
+                    ),
                 ]
             return [
-                "Run `agentnb history @last-error --json` to review the latest failure.",
-                "Run `agentnb interrupt --json` if execution may still be stuck.",
-                "Run `agentnb reset --json` if the namespace needs a clean slate.",
+                _run_text(
+                    scope,
+                    "to review the latest failure.",
+                    "history",
+                    "@last-error",
+                    session_scoped=True,
+                ),
+                _run_text(
+                    scope,
+                    "if execution may still be stuck.",
+                    "interrupt",
+                    session_scoped=True,
+                ),
+                _run_text(
+                    scope,
+                    "if the namespace needs a clean slate.",
+                    "reset",
+                    session_scoped=True,
+                ),
             ]
         if command_name == "vars":
             if not data.get("vars"):
-                return ['Run `agentnb "..." --json` to create some live state first.']
+                return [f"Run `{scope.render_command('...')}` to create some live state first."]
             return []
         if command_name == "inspect":
             return []
         if command_name == "reload":
             stale_names = data.get("stale_names")
             if stale_names:
-                return ["Run `agentnb reset --json` if stale objects are still causing issues."]
+                return [
+                    _run_text(
+                        scope,
+                        "if stale objects are still causing issues.",
+                        "reset",
+                        session_scoped=True,
+                    )
+                ]
             reloaded = data.get("reloaded_modules")
             if isinstance(reloaded, list) and not reloaded:
                 return [
@@ -187,15 +322,33 @@ class AdvicePolicy:
             return []
         if command_name == "history":
             if not data.get("entries"):
-                return ['Run `agentnb "..." --json` to record the first execution step.']
+                return [f"Run `{scope.render_command('...')}` to record the first execution step."]
             return []
         if command_name == "interrupt":
             return [
-                'Retry with `agentnb exec "..." --json` once the kernel is idle.',
-                "Run `agentnb reset --json` if interrupted code left partial state behind.",
+                _retry_text(
+                    scope,
+                    "once the kernel is idle.",
+                    "exec",
+                    "...",
+                    session_scoped=True,
+                ),
+                _run_text(
+                    scope,
+                    "if interrupted code left partial state behind.",
+                    "reset",
+                    session_scoped=True,
+                ),
             ]
         if command_name == "reset":
-            return ['Run `agentnb "setup_code" --json` to rebuild required state.']
+            return [
+                _run_text(
+                    scope,
+                    "to rebuild required state.",
+                    "setup_code",
+                    session_scoped=True,
+                )
+            ]
         if command_name == "stop":
             return []
         if command_name == "doctor":
@@ -205,14 +358,20 @@ class AdvicePolicy:
                 if data.get("session_exists"):
                     return [
                         "Session exists but kernel is not running.",
-                        "Run `agentnb start --json` to restart the kernel.",
+                        _run_text(scope, "to restart the kernel.", "start", session_scoped=True),
                     ]
-                return ["Run `agentnb start --json` to start the kernel."]
+                return [_run_text(scope, "to start the kernel.", "start", session_scoped=True)]
             return [
-                "Run the install command shown by `agentnb doctor --json` in your shell.",
+                _run_text(
+                    scope,
+                    "in your shell.",
+                    "doctor",
+                    prefix="Run the install command shown by",
+                ),
                 (
-                    'Then restart with `agentnb --fresh "..." --json` '
-                    "or run `agentnb start --json` again."
+                    f"Then restart with "
+                    f"`{scope.render_command('--fresh', '...', include_output=False)}` "
+                    f"or run `{scope.render_command('start', session_scoped=True)}` again."
                 ),
                 (
                     "Run `agentnb start --python /path/to/python --json` "
@@ -222,15 +381,27 @@ class AdvicePolicy:
         if command_name == "sessions-list":
             if not data.get("sessions"):
                 return [
-                    "Run `agentnb start --json` to start the default session.",
-                    'Run `agentnb "..." --json` to start and execute in one step.',
+                    _run_text(
+                        scope,
+                        "to start the default session.",
+                        "start",
+                        session_scoped=True,
+                    ),
+                    _run_text(scope, "to start and execute in one step.", "..."),
                 ]
             return []
         if command_name == "sessions-delete":
             return []
         if command_name == "runs-list":
             if not data.get("runs"):
-                return ['Run `agentnb --background "..." --json` to create a persisted run record.']
+                return [
+                    _run_text(
+                        scope,
+                        "to create a persisted run record.",
+                        "--background",
+                        "...",
+                    )
+                ]
             return []
         if command_name == "runs-show":
             run = data.get("run")
@@ -239,9 +410,21 @@ class AdvicePolicy:
             if _run_is_active(run_status):
                 execution_id = _execution_id(run_payload)
                 return [
-                    f"Run `{_run_command('follow', execution_id)}` to stream new events.",
-                    f"Run `{_run_command('wait', execution_id)}` to wait for the final snapshot.",
-                    f"Run `{_run_command('cancel', execution_id)}` to stop the background run.",
+                    _run_text(scope, "to stream new events.", "runs", "follow", execution_id),
+                    _run_text(
+                        scope,
+                        "to wait for the final snapshot.",
+                        "runs",
+                        "wait",
+                        execution_id,
+                    ),
+                    _run_text(
+                        scope,
+                        "to stop the background run.",
+                        "runs",
+                        "cancel",
+                        execution_id,
+                    ),
                 ]
             return []
         if command_name == "runs-follow":
@@ -251,12 +434,27 @@ class AdvicePolicy:
             if _run_is_active(run_status):
                 execution_id = _execution_id(run_payload)
                 return [
-                    f"Run `{_run_command('wait', execution_id)}` to wait for the final snapshot.",
-                    (
-                        f"Run `{_run_command('show', execution_id)}` "
-                        "to inspect the latest run snapshot."
+                    _run_text(
+                        scope,
+                        "to wait for the final snapshot.",
+                        "runs",
+                        "wait",
+                        execution_id,
                     ),
-                    f"Run `{_run_command('cancel', execution_id)}` to stop the background run.",
+                    _run_text(
+                        scope,
+                        "to inspect the latest run snapshot.",
+                        "runs",
+                        "show",
+                        execution_id,
+                    ),
+                    _run_text(
+                        scope,
+                        "to stop the background run.",
+                        "runs",
+                        "cancel",
+                        execution_id,
+                    ),
                 ]
             return []
         if command_name == "runs-wait":
@@ -266,9 +464,15 @@ class AdvicePolicy:
             if data.get("cancel_requested"):
                 if data.get("status") == "ok":
                     return [
-                        f"Run `{_run_command('show', execution_id)}` to inspect the completed run.",
+                        _run_text(
+                            scope,
+                            "to inspect the completed run.",
+                            "runs",
+                            "show",
+                            execution_id,
+                        ),
                         (
-                            "Run `agentnb wait --session NAME --json` "
+                            f"Run `{scope.render_command('wait', '--session', 'NAME')}` "
                             "to confirm the session is ready."
                         ),
                     ]
@@ -276,26 +480,29 @@ class AdvicePolicy:
                     session_id = data.get("session_id") or "default"
                     return [
                         (
-                            f"Run `agentnb wait --session {session_id} --json` "
+                            f"Run `{scope.render_command('wait', session_id=str(session_id))}` "
                             "to confirm the session is ready for more work."
                         ),
                         (
-                            f"Run `{_run_command('show', execution_id)}` "
+                            f"Run `{scope.render_command('runs', 'show', execution_id)}` "
                             "to inspect the cancelled run record."
                         ),
                     ]
                 if data.get("session_outcome") == "stopped":
                     return [
                         (
-                            "Run `agentnb start --session NAME --json` "
+                            f"Run `{scope.render_command('start', '--session', 'NAME')}` "
                             "to start a fresh session explicitly."
                         ),
-                        'Run `agentnb "..." --json` to restart and execute in one step.',
+                        f"Run `{scope.render_command('...')}` to restart and execute in one step.",
                     ]
             return [
-                (
-                    f"Run `{_run_command('show', execution_id)}` "
-                    "to inspect the persisted run snapshot."
+                _run_text(
+                    scope,
+                    "to inspect the persisted run snapshot.",
+                    "runs",
+                    "show",
+                    execution_id,
                 )
             ]
         return []
@@ -303,53 +510,65 @@ class AdvicePolicy:
     def suggestion_actions(self, context: AdviceContext) -> list[SuggestionAction]:
         command_name = context.command_name
         data = context.data
+        scope = _scope(context)
 
         if context.error_code == "AMBIGUOUS_SESSION":
             return [
-                _agentnb_action("List sessions", "sessions", "list", "--json"),
-                _agentnb_action(
-                    "Retry with --session",
-                    command_name,
-                    "--session",
-                    "NAME",
-                    "--json",
-                ),
+                scope.command_action("List sessions", "sessions", "list"),
+                scope.command_action("Retry with --session", command_name, "--session", "NAME"),
             ]
         if context.error_code == "AMBIGUOUS_EXECUTION":
             return [
-                _agentnb_action("List runs", "runs", "list", "--json"),
-                _agentnb_action("Show run", "runs", "show", "EXECUTION_ID", "--json"),
+                scope.command_action("List runs", "runs", "list"),
+                scope.command_action("Show run", "runs", "show", "EXECUTION_ID"),
             ]
         if context.error_code == "SESSION_BUSY":
             execution_id = data.get("active_execution_id")
             if isinstance(execution_id, str) and execution_id:
                 return [
-                    _agentnb_action("Wait for run", "runs", "wait", execution_id, "--json"),
-                    _agentnb_action("Show run", "runs", "show", execution_id, "--json"),
+                    scope.command_action("Wait for run", "runs", "wait", execution_id),
+                    scope.command_action("Show run", "runs", "show", execution_id),
                 ]
-            return [_agentnb_action("Wait for session", "wait", "--json")]
+            return [scope.command_action("Wait for session", "wait", session_scoped=True)]
         if context.error_code == "KERNEL_NOT_READY":
             return [
-                _agentnb_action("Wait for kernel", "wait", "--json"),
-                _agentnb_action("Check status", "status", "--json"),
+                scope.command_action("Wait for kernel", "wait", session_scoped=True),
+                scope.command_action("Check status", "status", session_scoped=True),
             ]
         if context.error_code in {"NO_KERNEL", "BACKEND_ERROR", "KERNEL_DEAD"}:
             return [
-                _agentnb_action("Start kernel", "start", "--json"),
-                _agentnb_action("Run doctor", "doctor", "--json"),
+                scope.command_action("Start kernel", "start", session_scoped=True),
+                scope.command_action("Run doctor", "doctor", session_scoped=True),
             ]
         if command_name == "exec":
             if context.response_status == "ok" and data.get("background"):
                 execution_id = _execution_id(data)
                 return [
-                    _agentnb_action("Wait for run", "runs", "wait", execution_id, "--json"),
-                    _agentnb_action("Show run", "runs", "show", execution_id, "--json"),
-                    _agentnb_action("Cancel run", "runs", "cancel", execution_id, "--json"),
+                    scope.command_action("Wait for run", "runs", "wait", execution_id),
+                    scope.command_action("Show run", "runs", "show", execution_id),
+                    scope.command_action("Cancel run", "runs", "cancel", execution_id),
                 ]
-            if context.response_status == "ok" and _file_exec_truncated(
-                data, session_id=context.session_id
+            if context.response_status == "ok" and _file_exec_truncated(data):
+                return _file_exec_truncation_actions(context)
+            if (
+                context.error_code == "INVALID_INPUT"
+                and data.get("input_shape") == "exec_file_path"
             ):
-                return _file_exec_truncation_actions(data, session_id=context.session_id)
+                file_path = str(data.get("source_path") or "PATH")
+                return [
+                    scope.command_action(
+                        "Use exec --file",
+                        "exec",
+                        "--file",
+                        file_path,
+                        session_scoped=True,
+                    ),
+                    scope.command_action(
+                        "Use top-level file exec",
+                        file_path,
+                        session_scoped=True,
+                    ),
+                ]
             if context.error_name == "ModuleNotFoundError":
                 module = _extract_module_name(context.error_value)
                 if module:
@@ -392,11 +611,19 @@ class AdvicePolicy:
             if _run_is_active(run_status):
                 execution_id = _execution_id(run_payload)
                 return [
-                    _agentnb_action("Wait for run", "runs", "wait", execution_id, "--json"),
-                    _agentnb_action("Show run", "runs", "show", execution_id, "--json"),
-                    _agentnb_action("Cancel run", "runs", "cancel", execution_id, "--json"),
+                    scope.command_action("Wait for run", "runs", "wait", execution_id),
+                    scope.command_action("Show run", "runs", "show", execution_id),
+                    scope.command_action("Cancel run", "runs", "cancel", execution_id),
                 ]
         return []
+
+
+def _scope(context: AdviceContext) -> SuggestionScope:
+    return SuggestionScope(
+        project_override=context.project_override,
+        session_id=context.session_id,
+        session_source=context.session_source,
+    )
 
 
 def _run_is_active(status: object) -> bool:
@@ -410,10 +637,6 @@ def _execution_id(data: Mapping[str, object] | None) -> str:
     if isinstance(execution_id, str) and execution_id:
         return execution_id
     return "EXECUTION_ID"
-
-
-def _run_command(action: str, execution_id: str) -> str:
-    return f"agentnb runs {action} {execution_id} --json"
 
 
 def _extract_module_name(error_value: str | None) -> str | None:
@@ -466,53 +689,59 @@ def _exec_output_is_empty(data: Mapping[str, object]) -> bool:
     return not entries
 
 
-def _file_exec_truncated(
-    data: Mapping[str, object],
-    *,
-    session_id: str | None,
-) -> bool:
-    del session_id
+def _file_exec_truncated(data: Mapping[str, object]) -> bool:
     if data.get("source_kind") != "file":
         return False
     truncation_keys = ("stdout_truncated", "stderr_truncated", "result_truncated")
     return any(data.get(key) is True for key in truncation_keys)
 
 
-def _file_exec_truncation_suggestions(
-    data: Mapping[str, object],
-    *,
-    session_id: str | None,
-) -> list[str]:
+def _file_exec_truncation_suggestions(context: AdviceContext) -> list[str]:
+    scope = _scope(context)
+    source_path = str(context.data.get("source_path") or "PATH")
     return [
-        (
-            f"Run `{_no_truncate_file_command(data, session_id=session_id)}` "
-            "to rerun the file without truncation."
+        _run_text(
+            scope,
+            "to rerun the file without truncation.",
+            "exec",
+            "--no-truncate",
+            "--file",
+            source_path,
+            session_scoped=True,
+            include_output=False,
         ),
-        _vars_recent_command(session_id=session_id),
+        _run_text(
+            scope,
+            "to inspect the newest live variables.",
+            "vars",
+            "--recent",
+            "5",
+            session_scoped=True,
+        ),
     ]
 
 
-def _file_exec_truncation_actions(
-    data: Mapping[str, object],
-    *,
-    session_id: str | None,
-) -> list[SuggestionAction]:
+def _file_exec_truncation_actions(context: AdviceContext) -> list[SuggestionAction]:
+    scope = _scope(context)
+    source_path = str(context.data.get("source_path") or "PATH")
     return [
-        _agentnb_action(
+        scope.command_action(
             "Rerun without truncation",
-            *_no_truncate_file_args(data, session_id=session_id),
+            "exec",
+            "--no-truncate",
+            "--file",
+            source_path,
+            session_scoped=True,
+            include_output=False,
         ),
-        _agentnb_action("Inspect recent vars", *_vars_recent_args(session_id=session_id)),
+        scope.command_action(
+            "Inspect recent vars",
+            "vars",
+            "--recent",
+            "5",
+            session_scoped=True,
+        ),
     ]
-
-
-def _agentnb_action(label: str, *args: str) -> SuggestionAction:
-    return {
-        "kind": "command",
-        "label": label,
-        "command": "agentnb",
-        "args": list(args),
-    }
 
 
 def _shell_action(label: str, command: str, *args: str) -> SuggestionAction:
@@ -524,30 +753,29 @@ def _shell_action(label: str, command: str, *args: str) -> SuggestionAction:
     }
 
 
-def _no_truncate_file_command(data: Mapping[str, object], *, session_id: str | None) -> str:
-    args = _no_truncate_file_args(data, session_id=session_id)
-    return "agentnb " + " ".join(args)
+def _run_text(
+    scope: SuggestionScope,
+    detail: str,
+    *tokens: str,
+    session_scoped: bool = False,
+    include_output: bool = True,
+    session_id: str | None = None,
+    prefix: str = "Run",
+) -> str:
+    command = scope.render_command(
+        *tokens,
+        session_scoped=session_scoped,
+        include_output=include_output,
+        session_id=session_id,
+    )
+    return f"{prefix} `{command}` {detail}"
 
 
-def _no_truncate_file_args(data: Mapping[str, object], *, session_id: str | None) -> list[str]:
-    args = ["exec"]
-    if session_id:
-        args.extend(["--session", session_id])
-    args.append("--no-truncate")
-    source_path = data.get("source_path")
-    if isinstance(source_path, str) and source_path:
-        args.extend(["--file", source_path])
-    return args
-
-
-def _vars_recent_command(*, session_id: str | None) -> str:
-    command = "agentnb " + " ".join(_vars_recent_args(session_id=session_id))
-    return f"Run `{command}` to inspect the newest live variables."
-
-
-def _vars_recent_args(*, session_id: str | None) -> list[str]:
-    args = ["vars"]
-    if session_id:
-        args.extend(["--session", session_id])
-    args.extend(["--recent", "5", "--json"])
-    return args
+def _retry_text(
+    scope: SuggestionScope,
+    detail: str,
+    *tokens: str,
+    session_scoped: bool = False,
+) -> str:
+    command = scope.render_command(*tokens, session_scoped=session_scoped)
+    return f"Retry with `{command}` {detail}"

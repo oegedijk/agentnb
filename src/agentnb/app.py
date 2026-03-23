@@ -65,7 +65,7 @@ from .selectors import (
     RunSelectorResolver,
 )
 from .session import DEFAULT_SESSION_ID
-from .session_targeting import SessionTargetingPolicy
+from .session_targeting import ResolutionSource, SessionTargetingPolicy
 from .state import CommandLockInfo
 
 StatusWaitFor = Literal["ready", "idle"]
@@ -80,9 +80,12 @@ _HELPER_EXECUTION_POLICY = HelperExecutionPolicy(
 @dataclass(slots=True, frozen=True, kw_only=True)
 class ProjectRequest:
     project_root: Path
+    project_override: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "project_root", self.project_root.resolve())
+        if self.project_override is not None:
+            object.__setattr__(self, "project_override", self.project_override.resolve())
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -231,6 +234,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="start",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=False,
             announce_session_switch=True,
@@ -250,6 +254,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="exec",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             announce_session_switch=True,
@@ -264,6 +269,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="status",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             announce_session_switch=True,
@@ -274,6 +280,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="wait",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             announce_session_switch=True,
@@ -284,6 +291,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="vars",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             project_starting_state=True,
@@ -295,6 +303,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="inspect",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             project_starting_state=True,
@@ -309,6 +318,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="reload",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             project_starting_state=True,
@@ -324,6 +334,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="history",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             announce_session_switch=True,
@@ -337,6 +348,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="interrupt",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             announce_session_switch=True,
@@ -349,6 +361,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="reset",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             announce_session_switch=True,
@@ -359,6 +372,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="stop",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=True,
             announce_session_switch=True,
@@ -369,6 +383,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="doctor",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=False,
             handler=lambda session_id: self._doctor_payload(request=request, session_id=session_id),
@@ -378,6 +393,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="sessions-list",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=None,
             require_live_session=False,
             handler=lambda _: _sessions_list_payload(
@@ -392,6 +408,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="sessions-delete",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_name,
             require_live_session=False,
             handler=lambda _: self.runtime.delete_session(
@@ -404,6 +421,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="sessions-delete-bulk",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=None,
             require_live_session=False,
             handler=lambda _: self._sessions_delete_bulk_payload(request),
@@ -428,6 +446,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="runs-list",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=request.session_id,
             require_live_session=False,
             handler=lambda _: self._runs_list_payload(request=request),
@@ -437,6 +456,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="runs-show",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=None,
             require_live_session=False,
             handler=lambda _: self._run_lookup_payload(
@@ -452,6 +472,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="runs-wait",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=None,
             require_live_session=False,
             handler=lambda _: self._run_lookup_payload(
@@ -472,6 +493,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="runs-follow",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=None,
             require_live_session=False,
             handler=lambda _: self._run_lookup_payload(
@@ -489,6 +511,7 @@ class AgentNBApp:
         return self._handle_command(
             command_name="runs-cancel",
             project_root=request.project_root,
+            project_override=request.project_override,
             requested_session_id=None,
             require_live_session=False,
             handler=lambda _: self.executions.cancel_run(
@@ -926,6 +949,7 @@ class AgentNBApp:
         *,
         command_name: str,
         project_root: Path,
+        project_override: Path | None,
         requested_session_id: str | None,
         require_live_session: bool,
         handler: Callable[[str], Mapping[str, object]],
@@ -971,25 +995,29 @@ class AgentNBApp:
                         traceback=error.traceback,
                         data=error.data,
                         suggestions=self.advisor.suggestions(
-                            AdviceContext(
+                            self._advice_context(
                                 command_name=command_name,
                                 response_status="error",
                                 data=error.data,
+                                project_override=project_override,
+                                session_id=response_session_id,
+                                session_source=decision.source,
                                 error_code=error.code,
                                 error_name=error.ename,
                                 error_value=error.evalue,
-                                session_id=response_session_id,
                             )
                         ),
                         suggestion_actions=self.advisor.suggestion_actions(
-                            AdviceContext(
+                            self._advice_context(
                                 command_name=command_name,
                                 response_status="error",
                                 data=error.data,
+                                project_override=project_override,
+                                session_id=response_session_id,
+                                session_source=decision.source,
                                 error_code=error.code,
                                 error_name=error.ename,
                                 error_value=error.evalue,
-                                session_id=response_session_id,
                             )
                         ),
                     )
@@ -1005,19 +1033,23 @@ class AgentNBApp:
                 session_id=response_session_id,
                 data=data,
                 suggestions=self.advisor.suggestions(
-                    AdviceContext(
+                    self._advice_context(
                         command_name=command_name,
                         response_status="ok",
                         data=data,
+                        project_override=project_override,
                         session_id=resolved_session_id,
+                        session_source=decision.source,
                     )
                 ),
                 suggestion_actions=self.advisor.suggestion_actions(
-                    AdviceContext(
+                    self._advice_context(
                         command_name=command_name,
                         response_status="ok",
                         data=data,
+                        project_override=project_override,
                         session_id=resolved_session_id,
+                        session_source=decision.source,
                     )
                 ),
             )
@@ -1033,25 +1065,29 @@ class AgentNBApp:
                 traceback=exc.traceback,
                 data=exc.data,
                 suggestions=self.advisor.suggestions(
-                    AdviceContext(
+                    self._advice_context(
                         command_name=command_name,
                         response_status="error",
                         data=exc.data,
+                        project_override=project_override,
+                        session_id=response_session_id,
+                        session_source="explicit" if requested_session_id is not None else None,
                         error_code=exc.code,
                         error_name=exc.ename,
                         error_value=exc.evalue,
-                        session_id=response_session_id,
                     )
                 ),
                 suggestion_actions=self.advisor.suggestion_actions(
-                    AdviceContext(
+                    self._advice_context(
                         command_name=command_name,
                         response_status="error",
                         data=exc.data,
+                        project_override=project_override,
+                        session_id=response_session_id,
+                        session_source="explicit" if requested_session_id is not None else None,
                         error_code=exc.code,
                         error_name=exc.ename,
                         error_value=exc.evalue,
-                        session_id=response_session_id,
                     )
                 ),
             )
@@ -1065,28 +1101,57 @@ class AgentNBApp:
                 ename=type(exc).__name__,
                 evalue=str(exc),
                 suggestions=self.advisor.suggestions(
-                    AdviceContext(
+                    self._advice_context(
                         command_name=command_name,
                         response_status="error",
                         data={},
+                        project_override=project_override,
+                        session_id=response_session_id,
+                        session_source="explicit" if requested_session_id is not None else None,
                         error_code="INTERNAL_ERROR",
                         error_name=type(exc).__name__,
                         error_value=str(exc),
-                        session_id=response_session_id,
                     )
                 ),
                 suggestion_actions=self.advisor.suggestion_actions(
-                    AdviceContext(
+                    self._advice_context(
                         command_name=command_name,
                         response_status="error",
                         data={},
+                        project_override=project_override,
+                        session_id=response_session_id,
+                        session_source="explicit" if requested_session_id is not None else None,
                         error_code="INTERNAL_ERROR",
                         error_name=type(exc).__name__,
                         error_value=str(exc),
-                        session_id=response_session_id,
                     )
                 ),
             )
+
+    def _advice_context(
+        self,
+        *,
+        command_name: str,
+        response_status: str,
+        data: Mapping[str, object],
+        project_override: Path | None,
+        session_id: str | None,
+        session_source: ResolutionSource | None,
+        error_code: str | None = None,
+        error_name: str | None = None,
+        error_value: str | None = None,
+    ) -> AdviceContext:
+        return AdviceContext(
+            command_name=command_name,
+            response_status=response_status,
+            data=data,
+            error_code=error_code,
+            error_name=error_name,
+            error_value=error_value,
+            session_id=session_id,
+            project_override=project_override,
+            session_source=session_source,
+        )
 
 
 def _run_response_session_id(current_session_id: str, data: Mapping[str, object]) -> str:

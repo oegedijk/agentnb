@@ -262,6 +262,7 @@ class KernelRuntime:
                     "last_activity": self._last_activity(project_root, current.session_id),
                     "is_default": current.session_id == DEFAULT_SESSION_ID,
                     "is_current": current.session_id == current_session_id,
+                    "is_preferred": current.session_id == current_session_id,
                 }
             )
         return entries

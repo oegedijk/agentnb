@@ -208,6 +208,21 @@ def test_cli_json_envelope_for_exec_roundtrip(cli_runner: CliRunner, project_dir
     assert "events" not in payload["data"]
 
 
+def test_cli_vars_help_describes_substring_matcher(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(main, ["vars", "--help"])
+
+    assert result.exit_code == 0
+    assert "contain this substring" in result.output
+    assert "--match when the namespace gets noisy" in result.output
+
+
+def test_cli_session_help_describes_ambiguous_live_session_behavior(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(main, ["vars", "--help"])
+
+    assert result.exit_code == 0
+    assert "require explicit selection" in result.output
+
+
 def test_cli_root_version_flag_reports_package_version(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(main, ["--version"])
 
@@ -642,8 +657,11 @@ def test_cli_vars_projects_starting_state_when_connection_exists_without_session
     assert payload["data"]["runtime_state"] == "starting"
     assert payload["data"]["session_exists"] is False
     assert payload["suggestions"] == [
-        "Run `agentnb wait --json` to wait for startup to finish.",
-        "Run `agentnb status --json` to inspect the current session state.",
+        f"Run `agentnb wait --project {project_dir} --json` to wait for startup to finish.",
+        (
+            f"Run `agentnb status --project {project_dir} --json` "
+            "to inspect the current session state."
+        ),
     ]
 
 
@@ -666,8 +684,14 @@ def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
     assert error["message"].startswith("Multiple live sessions exist")
     assert payload["data"]["available_sessions"] == ["default", "analysis"]
     assert payload["suggestions"] == [
-        "Run `agentnb sessions list --json` to see the live session names.",
-        "Retry with `agentnb status --session NAME --json` to target one explicitly.",
+        (
+            f"Run `agentnb sessions list --project {project_dir} --json` "
+            "to see the live session names."
+        ),
+        (
+            f"Retry with `agentnb status --session NAME --project {project_dir} --json` "
+            "to target one explicitly."
+        ),
     ]
 
 
@@ -692,13 +716,13 @@ def test_cli_exec_implicit_target_is_ambiguous_even_with_current_session_prefere
             "kind": "command",
             "label": "List sessions",
             "command": "agentnb",
-            "args": ["sessions", "list", "--json"],
+            "args": ["sessions", "list", "--project", str(project_dir), "--json"],
         },
         {
             "kind": "command",
             "label": "Retry with --session",
             "command": "agentnb",
-            "args": ["exec", "--session", "NAME", "--json"],
+            "args": ["exec", "--session", "NAME", "--project", str(project_dir), "--json"],
         },
     ]
 
@@ -725,13 +749,13 @@ def test_cli_agent_exec_ambiguity_keeps_suggestion_actions(
             "kind": "command",
             "label": "List sessions",
             "command": "agentnb",
-            "args": ["sessions", "list", "--json"],
+            "args": ["sessions", "list", "--project", str(project_dir), "--json"],
         },
         {
             "kind": "command",
             "label": "Retry with --session",
             "command": "agentnb",
-            "args": ["exec", "--session", "NAME", "--json"],
+            "args": ["exec", "--session", "NAME", "--project", str(project_dir), "--json"],
         },
     ]
 
@@ -1434,10 +1458,54 @@ def test_cli_exec_background_returns_run_id(cli_runner: CliRunner, project_dir: 
     payload = _payload(result.output)
     assert payload["data"]["execution_id"] == "run-1"
     assert payload["data"]["background"] is True
-    assert (
-        payload["suggestions"][0]
-        == "Run `agentnb runs wait run-1 --json` to wait for the final result."
+    assert payload["suggestions"][0] == (
+        f"Run `agentnb runs wait run-1 --project {project_dir} --json` "
+        "to wait for the final result."
     )
+
+
+def test_cli_exec_existing_python_path_suggests_file_execution(
+    cli_runner: CliRunner, project_dir: Path
+) -> None:
+    script = project_dir / "analysis.py"
+    script.write_text("answer = 42\n", encoding="utf-8")
+
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--json", str(script)],
+    )
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert _error(payload)["code"] == "INVALID_INPUT"
+    assert payload["data"] == {
+        "input_shape": "exec_file_path",
+        "source_path": str(script),
+    }
+    assert payload["suggestions"] == [
+        (
+            f"Run `agentnb exec --file {script} --project {project_dir} --json` "
+            "to execute the file through `exec --file`."
+        ),
+        (
+            f"Run `agentnb {script} --project {project_dir} --json` "
+            "to use the top-level file-execution hot path."
+        ),
+    ]
+    assert payload["suggestion_actions"] == [
+        {
+            "kind": "command",
+            "label": "Use exec --file",
+            "command": "agentnb",
+            "args": ["exec", "--file", str(script), "--project", str(project_dir), "--json"],
+        },
+        {
+            "kind": "command",
+            "label": "Use top-level file exec",
+            "command": "agentnb",
+            "args": [str(script), "--project", str(project_dir), "--json"],
+        },
+    ]
 
 
 def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -1979,8 +2047,8 @@ def test_cli_sessions_list_empty_has_actionable_suggestions(
     payload = _payload(result.output)
     assert payload["data"]["sessions"] == []
     assert payload["suggestions"] == [
-        "Run `agentnb start --json` to start the default session.",
-        'Run `agentnb "..." --json` to start and execute in one step.',
+        f"Run `agentnb start --project {project_dir} --json` to start the default session.",
+        f'Run `agentnb "..." --project {project_dir} --json` to start and execute in one step.',
     ]
 
 
@@ -2665,8 +2733,14 @@ def test_cli_background_overlap_fails_fast_with_blocking_run_id(
     assert _error(payload)["code"] == "SESSION_BUSY"
     assert payload["data"]["active_execution_id"] == blocking_execution_id
     assert payload["suggestions"] == [
-        f"Run `agentnb runs wait {blocking_execution_id} --json` to wait for the blocking run.",
-        f"Run `agentnb runs show {blocking_execution_id} --json` to inspect the blocking run.",
+        (
+            f"Run `agentnb runs wait {blocking_execution_id} --project {project_dir} --json` "
+            "to wait for the blocking run."
+        ),
+        (
+            f"Run `agentnb runs show {blocking_execution_id} --project {project_dir} --json` "
+            "to inspect the blocking run."
+        ),
     ]
 
     wait_result = cli_runner.invoke(

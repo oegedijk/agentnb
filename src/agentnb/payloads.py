@@ -68,6 +68,7 @@ class SessionSummary(TypedDict, total=False):
     last_activity: str | None
     is_default: bool
     is_current: bool
+    is_preferred: bool
 
 
 class DeleteSessionResult(TypedDict):

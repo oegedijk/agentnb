@@ -423,6 +423,156 @@ v0.3.8 should pick up the remaining smoke frictions that are real but lower-seve
 
 Make the human-mode and discoverability surfaces feel more intentional: less repetitive noise, clearer truncation, better typo recovery, and lower hesitation when choosing inspection and cleanup commands.
 
+## v0.3.10 - Smoke-Test Friction Closure
+
+v0.3.10 should close the highest-value ergonomic gaps from the latest full
+smoke passes. The focus is not new surface area. It is removing the places
+where the CLI still causes avoidable retries, wrong next steps, or unclear
+session/run behavior during normal iterative work.
+
+### Planned Issues
+
+- Issue: long inline code can be misclassified as a file path and crash during path probing.
+  Reproduce:
+  - Start a session, for example `uv run agentnb exec --session codex-smoke2 "1"`.
+  - Run a moderately long inline snippet such as:
+    `uv run agentnb exec --session codex-smoke2 "analysis = users[['id','name','address.city','company.name']].rename(columns={'address.city':'city','company.name':'company'}); city_counts = analysis.groupby('city', observed=True).size().sort_values(ascending=False); analysis.head(3).to_dict(orient='records'), city_counts.head(3).to_dict()"`
+  - Observe `OSError: [Errno 63] File name too long` from pathname probing instead of inline execution or a targeted recovery hint.
+  Underlying fix:
+  - Move invocation-shape resolution behind a single explicit classifier that distinguishes inline code, stdin, and file forms before any filesystem stat calls.
+  - Treat path-probing failures as non-fatal shape misses, not hard CLI errors.
+  - Bias toward inline-code interpretation unless the argument is clearly a file invocation.
+  Why this matters:
+  - This is a high-probability agent workflow failure and currently looks like an implementation leak, not a recoverable CLI mistake.
+
+- Issue: some `Next:` suggestions are wrong and break trust in recovery hints.
+  Reproduce:
+  - Build a noisy namespace, then run `uv run agentnb reset --session codex-smoke7`.
+  - Observe `Next: Run agentnb setup_code --session codex-smoke7 to rebuild required state.`
+  - Observe that `setup_code` is not an advertised command.
+  Underlying fix:
+  - Centralize suggestion generation behind a validated command builder instead of hand-written strings at response sites.
+  - Make suggestion emitters use only real commands already registered in the CLI app boundary.
+  - Add smoke tests that assert every suggested command parses successfully.
+  Why this matters:
+  - A wrong suggestion is worse than no suggestion because agents tend to follow the cheapest next command literally.
+
+- Issue: session-scoped history can surface unrelated project entries and compact history flattens multiline code.
+  Reproduce:
+  - Create activity in two sessions in the same project and run `uv run agentnb history --session codex-smoke5 --last 3`.
+  - Observe that older unrelated project entries can appear in the list even though the request looked session-scoped.
+  - Run a multiline execution and compare `uv run agentnb history --session codex-qual5 --last 1` with `--full`.
+  - Observe a flattened one-line summary such as `a = 1 b = 2 c = a + b c`.
+  Underlying fix:
+  - Make history filtering session-first inside the history/journal boundary rather than shaping project history late in the CLI layer.
+  - Decide and document whether selectors like `--last N` mean "last N for this session" or "last N project entries after optional session annotation," then enforce that contract consistently.
+  - Replace whitespace-flattened multiline cells with a bounded multiline-aware preview.
+  Why this matters:
+  - Once history feels approximate or hard to scan, agents stop trusting it as a debugging tool and fall back to extra probing.
+
+- Issue: busy/serialization behavior is inconsistent across foreground and background workflows.
+  Reproduce:
+  - Start a long same-session foreground command and send a second command; observe the explicit busy error.
+  - Start a same-session background command and immediately send another command; observe that the follow-up can behave differently under tight timing.
+  Underlying fix:
+  - Unify same-session admission control in the run-control boundary so foreground, background, read, and write commands share one serialization policy.
+  - Choose one honest public contract: reject, queue with explicit acknowledgement, or block with explicit "waiting behind active work" messaging.
+  - Add timing-sensitive smoke coverage for "background then immediate foreground" races.
+  Why this matters:
+  - Serialization only helps agents if it is predictable. Silent waiting in one path and explicit rejection in another feels like flaky behavior.
+
+- Issue: background-run terminal status may not be stable under timing-sensitive completion races.
+  Reproduce:
+  - Start a background run that prints incrementally and returns a value.
+  - Observe it with `uv run agentnb runs show <id>` and `uv run agentnb runs follow <id>`.
+  - Compare repeated runs of the same shape and watch for mismatches between visible result availability and terminal run status.
+  Underlying fix:
+  - Tighten terminal run-state reconciliation so completion, worker exit, and final result recording collapse into one consistent terminal status.
+  - Add race-focused tests around worker exit after successful result persistence.
+  Why this matters:
+  - Agents using `--agent`, `--json`, or `runs` status need terminal state to be trustworthy.
+
+- Issue: `runs follow` replays the full prior record instead of only new events.
+  Reproduce:
+  - Start a background run, inspect it with `uv run agentnb runs show <id>`, then run `uv run agentnb runs follow <id>`.
+  - Observe that stdout and result are replayed from the beginning before completion is shown.
+  Underlying fix:
+  - Either change `follow` to truly stream from the unseen tail, or make replay behavior explicit in help text and output framing.
+  - Keep the durable-run model honest by separating "replay from start" from "follow new events" semantics.
+  Why this matters:
+  - Duplicate output wastes context and makes agents re-parse state they have already seen.
+
+- Issue: `interrupt` is hard to trust because it can report success after the work already finished.
+  Reproduce:
+  - Start a long foreground command in a session, then quickly run `uv run agentnb interrupt --session codex-smoke16`.
+  - Observe that the original execution may already complete normally while `interrupt` still prints `Interrupt signal sent.`
+  Underlying fix:
+  - Return a more truthful interrupt outcome from run-control: signal sent to active execution, no active execution remained, or execution already finished.
+  - Tie interrupt responses to a concrete active execution id when one exists.
+  Why this matters:
+  - Agents need to know whether interrupt changed state or whether they are just racing a completion that already happened.
+
+- Issue: `--result-only` can over-compress structured values and default human output still dumps too much text for large values.
+  Reproduce:
+  - Create a DataFrame or grouped table and run `uv run agentnb exec --session codex-smoke1 --result-only "daily"`.
+  - Observe an overly thin summary that is not enough to confirm correctness.
+  - Build a larger object and run default human output against it; observe a flattened table dump that is larger and less useful than bounded previews from `vars` or `inspect`.
+  Underlying fix:
+  - Revisit result-preview policies so `--result-only` stays bounded but includes enough shape information to drive the next decision.
+  - Reuse bounded preview strategies across default human mode when values exceed a practical display threshold.
+  - Keep full repr available behind explicit opt-ins such as `--no-truncate`.
+  Why this matters:
+  - Agents use compact modes to save context. If they are too lossy or default mode is too noisy, loops turn into extra probing.
+
+- Issue: stale sessions are hidden but not inspectable before deletion.
+  Reproduce:
+  - Create a named session, crash its kernel, then run `uv run agentnb sessions list`.
+  - Observe only a summary such as `1 non-live session record is hidden; use agentnb sessions delete --stale to remove it.`
+  Underlying fix:
+  - Extend the sessions boundary to distinguish live and stale records in one listing response.
+  - Add an explicit listing mode such as `sessions list --all` or `--include-stale`, or a separate stale section in default output.
+  Why this matters:
+  - Cleanup should be legible. Agents should not have to delete blind just to learn which stale record exists.
+
+- Issue: Scenario 17's missing-`ipykernel` fixture no longer reproduces the intended startup failure.
+  Reproduce:
+  - Run `uv run agentnb doctor --project /Users/oege/projects/agentnb_missingdeps --session codex-smoke17`.
+  - Observe `[OK] ipykernel: ipykernel is installed.`
+  - Run `uv run agentnb start --project /Users/oege/projects/agentnb_missingdeps --session codex-smoke17` and observe successful startup.
+  Underlying fix:
+  - Refresh or replace the fixture project used for smoke coverage so the scenario really exercises the missing-kernel dependency recovery path.
+  - Keep smoke fixtures under explicit ownership so they do not silently drift out of alignment with the scenario intent.
+  Why this matters:
+  - A smoke scenario that cannot reproduce its target failure stops validating one of the main recovery promises in the help text.
+
+- Issue: missing-module recovery suggestions use import names where pip package names differ.
+  Reproduce:
+  - Run `uv run agentnb exec --project /Users/oege/projects/agentnb_other_project --session codex-qual17 "import sklearn"`.
+  - Observe the suggested repair command uses `sklearn` rather than `scikit-learn`.
+  Underlying fix:
+  - Route missing-module repair hints through a small import-to-package normalization layer for common mismatches.
+  - Keep the fallback simple and honest when no mapping is known.
+  Why this matters:
+  - Agents follow exact shell suggestions literally. A wrong package hint adds a second recovery failure right after the first one.
+
+- Issue: help output still wraps awkwardly enough to hurt discoverability during live CLI use.
+  Reproduce:
+  - Run `uv run agentnb exec --help` and `uv run agentnb history --help`.
+  - Observe broken wraps such as `--no-ensure-\nstarted` and `@last-\nsuccess`.
+  Underlying fix:
+  - Tighten help rendering and line-wrapping so examples and selectors are emitted as readable units.
+  - Add snapshot tests for representative help surfaces.
+  Why this matters:
+  - Agents do rely on `--help` in the moment. Broken wraps make the discovery path slower and more error-prone than it needs to be.
+
+### Release Goal
+
+Make the smoke-tested hot path feel predictable under real agent use: no
+invocation-shape crashes from path probing, no fake recovery commands, no
+ambiguous session-scoped history, no inconsistent same-session concurrency
+behavior, no duplicate follow output, no misleading package-install hints, and
+no hidden stale-session cleanup state.
+
 ## v0.4 - Recovery, Debugging, And Inspection Efficiency
 
 ### Goals

@@ -206,24 +206,51 @@ Completed in the current refactor:
 - cancelled-run projection was tightened so persisted terminal state remains
   authoritative over raw transcript error events when rehydrating an
   `ExecutionRecord` outcome.
+- app-facing command handlers for `start`, `status`, `wait`, `exec`, `reset`,
+  `runs-*`, `vars`, `inspect`, `reload`, and `history` now return typed
+  internal command data instead of assembling payload dicts directly in
+  `app.py`.
+- `command_data.py` now owns the typed app-facing command-data layer for
+  session state, execution/run views, helper views, and history views.
+- `response_serialization.py` now owns the serializer boundary for:
+  - full JSON data shaping
+  - agent-profile projection
+  - exec/run/result/error/preview compatibility shaping
+- `contracts.CommandResponse` can now carry typed internal command data while
+  preserving the stable external response envelope through serialization at the
+  edge.
+- `projection.py` and `output.py` now consume typed command data for the
+  covered command families instead of reinterpreting ad hoc payload dicts.
+- app/output-facing run lookup and run list paths no longer depend on mixed
+  `ExecutionRecord | Mapping` seams; they normalize into dedicated typed run
+  view data before serialization.
 
 What is still incomplete:
 
-- serializers still shape `TypedDict` payloads directly in several app-facing
-  paths.
-- some seams still accept both mappings and domain objects, so the owning
-  internal type is not yet singular end to end.
-- projection/output layers still carry some compatibility policy that should
-  eventually move behind a smaller serializer boundary.
+- several passive command families still use the serialized-data adapter
+  instead of first-class typed command data:
+  - `doctor`
+  - session-management commands
+  - `interrupt`
+  - `stop`
+  - `runs-cancel`
+- `compact.py` still contains command-level compaction helpers that should be
+  reduced further so it only owns low-level preview/truncation helpers.
+- advice generation still consumes serialized response data instead of typed
+  command data by design for this tranche.
+- run-control and storage internals still expose some legacy payload-oriented
+  helpers for app-facing errors and persistence compatibility.
 
 ## Next Tranche
 
-The next highest-value work is to finish pushing canonical execution/outcome
-models to the remaining seams and reduce internal dependence on payload dicts.
+The next highest-value work is to finish shrinking the remaining payload-first
+seams and continue consolidating ownership around typed internal models.
 That should include:
 
-- pushing `TypedDict` usage outward toward serializers and response shaping
-- removing mixed `Mapping | ExecutionRecord` call patterns where one owning
-  internal type should suffice
-- reducing the remaining duplicated compatibility/error/preview policy across
-  app shaping, projection, and output rendering
+- moving the remaining passive command families onto first-class typed command
+  data so the serialized-data adapter is no longer a normal internal path
+- reducing `compact.py` to low-level preview and truncation helpers only
+- deciding whether advice should move onto typed command data or remain a pure
+  serialized-edge consumer
+- continuing to remove legacy payload helpers where persistence or
+  compatibility concerns no longer require them

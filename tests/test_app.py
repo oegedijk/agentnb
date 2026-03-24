@@ -23,14 +23,20 @@ from agentnb.app import (
 )
 from agentnb.contracts import HelperAccessMetadata, KernelStatus
 from agentnb.errors import AmbiguousSessionError
-from agentnb.execution import ExecutionRecord, ExecutionService, ManagedExecution, StartOutcome
+from agentnb.execution import (
+    ExecutionRecord,
+    ExecutionService,
+    ManagedExecution,
+    SessionAccessOutcome,
+    StartOutcome,
+)
 from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry
 from agentnb.ops import NotebookOps
 from agentnb.payloads import RunSnapshot
 from agentnb.runs.models import RunObservationResult
-from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
+from agentnb.runtime import KernelRuntime, RuntimeState
 from agentnb.selectors import parse_history_reference, parse_run_reference
 from agentnb.state import CommandLockInfo
 from tests.helpers import build_run_snapshot
@@ -320,7 +326,7 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
     executions = Mock(spec=ExecutionService)
-    runtime.wait_until_idle.return_value = KernelWaitResult(
+    executions.wait_for_session_access.return_value = SessionAccessOutcome(
         status=KernelStatus(alive=True, pid=123, busy=False),
         waited=True,
         waited_for="idle",
@@ -328,7 +334,6 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
         waited_ms=12,
         initial_runtime_state="busy",
     )
-    executions.list_runs.return_value = []
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     response = app.status(
@@ -347,11 +352,12 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
     assert response.data["waited_ms"] == 12
     assert response.data["initial_runtime_state"] == "busy"
     _assert_called_with_subset(
-        runtime.wait_until_idle,
+        executions.wait_for_session_access,
         project_root=project_dir.resolve(),
         session_id="analysis",
+        target="idle",
     )
-    wait_kwargs = runtime.wait_until_idle.call_args.kwargs
+    wait_kwargs = executions.wait_for_session_access.call_args.kwargs
     assert wait_kwargs["project_root"] == project_dir.resolve()
     assert wait_kwargs["session_id"] == "analysis"
     assert 0 < wait_kwargs["timeout_s"] <= 5.0
@@ -360,30 +366,13 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
 def test_app_status_wait_idle_waits_for_active_run_before_returning(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
-    runtime.wait_until_idle.side_effect = [
-        KernelWaitResult(
-            status=KernelStatus(alive=True, pid=123, busy=False),
-            waited=True,
-            waited_for="idle",
-            runtime_state="ready",
-        ),
-        KernelWaitResult(
-            status=KernelStatus(alive=True, pid=123, busy=False),
-            waited=True,
-            waited_for="idle",
-            runtime_state="ready",
-        ),
-    ]
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.side_effect = [
-        [{"execution_id": "run-1", "status": "running"}],
-        [],
-    ]
-    executions.wait_for_run.return_value = {
-        "execution_id": "run-1",
-        "session_id": "analysis",
-        "status": "ok",
-    }
+    executions.wait_for_session_access.return_value = SessionAccessOutcome(
+        status=KernelStatus(alive=True, pid=123, busy=False),
+        waited=True,
+        waited_for="idle",
+        runtime_state="ready",
+    )
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     response = app.status(
@@ -397,44 +386,25 @@ def test_app_status_wait_idle_waits_for_active_run_before_returning(project_dir)
     assert response.status == "ok"
     assert response.data["waited"] is True
     assert response.data["waited_for"] == "idle"
-    assert runtime.wait_until_idle.call_count == 2
-    executions.wait_for_run.assert_called_once()
     _assert_called_with_subset(
-        executions.wait_for_run,
+        executions.wait_for_session_access,
         project_root=project_dir.resolve(),
-        execution_id="run-1",
+        session_id="analysis",
+        target="idle",
     )
 
 
 def test_app_status_wait_idle_marks_waited_when_only_run_completion_blocked(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
-    runtime.wait_until_idle.side_effect = [
-        KernelWaitResult(
-            status=KernelStatus(alive=True, pid=123, busy=False),
-            waited=False,
-            waited_for="idle",
-            runtime_state="ready",
-            initial_runtime_state="ready",
-        ),
-        KernelWaitResult(
-            status=KernelStatus(alive=True, pid=123, busy=False),
-            waited=False,
-            waited_for="idle",
-            runtime_state="ready",
-            initial_runtime_state="ready",
-        ),
-    ]
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.side_effect = [
-        [{"execution_id": "run-1", "status": "running"}],
-        [],
-    ]
-    executions.wait_for_run.return_value = {
-        "execution_id": "run-1",
-        "session_id": "analysis",
-        "status": "ok",
-    }
+    executions.wait_for_session_access.return_value = SessionAccessOutcome(
+        status=KernelStatus(alive=True, pid=123, busy=False),
+        waited=True,
+        waited_for="idle",
+        runtime_state="ready",
+        initial_runtime_state="ready",
+    )
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     response = app.status(
@@ -544,16 +514,18 @@ def test_app_read_commands_project_starting_state_without_running_helpers(
     getattr(ops, result_method_name).assert_not_called()
 
 
-def test_app_wait_uses_runtime_wait_for_usable(project_dir, mocker) -> None:
+def test_app_wait_uses_execution_service_wait_for_usable(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
-    runtime.wait_for_usable.return_value = mocker.Mock(
+    executions = Mock(spec=ExecutionService)
+    executions.wait_for_session_access.return_value = SessionAccessOutcome(
         status=KernelStatus(alive=True, pid=123, busy=False),
         waited=True,
         waited_for="idle",
         runtime_state="ready",
+        waited_ms=0,
     )
-    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
+    app = AgentNBApp(runtime=runtime, executions=executions)
 
     response = app.wait(
         WaitRequest(
@@ -571,10 +543,11 @@ def test_app_wait_uses_runtime_wait_for_usable(project_dir, mocker) -> None:
     assert response.data["runtime_state"] == "ready"
     assert response.data["waited_ms"] == 0
     _assert_called_with_subset(
-        runtime.wait_for_usable,
+        executions.wait_for_session_access,
         project_root=project_dir.resolve(),
         session_id="analysis",
         timeout_s=5.0,
+        target="usable",
     )
 
 

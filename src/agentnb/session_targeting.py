@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
+from .errors import AgentNBException
 from .session import DEFAULT_SESSION_ID
 
 ResolutionSource = Literal["explicit", "remembered", "sole_live", "default"]
+
+if TYPE_CHECKING:
+    from .runtime import RuntimeState
 
 
 class SessionTargetRuntime(Protocol):
@@ -24,6 +28,16 @@ class SessionTargetRuntime(Protocol):
 
     def is_live_session(self, *, project_root: Path, session_id: str) -> bool: ...
 
+    def runtime_state(self, project_root: Path, session_id: str) -> RuntimeState: ...
+
+
+@dataclass(slots=True, frozen=True)
+class CommandSemantics:
+    require_live_session: bool
+    persist_explicit_preference: bool = False
+    announce_switch: bool = False
+    reject_starting_session: bool = False
+
 
 @dataclass(slots=True, frozen=True)
 class SessionTargetDecision:
@@ -32,6 +46,25 @@ class SessionTargetDecision:
     previous_preference: str | None
     updates_preference: bool = False
     switched_session: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ResolvedCommandContext:
+    semantics: CommandSemantics
+    decision: SessionTargetDecision
+    runtime_state: RuntimeState | None = None
+
+    @property
+    def session_id(self) -> str:
+        return self.decision.session_id
+
+    @property
+    def source(self) -> ResolutionSource:
+        return self.decision.source
+
+    @property
+    def switched_session(self) -> str | None:
+        return self.decision.switched_session
 
 
 class SessionTargetingPolicy:
@@ -95,6 +128,43 @@ class SessionTargetingPolicy:
         if isinstance(session_id, str) and session_id:
             return session_id
         return None
+
+    def resolve_command_context(
+        self,
+        *,
+        project_root: Path,
+        requested_session_id: str | None,
+        semantics: CommandSemantics,
+    ) -> ResolvedCommandContext:
+        decision = self.resolve_command_target(
+            project_root=project_root,
+            requested_session_id=requested_session_id,
+            require_live_session=semantics.require_live_session,
+            persist_explicit_preference=semantics.persist_explicit_preference,
+            announce_switch=semantics.announce_switch,
+        )
+        runtime_state = None
+        if semantics.reject_starting_session:
+            runtime_state = self._runtime.runtime_state(
+                project_root=project_root,
+                session_id=decision.session_id,
+            )
+            if runtime_state.kind == "starting":
+                raise AgentNBException(
+                    code="KERNEL_NOT_READY",
+                    message="Kernel startup is still in progress or not yet ready. Wait and retry.",
+                    data={
+                        "session_id": decision.session_id,
+                        "session_source": decision.source,
+                        "runtime_state": runtime_state.kind,
+                        "session_exists": runtime_state.session_exists,
+                    },
+                )
+        return ResolvedCommandContext(
+            semantics=semantics,
+            decision=decision,
+            runtime_state=runtime_state,
+        )
 
     def _resolution_source(
         self,

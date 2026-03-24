@@ -318,11 +318,12 @@ class KernelIntrospection:
         timeout_s: float,
     ) -> HelperAccessMetadata:
         if self.executions is not None:
-            return self.executions.wait_for_helper_session_access(
+            return self.executions.wait_for_session_access(
                 project_root=project_root,
                 session_id=session_id,
                 timeout_s=timeout_s,
-            )
+                target="helper",
+            ).to_helper_access_metadata()
         wait_result = self.runtime.wait_for_usable(
             project_root=project_root,
             session_id=session_id,

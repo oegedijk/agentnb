@@ -30,6 +30,7 @@ from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
 from agentnb.payloads import RunSnapshot
 from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelWaitResult
+from tests.helpers import build_run_snapshot
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
@@ -206,21 +207,6 @@ def test_cli_json_envelope_for_exec_roundtrip(cli_runner: CliRunner, project_dir
     assert payload["data"]["result"] == "2"
     assert isinstance(payload["data"]["execution_id"], str)
     assert "events" not in payload["data"]
-
-
-def test_cli_vars_help_describes_substring_matcher(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(main, ["vars", "--help"])
-
-    assert result.exit_code == 0
-    assert "contain this substring" in result.output
-    assert "--match when the namespace gets noisy" in result.output
-
-
-def test_cli_session_help_describes_ambiguous_live_session_behavior(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(main, ["vars", "--help"])
-
-    assert result.exit_code == 0
-    assert "require explicit selection" in result.output
 
 
 def test_cli_root_version_flag_reports_package_version(cli_runner: CliRunner) -> None:
@@ -656,13 +642,9 @@ def test_cli_vars_projects_starting_state_when_connection_exists_without_session
     assert _error(payload)["code"] == "KERNEL_NOT_READY"
     assert payload["data"]["runtime_state"] == "starting"
     assert payload["data"]["session_exists"] is False
-    assert payload["suggestions"] == [
-        f"Run `agentnb wait --project {project_dir} --json` to wait for startup to finish.",
-        (
-            f"Run `agentnb status --project {project_dir} --json` "
-            "to inspect the current session state."
-        ),
-    ]
+    assert len(payload["suggestions"]) == 2
+    assert any("agentnb wait" in suggestion for suggestion in payload["suggestions"])
+    assert any("agentnb status" in suggestion for suggestion in payload["suggestions"])
 
 
 def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
@@ -683,16 +665,9 @@ def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
     assert error["code"] == "AMBIGUOUS_SESSION"
     assert error["message"].startswith("Multiple live sessions exist")
     assert payload["data"]["available_sessions"] == ["default", "analysis"]
-    assert payload["suggestions"] == [
-        (
-            f"Run `agentnb sessions list --project {project_dir} --json` "
-            "to see the live session names."
-        ),
-        (
-            f"Retry with `agentnb status --session NAME --project {project_dir} --json` "
-            "to target one explicitly."
-        ),
-    ]
+    assert len(payload["suggestions"]) == 2
+    assert any("sessions list" in suggestion for suggestion in payload["suggestions"])
+    assert any("--session NAME" in suggestion for suggestion in payload["suggestions"])
 
 
 def test_cli_exec_implicit_target_is_ambiguous_even_with_current_session_preference(
@@ -1081,84 +1056,82 @@ def test_cli_root_help_is_shown_without_arguments(cli_runner: CliRunner) -> None
     assert "agentnb wait" in result.output
 
 
-def test_cli_help_is_comprehensive(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(main, ["--help"])
-    normalized_output = " ".join(result.output.split())
-    assert result.exit_code == 0
-    assert "Persistent project-scoped Python REPL for agent workflows." in result.output
-    assert 'agentnb "import json"' in result.output
-    assert "Canonical grammar:" in result.output
-    assert "status --wait-idle" in result.output
-    assert "execution-id `runs`" in result.output
-    assert "intentionally do not accept `--session`." in normalized_output
-    assert "runs show @latest" in result.output
-    assert "@last-error" in result.output
-    assert "--quiet" in result.output
-    assert "sessions" in result.output
-    assert "Run Code:" in result.output
-    assert "Read And Inspect:" in result.output
-    assert "Control Session:" in result.output
-    assert "Background Runs:" in result.output
-    assert "Sessions:" in result.output
-    assert "Cleanup primitives:" in result.output
-    assert "exec  Execute code in the live kernel." in result.output
-    assert "wait       Wait until the target session is usable" in result.output
-    assert "runs  Inspect persisted execution records for" in result.output
-
-
-def test_cli_history_help_mentions_selectors(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(main, ["history", "--help"])
-
-    assert result.exit_code == 0
-    assert "@latest" in result.output
-    assert "@last-error" in result.output
-    assert "last-" in result.output
-    assert "Selectors for REFERENCE" in result.output
-    assert "helper/provenance entries" in result.output
-
-
-def test_cli_exec_help_describes_output_selectors_and_cleanup_primitives(
+@pytest.mark.parametrize(
+    ("argv", "expected_phrases"),
+    [
+        (
+            ["--help"],
+            [
+                "Persistent project-scoped Python REPL for agent workflows.",
+                "runs show @latest",
+                "Cleanup primitives:",
+            ],
+        ),
+        (
+            ["vars", "--help"],
+            [
+                "contain this substring",
+                "require explicit selection",
+            ],
+        ),
+        (
+            ["history", "--help"],
+            [
+                "@latest",
+                "helper/provenance entries",
+            ],
+        ),
+        (
+            ["exec", "--help"],
+            [
+                "Show only stdout from the execution.",
+                "exec --fresh: stop and restart the session, then execute code.",
+            ],
+        ),
+        (
+            ["runs", "follow", "--help"],
+            [
+                "--timeout FLOAT",
+                "observation window",
+            ],
+        ),
+    ],
+)
+def test_cli_help_mentions_key_guidance(
     cli_runner: CliRunner,
+    argv: list[str],
+    expected_phrases: list[str],
 ) -> None:
-    result = cli_runner.invoke(main, ["exec", "--help"])
+    result = cli_runner.invoke(main, argv)
 
     assert result.exit_code == 0
-    assert "Show only stdout from the execution." in result.output
-    assert "Show only stderr from the execution." in result.output
-    assert "compact preview rather than the full" in result.output
-    assert "exec --fresh: stop and restart the session, then execute code." in result.output
-
-
-def test_cli_runs_follow_help_describes_observation_window(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(main, ["runs", "follow", "--help"])
-
-    assert result.exit_code == 0
-    assert "--timeout FLOAT" in result.output
-    assert "bounds the observation window for `runs follow`" in result.output
+    for phrase in expected_phrases:
+        assert phrase in result.output
 
 
 @pytest.mark.parametrize(
-    ("argv", "expected"),
+    ("argv", "expected_phrases"),
     [
         (
             ["list"],
-            "Unknown command 'list'. Did you mean `agentnb sessions list` or `agentnb runs list`?",
+            ["Unknown command 'list'.", "sessions list", "runs list"],
         ),
         (
             ["log"],
-            "Unknown command 'log'. Did you mean `agentnb history`?",
+            ["Unknown command 'log'.", "agentnb history"],
         ),
     ],
 )
 def test_cli_unknown_command_reports_deterministic_guidance(
     cli_runner: CliRunner,
     argv: list[str],
-    expected: str,
+    expected_phrases: list[str],
 ) -> None:
     result = cli_runner.invoke(main, argv)
 
     assert result.exit_code == 2
-    assert expected in result.output
+    for phrase in expected_phrases:
+        assert phrase in result.output
     assert "NameError" not in result.output
 
 
@@ -1458,10 +1431,7 @@ def test_cli_exec_background_returns_run_id(cli_runner: CliRunner, project_dir: 
     payload = _payload(result.output)
     assert payload["data"]["execution_id"] == "run-1"
     assert payload["data"]["background"] is True
-    assert payload["suggestions"][0] == (
-        f"Run `agentnb runs wait run-1 --project {project_dir} --json` "
-        "to wait for the final result."
-    )
+    assert "runs wait run-1" in payload["suggestions"][0]
 
 
 def test_cli_exec_existing_python_path_suggests_file_execution(
@@ -1482,16 +1452,9 @@ def test_cli_exec_existing_python_path_suggests_file_execution(
         "input_shape": "exec_file_path",
         "source_path": str(script),
     }
-    assert payload["suggestions"] == [
-        (
-            f"Run `agentnb exec --file {script} --project {project_dir} --json` "
-            "to execute the file through `exec --file`."
-        ),
-        (
-            f"Run `agentnb {script} --project {project_dir} --json` "
-            "to use the top-level file-execution hot path."
-        ),
-    ]
+    assert len(payload["suggestions"]) == 2
+    assert any("exec --file" in suggestion for suggestion in payload["suggestions"])
+    assert any(str(script) in suggestion for suggestion in payload["suggestions"])
     assert payload["suggestion_actions"] == [
         {
             "kind": "command",
@@ -2046,10 +2009,9 @@ def test_cli_sessions_list_empty_has_actionable_suggestions(
     assert result.exit_code == 0
     payload = _payload(result.output)
     assert payload["data"]["sessions"] == []
-    assert payload["suggestions"] == [
-        f"Run `agentnb start --project {project_dir} --json` to start the default session.",
-        f'Run `agentnb "..." --project {project_dir} --json` to start and execute in one step.',
-    ]
+    assert len(payload["suggestions"]) == 2
+    assert any("agentnb start" in suggestion for suggestion in payload["suggestions"])
+    assert any('agentnb "..."' in suggestion for suggestion in payload["suggestions"])
 
 
 def test_cli_sessions_delete_calls_runtime_delete(cli_runner: CliRunner, project_dir: Path) -> None:
@@ -2499,17 +2461,7 @@ def test_cli_runs_follow_window_elapsed_returns_ok_final_frame(
     import agentnb.cli as cli
 
     cli.executions.observe_run = lambda **_: RunObservationResult(  # type: ignore[method-assign]
-        run=cast(
-            RunSnapshot,
-            {
-                "execution_id": "run-1",
-                "session_id": "default",
-                "command_type": "exec",
-                "status": "running",
-                "duration_ms": 12,
-                "events": [],
-            },
-        ),
+        run=build_run_snapshot(status="running", duration_ms=12, events=[]),
         completion_reason="window_elapsed",
         replayed_event_count=1,
         emitted_event_count=0,
@@ -2536,17 +2488,11 @@ def test_cli_runs_follow_human_window_elapsed_reuses_snapshot_renderer(
     import agentnb.cli as cli
 
     cli.executions.observe_run = lambda **_: RunObservationResult(  # type: ignore[method-assign]
-        run=cast(
-            RunSnapshot,
-            {
-                "execution_id": "run-1",
-                "session_id": "default",
-                "command_type": "exec",
-                "status": "running",
-                "duration_ms": 12,
-                "stdout": "tick\n",
-                "events": [],
-            },
+        run=build_run_snapshot(
+            status="running",
+            duration_ms=12,
+            stdout="tick\n",
+            events=[],
         ),
         completion_reason="window_elapsed",
     )

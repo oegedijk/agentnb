@@ -24,7 +24,7 @@ from agentnb.kernel.backend import BackendExecutionTimeout
 from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState, SessionResolutionPolicy
 from agentnb.session import SessionInfo, SessionStore
 from tests.conftest import TestLocalIPythonBackend
-from tests.helpers import create_project_dir, reset_integration_kernel
+from tests.helpers import create_project_dir, install_fake_clock, reset_integration_kernel
 
 pytest.importorskip("jupyter_client")
 pytest.importorskip("ipykernel")
@@ -593,7 +593,7 @@ def test_runtime_wait_for_ready_returns_when_status_becomes_alive(
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
-        poll_interval_s=0.0,
+        poll_interval_s=0.1,
     )
 
     assert ready.alive is True
@@ -603,6 +603,7 @@ def test_runtime_wait_for_ready_returns_when_status_becomes_alive(
 def test_runtime_wait_for_ready_times_out(project_dir: Path, mocker) -> None:
     backend = Mock()
     runtime = KernelRuntime(backend=backend)
+    install_fake_clock(mocker, "agentnb.runtime")
     mocker.patch.object(
         runtime,
         "runtime_state",
@@ -617,8 +618,8 @@ def test_runtime_wait_for_ready_times_out(project_dir: Path, mocker) -> None:
         runtime.wait_for_ready(
             project_root=project_dir,
             session_id="default",
-            timeout_s=0.0,
-            poll_interval_s=0.0,
+            timeout_s=0.5,
+            poll_interval_s=0.25,
         )
 
 
@@ -786,7 +787,7 @@ def test_runtime_wait_for_idle_returns_when_status_becomes_not_busy(
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
-        poll_interval_s=0.0,
+        poll_interval_s=0.1,
     )
 
     assert idle.alive is True
@@ -795,6 +796,7 @@ def test_runtime_wait_for_idle_returns_when_status_becomes_not_busy(
 
 def test_runtime_wait_for_idle_times_out(project_dir: Path, mocker) -> None:
     runtime = KernelRuntime(backend=Mock())
+    install_fake_clock(mocker, "agentnb.runtime")
     mocker.patch.object(
         runtime,
         "runtime_state",
@@ -810,8 +812,8 @@ def test_runtime_wait_for_idle_times_out(project_dir: Path, mocker) -> None:
         runtime.wait_for_idle(
             project_root=project_dir,
             session_id="default",
-            timeout_s=0.0,
-            poll_interval_s=0.0,
+            timeout_s=0.5,
+            poll_interval_s=0.25,
         )
 
 
@@ -831,7 +833,7 @@ def test_runtime_wait_for_usable_returns_immediately_when_idle(project_dir: Path
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
-        poll_interval_s=0.0,
+        poll_interval_s=0.1,
     )
 
     assert result.status.alive is True
@@ -870,7 +872,7 @@ def test_runtime_wait_for_usable_waits_for_ready_when_not_alive(project_dir: Pat
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
-        poll_interval_s=0.0,
+        poll_interval_s=0.1,
     )
 
     assert result.status.alive is True
@@ -882,7 +884,7 @@ def test_runtime_wait_for_usable_waits_for_ready_when_not_alive(project_dir: Pat
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
-        poll_interval_s=0.0,
+        poll_interval_s=0.1,
     )
 
 
@@ -915,7 +917,7 @@ def test_runtime_wait_for_usable_waits_for_idle_when_busy(project_dir: Path, moc
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
-        poll_interval_s=0.0,
+        poll_interval_s=0.1,
     )
 
     assert result.status.alive is True
@@ -928,7 +930,7 @@ def test_runtime_wait_for_usable_waits_for_idle_when_busy(project_dir: Path, moc
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
-        poll_interval_s=0.0,
+        poll_interval_s=0.1,
     )
 
 
@@ -949,7 +951,7 @@ def test_runtime_wait_for_ready_raises_when_session_is_dead(project_dir: Path, m
             project_root=project_dir,
             session_id="default",
             timeout_s=1.0,
-            poll_interval_s=0.0,
+            poll_interval_s=0.1,
         )
 
 
@@ -970,5 +972,5 @@ def test_runtime_wait_for_usable_raises_when_session_is_dead(project_dir: Path, 
             project_root=project_dir,
             session_id="default",
             timeout_s=1.0,
-            poll_interval_s=0.0,
+            poll_interval_s=0.1,
         )

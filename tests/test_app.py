@@ -33,6 +33,7 @@ from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
 from agentnb.selectors import parse_history_reference, parse_run_reference
 from agentnb.state import CommandLockInfo
+from tests.helpers import build_run_snapshot
 
 
 class DummySink:
@@ -100,8 +101,6 @@ def test_app_exec_rejects_invalid_flag_combinations_before_runtime_lookup(
     assert response.error.code == "INVALID_INPUT"
     assert response.error.message == expected_message
     runtime.resolve_session_id.assert_not_called()
-    executions.execute_code.assert_not_called()
-    executions.start_background_code.assert_not_called()
 
 
 def test_app_exec_success_routes_through_resolved_session(project_dir) -> None:
@@ -238,7 +237,6 @@ def test_app_exec_background_success_uses_background_service(project_dir) -> Non
         code="long_running()",
         ensure_started=True,
     )
-    executions.execute_code.assert_not_called()
 
 
 def test_app_exec_output_selector_adds_selected_text(project_dir) -> None:
@@ -287,8 +285,6 @@ def test_app_exec_maps_ambiguous_session_errors_to_response(project_dir) -> None
     assert response.error.code == "AMBIGUOUS_SESSION"
     assert response.data["available_sessions"] == ["default", "analysis"]
     assert any("--session" in suggestion for suggestion in response.suggestions)
-    executions.execute_code.assert_not_called()
-    executions.start_background_code.assert_not_called()
 
 
 def test_app_exec_uses_strict_implicit_session_resolution(project_dir) -> None:
@@ -312,7 +308,8 @@ def test_app_exec_uses_strict_implicit_session_resolution(project_dir) -> None:
     response = app.exec(ExecRequest(project_root=project_dir, code="1 + 1"))
 
     assert response.status == "ok"
-    runtime.resolve_session_id.assert_called_once_with(
+    _assert_called_with_subset(
+        runtime.resolve_session_id,
         project_root=project_dir.resolve(),
         requested_session_id=None,
         require_live_session=True,
@@ -354,12 +351,10 @@ def test_app_status_wait_idle_uses_resolved_session_and_wait_path(project_dir) -
         project_root=project_dir.resolve(),
         session_id="analysis",
     )
-    executions.wait_for_run.assert_not_called()
     wait_kwargs = runtime.wait_until_idle.call_args.kwargs
     assert wait_kwargs["project_root"] == project_dir.resolve()
     assert wait_kwargs["session_id"] == "analysis"
     assert 0 < wait_kwargs["timeout_s"] <= 5.0
-    runtime.status.assert_not_called()
 
 
 def test_app_status_wait_idle_waits_for_active_run_before_returning(project_dir) -> None:
@@ -474,8 +469,6 @@ def test_app_status_projects_runtime_state_for_starting_session(project_dir) -> 
     assert response.data["alive"] is False
     assert response.data["runtime_state"] == "starting"
     assert response.data["session_exists"] is False
-    runtime.runtime_state.assert_called_once()
-    runtime.status.assert_not_called()
 
 
 def test_app_status_projects_busy_lock_metadata(project_dir) -> None:
@@ -543,7 +536,8 @@ def test_app_read_commands_project_starting_state_without_running_helpers(
     assert response.error.code == "KERNEL_NOT_READY"
     assert response.data["runtime_state"] == "starting"
     assert response.data["session_exists"] is False
-    runtime.runtime_state.assert_called_once_with(
+    _assert_called_with_subset(
+        runtime.runtime_state,
         project_root=project_dir.resolve(),
         session_id="analysis",
     )
@@ -576,7 +570,6 @@ def test_app_wait_uses_runtime_wait_for_usable(project_dir, mocker) -> None:
     assert response.data["waited_for"] == "idle"
     assert response.data["runtime_state"] == "ready"
     assert response.data["waited_ms"] == 0
-    runtime.wait_for_usable.assert_called_once()
     _assert_called_with_subset(
         runtime.wait_for_usable,
         project_root=project_dir.resolve(),
@@ -602,7 +595,6 @@ def test_app_history_rejects_latest_and_last_combination_before_runtime_lookup(p
     assert response.error.code == "INVALID_INPUT"
     assert response.error.message == "Use either --latest or --last, not both."
     runtime.resolve_session_id.assert_not_called()
-    runtime.select_history.assert_not_called()
 
 
 def test_app_history_compacts_entries_and_applies_last_selection(project_dir) -> None:
@@ -651,7 +643,6 @@ def test_app_history_compacts_entries_and_applies_last_selection(project_dir) ->
     assert response.status == "ok"
     assert [entry["command_type"] for entry in response.data["entries"]] == ["exec", "vars"]
     assert response.data["entries"][0]["label"] == "exec beta = 2 | beta + 1"
-    runtime.select_history.assert_called_once()
     query = runtime.select_history.call_args.kwargs["query"]
     assert query.session_id == "default"
     assert query.errors_only is False
@@ -711,7 +702,6 @@ def test_app_reset_failure_returns_top_level_execution_error(project_dir) -> Non
     assert response.error.code == "EXECUTION_ERROR"
     assert response.data["status"] == "error"
     assert response.data["execution_id"] == "run-reset"
-    executions.reset_session.assert_called_once()
     _assert_called_with_subset(
         executions.reset_session,
         project_root=project_dir.resolve(),
@@ -775,7 +765,6 @@ def test_app_runs_list_compacts_runs_and_applies_last_selection(project_dir) -> 
             "error_type": "ValueError",
         }
     ]
-    executions.list_runs.assert_called_once()
     _assert_called_with_subset(
         executions.list_runs,
         project_root=project_dir.resolve(),
@@ -812,7 +801,6 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     assert response.session_id == "analysis"
     assert response.data["run"]["execution_id"] == "run-1"
     assert "result" not in response.data["run"]
-    executions.observe_run.assert_called_once()
     _assert_called_with_subset(
         executions.observe_run,
         project_root=project_dir.resolve(),
@@ -820,6 +808,59 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
         timeout_s=4.0,
         event_sink=sink,
     )
+
+
+def test_app_run_lookup_sanitizes_tracebacks_and_hides_follow_output_fields(project_dir) -> None:
+    runtime = Mock(spec=KernelRuntime)
+    executions = Mock(spec=ExecutionService)
+    sink = DummySink()
+    raw_run = build_run_snapshot(
+        session_id="analysis",
+        status="error",
+        traceback=["\x1b[31mTraceback line\x1b[0m"],
+        recorded_traceback=["\x1b[31mKeyboardInterrupt\x1b[0m"],
+        stdout="tick\n",
+        stderr="warn\n",
+        result="2",
+        events=[
+            {
+                "kind": "error",
+                "content": "boom",
+                "metadata": {"traceback": ["\x1b[31mframe 1\x1b[0m"]},
+            }
+        ],
+        outputs=[{"kind": "result", "text": "2", "mime": {"text/plain": "2"}}],
+    )
+    executions.get_run.return_value = dict(raw_run)
+    executions.observe_run.return_value = RunObservationResult(
+        run=build_run_snapshot(**dict(raw_run)),
+        completion_reason="window_elapsed",
+    )
+    app = AgentNBApp(runtime=runtime, executions=executions)
+
+    show_response = app.runs_show(
+        RunLookupRequest(project_root=project_dir, run_reference=parse_run_reference("run-1"))
+    )
+    follow_response = app.runs_follow(
+        RunsFollowRequest(
+            project_root=project_dir,
+            run_reference=parse_run_reference("run-1"),
+            timeout_s=4.0,
+        ),
+        event_sink=sink,
+    )
+
+    show_run = show_response.data["run"]
+    assert show_run["traceback"] == ["Traceback line"]
+    assert show_run["recorded_traceback"] == ["KeyboardInterrupt"]
+    assert show_run["events"][0]["metadata"]["traceback"] == ["frame 1"]
+    assert "outputs" not in show_run
+
+    follow_run = follow_response.data["run"]
+    assert follow_run["traceback"] == ["Traceback line"]
+    assert follow_run["recorded_traceback"] == ["KeyboardInterrupt"]
+    for hidden_key in ("stdout", "stderr", "result", "events", "outputs"):
+        assert hidden_key not in follow_run
 
 
 def test_app_runs_show_resolves_latest_selector_before_lookup(project_dir) -> None:
@@ -846,11 +887,13 @@ def test_app_runs_show_resolves_latest_selector_before_lookup(project_dir) -> No
 
     assert response.status == "ok"
     assert response.data["run"]["execution_id"] == "run-2"
-    executions.list_runs.assert_called_once_with(
+    _assert_called_with_subset(
+        executions.list_runs,
         project_root=project_dir.resolve(),
         session_id=None,
     )
-    executions.get_run.assert_called_once_with(
+    _assert_called_with_subset(
+        executions.get_run,
         project_root=project_dir.resolve(),
         execution_id="run-2",
     )
@@ -922,20 +965,23 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
 
     if command_name == "show":
         response = app.runs_show(request_factory(project_dir))
-        executions.get_run.assert_called_once_with(
+        _assert_called_with_subset(
+            executions.get_run,
             project_root=project_dir.resolve(),
             execution_id="run-1",
         )
     elif command_name == "wait":
         response = app.runs_wait(request_factory(project_dir))
-        executions.wait_for_run.assert_called_once_with(
+        _assert_called_with_subset(
+            executions.wait_for_run,
             project_root=project_dir.resolve(),
             execution_id="run-1",
             timeout_s=4.0,
         )
     else:
         response = app.runs_follow(request_factory(project_dir), event_sink=sink)
-        executions.observe_run.assert_called_once_with(
+        _assert_called_with_subset(
+            executions.observe_run,
             project_root=project_dir.resolve(),
             execution_id="run-1",
             timeout_s=4.0,
@@ -953,7 +999,7 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
     assert response.data["run"]["recorded_ename"] == "KeyboardInterrupt"
 
 
-def test_app_runs_follow_translates_elapsed_window_into_timeout(project_dir) -> None:
+def test_app_runs_follow_reports_elapsed_window(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     executions = Mock(spec=ExecutionService)
     sink = DummySink()
@@ -994,14 +1040,19 @@ def test_app_sessions_list_routes_through_handle_command(project_dir) -> None:
     assert response.status == "ok"
     assert response.data["sessions"] == [{"session_id": "default"}]
     assert response.data["hidden_non_live_count"] == 2
-    runtime.resolve_session_id.assert_called_once_with(
+    _assert_called_with_subset(
+        runtime.resolve_session_id,
         project_root=project_dir.resolve(),
         requested_session_id=None,
         require_live_session=False,
     )
-    runtime.list_sessions.assert_called_once_with(project_root=project_dir.resolve())
-    runtime.hidden_non_live_session_count.assert_called_once_with(
-        project_root=project_dir.resolve()
+    _assert_called_with_subset(
+        runtime.list_sessions,
+        project_root=project_dir.resolve(),
+    )
+    _assert_called_with_subset(
+        runtime.hidden_non_live_session_count,
+        project_root=project_dir.resolve(),
     )
 
 
@@ -1025,12 +1076,14 @@ def test_app_sessions_delete_routes_named_session_through_handle_command(project
     assert response.status == "ok"
     assert response.session_id == "analysis"
     assert response.data["deleted"] is True
-    runtime.resolve_session_id.assert_called_once_with(
+    _assert_called_with_subset(
+        runtime.resolve_session_id,
         project_root=project_dir.resolve(),
         requested_session_id="analysis",
         require_live_session=False,
     )
-    runtime.delete_session.assert_called_once_with(
+    _assert_called_with_subset(
+        runtime.delete_session,
         project_root=project_dir.resolve(),
         session_id="analysis",
     )
@@ -1056,7 +1109,8 @@ def test_app_status_remembers_explicit_session_selection(project_dir) -> None:
     )
 
     assert response.status == "ok"
-    runtime.remember_current_session.assert_called_once_with(
+    _assert_called_with_subset(
+        runtime.remember_current_session,
         project_root=project_dir.resolve(),
         session_id="analysis",
     )

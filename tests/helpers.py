@@ -3,8 +3,16 @@ from __future__ import annotations
 import shutil
 from contextlib import suppress
 from pathlib import Path
+from typing import Any, cast
 
+from agentnb.contracts import (
+    CommandResponse,
+    SuggestionAction,
+    error_response,
+    success_response,
+)
 from agentnb.history import HistoryStore
+from agentnb.payloads import RunSnapshot
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionStore
 
@@ -126,3 +134,85 @@ def _safe_unlink(path: Path) -> None:
         pass
     except OSError:
         pass
+
+
+class FakeClock:
+    def __init__(self, start: float = 1_000.0) -> None:
+        self._now = start
+
+    def monotonic(self) -> float:
+        return self._now
+
+    def sleep(self, seconds: float) -> None:
+        self.advance(seconds)
+
+    def advance(self, seconds: float) -> None:
+        self._now += max(seconds, 0.0)
+
+
+def install_fake_clock(mocker: Any, module_name: str, *, start: float = 1_000.0) -> FakeClock:
+    clock = FakeClock(start)
+    mocker.patch(f"{module_name}.time.monotonic", side_effect=clock.monotonic)
+    mocker.patch(f"{module_name}.time.sleep", side_effect=clock.sleep)
+    return clock
+
+
+def build_run_snapshot(**overrides: object) -> RunSnapshot:
+    payload: dict[str, object] = {
+        "execution_id": "run-1",
+        "ts": "2026-03-12T00:00:00+00:00",
+        "session_id": "default",
+        "command_type": "exec",
+        "status": "ok",
+        "duration_ms": 5,
+    }
+    payload.update(overrides)
+    return cast(RunSnapshot, payload)
+
+
+def build_success_response(
+    *,
+    command: str = "status",
+    data: dict[str, object] | None = None,
+    session_id: str = "default",
+    project: str = "/tmp/project",
+    suggestions: list[str] | None = None,
+    suggestion_actions: list[SuggestionAction] | None = None,
+) -> CommandResponse:
+    return success_response(
+        command=command,
+        project=project,
+        session_id=session_id,
+        data={} if data is None else data,
+        suggestions=[] if suggestions is None else suggestions,
+        suggestion_actions=[] if suggestion_actions is None else suggestion_actions,
+    )
+
+
+def build_error_response(
+    *,
+    command: str = "exec",
+    code: str,
+    message: str,
+    data: dict[str, object] | None = None,
+    session_id: str = "default",
+    project: str = "/tmp/project",
+    ename: str | None = None,
+    evalue: str | None = None,
+    traceback: list[str] | None = None,
+    suggestions: list[str] | None = None,
+    suggestion_actions: list[SuggestionAction] | None = None,
+) -> CommandResponse:
+    return error_response(
+        command=command,
+        project=project,
+        session_id=session_id,
+        code=code,
+        message=message,
+        data={} if data is None else data,
+        ename=ename,
+        evalue=evalue,
+        traceback=traceback,
+        suggestions=[] if suggestions is None else suggestions,
+        suggestion_actions=[] if suggestion_actions is None else suggestion_actions,
+    )

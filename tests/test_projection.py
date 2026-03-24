@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from agentnb.contracts import error_response, success_response
+from agentnb.contracts import success_response
 from agentnb.projection import ResponseProjector
+from tests.helpers import build_error_response, build_success_response
 
 
 def test_response_projector_full_json_matches_stable_contract() -> None:
-    response = success_response(
+    response = build_success_response(
         command="status",
-        project="/tmp/project",
-        session_id="default",
         data={"alive": True, "pid": 123},
         suggestions=["Run `agentnb exec --json`."],
     )
@@ -19,10 +18,8 @@ def test_response_projector_full_json_matches_stable_contract() -> None:
 
 
 def test_response_projector_agent_uses_compact_success_envelope() -> None:
-    response = success_response(
+    response = build_success_response(
         command="status",
-        project="/tmp/project",
-        session_id="default",
         data={"alive": True, "pid": 123, "busy": False},
         suggestions=["This should not appear in the agent payload."],
     )
@@ -72,10 +69,8 @@ def test_response_projector_agent_compacts_wait_like_status() -> None:
 
 
 def test_response_projector_agent_compacts_error_shape() -> None:
-    response = error_response(
+    response = build_error_response(
         command="exec",
-        project="/tmp/project",
-        session_id="default",
         code="EXECUTION_ERROR",
         message="Execution failed.",
         ename="ZeroDivisionError",
@@ -103,10 +98,8 @@ def test_response_projector_agent_compacts_error_shape() -> None:
 
 
 def test_response_projector_uses_normalized_error_shape_for_full_json_and_agent() -> None:
-    response = error_response(
+    response = build_error_response(
         command="exec",
-        project="/tmp/project",
-        session_id="default",
         code="EXECUTION_ERROR",
         message="Execution failed.",
         ename="ZeroDivisionError",
@@ -138,10 +131,8 @@ def test_response_projector_uses_normalized_error_shape_for_full_json_and_agent(
 
 
 def test_response_projector_agent_keeps_suggestion_actions() -> None:
-    response = error_response(
+    response = build_error_response(
         command="exec",
-        project="/tmp/project",
-        session_id="default",
         code="AMBIGUOUS_SESSION",
         message="Multiple live sessions exist.",
         suggestion_actions=[
@@ -167,10 +158,8 @@ def test_response_projector_agent_keeps_suggestion_actions() -> None:
 
 
 def test_response_projector_agent_keeps_busy_metadata_for_exec_errors() -> None:
-    response = error_response(
+    response = build_error_response(
         command="exec",
-        project="/tmp/project",
-        session_id="default",
         code="SESSION_BUSY",
         message="Session is busy.",
         data={
@@ -301,11 +290,9 @@ def test_response_projector_agent_keeps_structured_exec_result_preview() -> None
     }
 
 
-def test_response_projector_agent_derives_exec_result_preview_from_result_text() -> None:
-    response = success_response(
+def test_response_projector_agent_preserves_precomputed_exec_result_preview() -> None:
+    response = build_success_response(
         command="exec",
-        project="/tmp/project",
-        session_id="default",
         data={
             "status": "ok",
             "execution_id": "run-1",

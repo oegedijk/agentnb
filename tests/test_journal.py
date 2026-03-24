@@ -5,6 +5,8 @@ from typing import Any
 
 import pytest
 
+from agentnb.execution import ExecutionRecord, ExecutionStore
+from agentnb.history import kernel_execution_record, user_command_record
 from agentnb.journal import CommandJournal, JournalQuery
 
 
@@ -257,6 +259,92 @@ def test_command_journal_select_can_filter_by_execution_id(populated_journal: Pa
     )
 
     assert [entry.label for entry in selection.entries] == ["exec kernel execution", "exec"]
+
+
+def test_command_journal_prefers_persisted_journal_entries_over_fallback_projection(
+    project_dir: Path,
+) -> None:
+    ExecutionStore(project_dir).append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:01+00:00",
+            session_id="default",
+            command_type="exec",
+            status="ok",
+            duration_ms=12,
+            code="alpha = 1\nalpha",
+            result="1",
+            journal_entries=[
+                kernel_execution_record(
+                    ts="2026-03-10T00:00:01+00:00",
+                    session_id="default",
+                    execution_id="run-1",
+                    command_type="exec",
+                    label="persisted helper",
+                    code="alpha = 1\nalpha",
+                    origin="execution_service",
+                    status="ok",
+                    duration_ms=12,
+                    result="1",
+                ),
+                user_command_record(
+                    ts="2026-03-10T00:00:01+00:00",
+                    session_id="default",
+                    execution_id="run-1",
+                    command_type="exec",
+                    label="persisted exec",
+                    input_text="alpha = 1\nalpha",
+                    code="alpha = 1\nalpha",
+                    origin="execution_service",
+                    status="ok",
+                    duration_ms=12,
+                    result="1",
+                ),
+            ],
+        )
+    )
+
+    selection = CommandJournal().select(
+        project_root=project_dir,
+        query=JournalQuery(session_id="default", include_internal=True),
+    )
+
+    assert [entry.label for entry in selection.entries] == ["persisted helper", "persisted exec"]
+    assert [entry.provenance_source for entry in selection.entries] == [
+        "execution_store",
+        "execution_store",
+    ]
+    assert [entry.provenance_detail for entry in selection.entries] == [
+        "projected_kernel_execution",
+        "projected_user_command",
+    ]
+
+
+def test_command_journal_falls_back_to_projected_entries_when_persisted_journal_is_absent(
+    project_dir: Path,
+    journal_builder: dict[str, Any],
+) -> None:
+    journal_builder["execution"](
+        execution_id="run-1",
+        ts="2026-03-10T00:00:01+00:00",
+        session_id="default",
+        command_type="exec",
+        status="ok",
+        duration_ms=12,
+        code="alpha = 1\nalpha",
+        result="1",
+    )
+
+    selection = CommandJournal().select(
+        project_root=project_dir,
+        query=JournalQuery(session_id="default", include_internal=True),
+    )
+
+    assert [entry.label for entry in selection.entries] == ["exec kernel execution", "exec"]
+    assert [entry.provenance_source for entry in selection.entries] == [
+        "execution_store",
+        "execution_store",
+    ]
 
 
 def test_command_journal_entries_include_classification_and_provenance(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -373,17 +372,14 @@ class ExecutionService:
             session_id=session_id,
         )
         for run in reversed(runs):
-            status = _run_field(run, "status")
-            execution_id = _run_field(run, "execution_id")
+            status = getattr(run, "status", None)
+            execution_id = getattr(run, "execution_id", None)
+            if status is None and isinstance(run, dict):
+                status = run.get("status")
+                execution_id = run.get("execution_id")
             if status in {"starting", "running"} and isinstance(execution_id, str) and execution_id:
                 return execution_id
         return None
-
-
-def _run_field(run: ExecutionRecord | Mapping[str, object], key: str) -> object:
-    if isinstance(run, ExecutionRecord):
-        return getattr(run, key, None)
-    return run.get(key)
 
 
 __all__ = [

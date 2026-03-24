@@ -21,6 +21,7 @@ from agentnb.app import (
     VarsRequest,
     WaitRequest,
 )
+from agentnb.command_data import RunLookupCommandData, RunsListCommandData
 from agentnb.contracts import HelperAccessMetadata, KernelStatus
 from agentnb.errors import AmbiguousSessionError
 from agentnb.execution import (
@@ -723,6 +724,7 @@ def test_app_runs_list_compacts_runs_and_applies_last_selection(project_dir) -> 
     )
 
     assert response.status == "ok"
+    assert isinstance(response.command_data, RunsListCommandData)
     assert response.data["runs"] == [
         {
             "execution_id": "run-2",
@@ -825,6 +827,8 @@ def test_app_run_lookup_sanitizes_tracebacks_and_hides_follow_output_fields(proj
         event_sink=sink,
     )
 
+    assert isinstance(show_response.command_data, RunLookupCommandData)
+    assert isinstance(follow_response.command_data, RunLookupCommandData)
     show_run = show_response.data["run"]
     assert show_run["traceback"] == ["Traceback line"]
     assert show_run["recorded_traceback"] == ["KeyboardInterrupt"]

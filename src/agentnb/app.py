@@ -6,54 +6,47 @@ from pathlib import Path
 from typing import Literal, cast
 
 from .advice import AdviceContext, AdvicePolicy
-from .compact import (
-    compact_execution_payload,
-    compact_history_entry,
-    compact_inspect_payload,
-    compact_run_entry,
-    full_history_entry,
-    preview_text,
-    strip_ansi_lines,
+from .command_data import (
+    CommandDataLike,
+    ExecCommandData,
+    HistoryCommandData,
+    InspectCommandData,
+    KernelSessionData,
+    ReloadCommandData,
+    RunListEntryData,
+    RunLookupCommandData,
+    RunsListCommandData,
+    RunSnapshotData,
+    VarsCommandData,
+    normalize_run_payload,
+    run_lookup_session_id,
+    with_switched_session,
 )
 from .contracts import (
     CommandResponse,
     ExecutionSink,
-    KernelStatus,
     error_response,
     success_response,
 )
 from .errors import AgentNBException
 from .execution import ExecutionService, ManagedExecution, SessionAccessOutcome
-from .execution_invocation import ExecInvocationPolicy, ExecSourceKind, OutputSelector
+from .execution_invocation import ExecInvocationPolicy, ExecSourceKind
 from .introspection import HelperExecutionPolicy
 from .ops import NotebookOps
 from .payloads import (
     BulkDeleteResult,
     DoctorPayload,
-    ExecPayload,
-    HistoryPayload,
-    InspectPreview,
-    InspectResponsePayload,
     InterruptPayload,
     NamespaceDeltaEntry,
     NamespaceDeltaPayload,
-    ReloadReport,
-    RunLookupPayload,
-    RunsListPayload,
-    RunSnapshot,
     SessionsListPayload,
     SessionSummary,
-    StartPayload,
-    StatusPayload,
     StopPayload,
     VarDisplayEntry,
-    VarsPayload,
 )
-from .runs.store import ExecutionRecord
+from .response_serialization import selected_exec_output, serialize_command_data
 from .runtime import (
     KernelRuntime,
-    RuntimeState,
-    RuntimeStateKind,
 )
 from .selectors import (
     HistoryReference,
@@ -68,7 +61,6 @@ from .session_targeting import (
     ResolutionSource,
     SessionTargetingPolicy,
 )
-from .state import CommandLockInfo
 
 StatusWaitFor = Literal["ready", "idle"]
 _HELPER_EXECUTION_POLICY = HelperExecutionPolicy(
@@ -531,15 +523,13 @@ class AgentNBApp:
             ),
         )
 
-    def _start_payload(self, *, request: StartRequest, session_id: str) -> StartPayload:
+    def _start_payload(self, *, request: StartRequest, session_id: str) -> KernelSessionData:
         status, started_new = self.runtime.start(
             project_root=request.project_root,
             session_id=session_id,
             python_executable=request.python_executable,
         )
-        payload = cast(StartPayload, _kernel_status_payload(status))
-        payload["started_new"] = started_new
-        return payload
+        return KernelSessionData.from_kernel_status(status, started_new=started_new)
 
     def _exec_payload(
         self,
@@ -547,7 +537,7 @@ class AgentNBApp:
         request: ExecRequest,
         session_id: str,
         event_sink: ExecutionSink | None,
-    ) -> ExecPayload:
+    ) -> ExecCommandData:
         invocation = request.invocation
         payload_builder = _ExecPayloadBuilder(
             runtime=self.runtime,
@@ -581,11 +571,11 @@ class AgentNBApp:
                 ename=managed.record.ename,
                 evalue=managed.record.evalue,
                 traceback=managed.record.traceback,
-                data=dict(payload),
+                data=serialize_command_data("exec", payload),
             )
         return payload
 
-    def _status_payload(self, *, request: StatusRequest, session_id: str) -> StatusPayload:
+    def _status_payload(self, *, request: StatusRequest, session_id: str) -> KernelSessionData:
         if request.wait_for == "idle":
             access = self.executions.wait_for_session_access(
                 project_root=request.project_root,
@@ -593,7 +583,7 @@ class AgentNBApp:
                 timeout_s=request.timeout_s,
                 target="idle",
             )
-            return _status_payload_from_access_outcome(access)
+            return _kernel_session_data_from_access(access)
         if request.wait_for == "ready":
             access = self.executions.wait_for_session_access(
                 project_root=request.project_root,
@@ -601,24 +591,24 @@ class AgentNBApp:
                 timeout_s=request.timeout_s,
                 target="ready",
             )
-            return _status_payload_from_access_outcome(access)
-        return _status_payload_from_runtime_state(
+            return _kernel_session_data_from_access(access)
+        return KernelSessionData.from_runtime_state(
             self.runtime.runtime_state(
                 project_root=request.project_root,
                 session_id=session_id,
             )
         )
 
-    def _wait_payload(self, *, request: WaitRequest, session_id: str) -> StatusPayload:
+    def _wait_payload(self, *, request: WaitRequest, session_id: str) -> KernelSessionData:
         access = self.executions.wait_for_session_access(
             project_root=request.project_root,
             session_id=session_id,
             timeout_s=request.timeout_s,
             target="usable",
         )
-        return _status_payload_from_access_outcome(access)
+        return _kernel_session_data_from_access(access)
 
-    def _vars_payload(self, *, request: VarsRequest, session_id: str) -> VarsPayload:
+    def _vars_payload(self, *, request: VarsRequest, session_id: str) -> VarsCommandData:
         helper_result = self.ops.list_vars_result(
             project_root=request.project_root,
             session_id=session_id,
@@ -634,41 +624,40 @@ class AgentNBApp:
             display_values: list[VarDisplayEntry] = [
                 {"name": item["name"], "repr": item["repr"]} for item in values
             ]
-            payload = cast(VarsPayload, {"vars": display_values})
-            payload.update(helper_result.access_metadata.merge_data())
-            return payload
-        payload = cast(VarsPayload, {"vars": cast(list[VarDisplayEntry], values)})
-        payload.update(helper_result.access_metadata.merge_data())
-        return payload
+            return VarsCommandData(
+                values=display_values,
+                access_metadata=helper_result.access_metadata,
+            )
+        return VarsCommandData(
+            values=cast(list[VarDisplayEntry], values),
+            access_metadata=helper_result.access_metadata,
+        )
 
-    def _inspect_payload(
-        self, *, request: InspectRequest, session_id: str
-    ) -> InspectResponsePayload:
+    def _inspect_payload(self, *, request: InspectRequest, session_id: str) -> InspectCommandData:
         helper_result = self.ops.inspect_var_result(
             project_root=request.project_root,
             session_id=session_id,
             name=request.name,
             execution_policy=_HELPER_EXECUTION_POLICY,
         )
-        payload = cast(
-            InspectResponsePayload,
-            {"inspect": compact_inspect_payload(helper_result.payload)},
+        return InspectCommandData(
+            payload=helper_result.payload,
+            access_metadata=helper_result.access_metadata,
         )
-        payload.update(helper_result.access_metadata.merge_data())
-        return payload
 
-    def _reload_payload(self, *, request: ReloadRequest, session_id: str) -> ReloadReport:
+    def _reload_payload(self, *, request: ReloadRequest, session_id: str) -> ReloadCommandData:
         helper_result = self.ops.reload_module_result(
             project_root=request.project_root,
             session_id=session_id,
             module_name=request.module_name,
             execution_policy=_HELPER_EXECUTION_POLICY,
         )
-        payload = dict(helper_result.payload)
-        payload.update(helper_result.access_metadata.merge_data())
-        return cast(ReloadReport, payload)
+        return ReloadCommandData(
+            payload=helper_result.payload,
+            access_metadata=helper_result.access_metadata,
+        )
 
-    def _history_payload(self, *, request: HistoryRequest, session_id: str) -> HistoryPayload:
+    def _history_payload(self, *, request: HistoryRequest, session_id: str) -> HistoryCommandData:
         selection = self.runtime.select_history(
             project_root=request.project_root,
             query=self.history_selectors.resolve_query(
@@ -681,22 +670,19 @@ class AgentNBApp:
                 reference=request.reference,
             ),
         )
-        entries = selection.entries
-        formatter = full_history_entry if request.full else compact_history_entry
-        entries = [formatter(entry) for entry in entries]
-        return {"entries": entries}
+        return HistoryCommandData(entries=list(selection.entries), full=request.full)
 
     def _interrupt_payload(self, *, request: InterruptRequest, session_id: str) -> InterruptPayload:
         self.runtime.interrupt(project_root=request.project_root, session_id=session_id)
         return {"interrupted": True}
 
-    def _reset_payload(self, *, request: ResetRequest, session_id: str) -> ExecPayload:
+    def _reset_payload(self, *, request: ResetRequest, session_id: str) -> ExecCommandData:
         managed = self.executions.reset_session(
             project_root=request.project_root,
             session_id=session_id,
             timeout_s=request.timeout_s,
         )
-        payload = compact_execution_payload(managed.record)
+        payload = ExecCommandData(record=managed.record)
         if managed.record.status == "error":
             raise AgentNBException(
                 code="EXECUTION_ERROR",
@@ -704,7 +690,7 @@ class AgentNBApp:
                 ename=managed.record.ename,
                 evalue=managed.record.evalue,
                 traceback=managed.record.traceback,
-                data=dict(payload),
+                data=serialize_command_data("reset", payload),
             )
         return payload
 
@@ -719,16 +705,17 @@ class AgentNBApp:
             python_executable=request.python_executable,
         )
 
-    def _runs_list_payload(self, *, request: RunsListRequest) -> RunsListPayload:
+    def _runs_list_payload(self, *, request: RunsListRequest) -> RunsListCommandData:
         entries = self.executions.list_runs(
             project_root=request.project_root,
             session_id=request.session_id if request.session_id is not None else None,
             errors_only=request.errors,
         )
-        compacted = [compact_run_entry(entry) for entry in entries]
         if request.last is not None:
-            compacted = compacted[-request.last :]
-        return {"runs": compacted}
+            entries = entries[-request.last :]
+        return RunsListCommandData(
+            runs=[RunListEntryData(payload=normalize_run_payload(entry)) for entry in entries]
+        )
 
     def _run_lookup_payload(
         self,
@@ -739,7 +726,7 @@ class AgentNBApp:
         event_sink: ExecutionSink | None,
         default_behavior: RunDefaultBehavior,
         skip_history: bool = False,
-    ) -> RunLookupPayload:
+    ) -> RunLookupCommandData:
         execution_id = self.run_selectors.resolve_execution_id(
             project_root=project_root,
             reference=run_reference,
@@ -769,21 +756,20 @@ class AgentNBApp:
                 project_root=project_root,
                 execution_id=execution_id,
             )
-        payload: RunLookupPayload = {
-            "run": _public_run_payload(
-                run,
+        run_payload = normalize_run_payload(run)
+        payload = RunLookupCommandData(
+            run=RunSnapshotData(
+                payload=run_payload,
                 include_output=not (observation is not None and skip_history),
                 snapshot_stale=observation is not None
                 and observation.completion_reason == "window_elapsed",
-            )
-        }
-        status = run.status if isinstance(run, ExecutionRecord) else run.get("status")
-        if isinstance(status, str):
-            payload["status"] = status
+            ),
+            status=cast(str | None, run_payload.get("status")),
+        )
         if observation is not None:
-            payload["completion_reason"] = observation.completion_reason
-            payload["replayed_event_count"] = observation.replayed_event_count
-            payload["emitted_event_count"] = observation.emitted_event_count
+            payload.completion_reason = observation.completion_reason
+            payload.replayed_event_count = observation.replayed_event_count
+            payload.emitted_event_count = observation.emitted_event_count
         return payload
 
     def _validate_exec_request(self, request: ExecRequest) -> CommandResponse | None:
@@ -857,8 +843,8 @@ class AgentNBApp:
         project_override: Path | None,
         requested_session_id: str | None,
         semantics: CommandSemantics,
-        handler: Callable[[str], Mapping[str, object]],
-        response_session_id_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
+        handler: Callable[[str], CommandDataLike],
+        response_session_id_resolver: Callable[[str, CommandDataLike], str] | None = None,
     ) -> CommandResponse:
         response_session_id = requested_session_id or DEFAULT_SESSION_ID
 
@@ -872,8 +858,8 @@ class AgentNBApp:
             response_session_id = resolved_session_id
             data = handler(resolved_session_id)
             if context.switched_session is not None:
-                data = dict(data)
-                data["switched_session"] = context.switched_session
+                data = with_switched_session(data, context.switched_session)
+            serialized_data = serialize_command_data(command_name, data)
             if response_session_id_resolver is not None:
                 response_session_id = response_session_id_resolver(response_session_id, data)
             return success_response(
@@ -885,7 +871,7 @@ class AgentNBApp:
                     self._advice_context(
                         command_name=command_name,
                         response_status="ok",
-                        data=data,
+                        data=serialized_data,
                         project_override=project_override,
                         session_id=resolved_session_id,
                         session_source=context.source,
@@ -895,7 +881,7 @@ class AgentNBApp:
                     self._advice_context(
                         command_name=command_name,
                         response_status="ok",
-                        data=data,
+                        data=serialized_data,
                         project_override=project_override,
                         session_id=resolved_session_id,
                         session_source=context.source,
@@ -1012,91 +998,19 @@ class AgentNBApp:
         )
 
 
-def _run_response_session_id(current_session_id: str, data: Mapping[str, object]) -> str:
-    run = data.get("run")
-    if isinstance(run, dict):
-        run_payload = cast(Mapping[str, object], run)
-        session_id = run_payload.get("session_id")
+def _run_response_session_id(current_session_id: str, data: CommandDataLike) -> str:
+    if isinstance(data, RunLookupCommandData):
+        session_id = run_lookup_session_id(data)
         if isinstance(session_id, str) and session_id:
             return session_id
+    if isinstance(data, Mapping):
+        run = cast(Mapping[str, object], data).get("run")
+        if isinstance(run, dict):
+            run_payload = cast(Mapping[str, object], run)
+            session_id = run_payload.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                return session_id
     return current_session_id
-
-
-def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:
-    if selector == "result":
-        preview = payload.get("result_preview")
-        result = payload.get("result")
-        if isinstance(preview, dict) and _prefer_preview_text(preview, result):
-            return preview_text(cast(InspectPreview, preview))
-        result = payload.get("result")
-        return "" if result is None else str(result)
-    value = payload.get(selector)
-    return "" if value is None else str(value)
-
-
-def _prefer_preview_text(preview: object, result: object) -> bool:
-    if isinstance(preview, dict):
-        preview_map = cast(dict[str, object], preview)
-        if preview_map.get("kind") == "dataframe-like":
-            return True
-    if not isinstance(result, str):
-        return True
-    return "\n" in result or len(result) > 120
-
-
-def _status_payload_from_runtime_state(state: RuntimeState) -> StatusPayload:
-    return _kernel_status_payload(
-        state.to_kernel_status(),
-        runtime_state=state.kind,
-        session_exists=state.session_exists,
-        command_lock=state.command_lock,
-    )
-
-
-def _status_payload_from_access_outcome(access: SessionAccessOutcome) -> StatusPayload:
-    assert access.status is not None
-    payload = _kernel_status_payload(
-        access.status,
-        runtime_state=access.runtime_state,
-        session_exists=access.status.alive,
-    )
-    payload["waited"] = access.waited
-    if access.waited_for is not None:
-        payload["waited_for"] = access.waited_for
-    payload["waited_ms"] = access.waited_ms
-    if access.initial_runtime_state is not None:
-        payload["initial_runtime_state"] = access.initial_runtime_state
-    return payload
-
-
-def _kernel_status_payload(
-    status: KernelStatus,
-    *,
-    runtime_state: RuntimeStateKind | None = None,
-    session_exists: bool | None = None,
-    command_lock: CommandLockInfo | None = None,
-) -> StatusPayload:
-    payload: StatusPayload = {
-        "alive": status.alive,
-        "pid": status.pid,
-        "connection_file": status.connection_file,
-        "started_at": status.started_at,
-        "uptime_s": status.uptime_s,
-        "python": status.python,
-        "busy": status.busy,
-    }
-    if runtime_state is not None:
-        payload["runtime_state"] = runtime_state
-    if session_exists is not None:
-        payload["session_exists"] = session_exists
-    if command_lock is not None:
-        payload["lock_pid"] = command_lock.pid
-        if command_lock.acquired_at is not None:
-            payload["lock_acquired_at"] = command_lock.acquired_at
-        busy_for_ms = command_lock.busy_for_ms()
-        if busy_for_ms is not None:
-            payload["busy_for_ms"] = busy_for_ms
-    return payload
 
 
 def _sessions_list_payload(
@@ -1121,30 +1035,34 @@ class _ExecPayloadBuilder:
     def __post_init__(self) -> None:
         self.namespace_before = self._file_exec_namespace_snapshot()
 
-    def build(self, managed: ManagedExecution) -> ExecPayload:
+    def build(self, managed: ManagedExecution) -> ExecCommandData:
         invocation = self.request.invocation
-        payload = compact_execution_payload(managed.record, no_truncate=invocation.no_truncate)
-        payload["source_kind"] = self.request.source_kind
-        if self.request.source_path is not None:
-            payload["source_path"] = str(self.request.source_path)
-        if invocation.is_background:
-            payload["background"] = True
-        if invocation.ensure_started:
-            payload["ensured_started"] = True
-            payload["started_new_session"] = managed.start_outcome.started_new_session
-            if managed.start_outcome.initial_runtime_state is not None:
-                payload["initial_runtime_state"] = managed.start_outcome.initial_runtime_state
-            if managed.start_outcome.session_restarted:
-                payload["session_restarted"] = True
+        payload = ExecCommandData(
+            record=managed.record,
+            no_truncate=invocation.no_truncate,
+            source_kind=self.request.source_kind,
+            source_path=str(self.request.source_path)
+            if self.request.source_path is not None
+            else None,
+            background=invocation.is_background,
+            ensured_started=invocation.ensure_started,
+            started_new_session=managed.start_outcome.started_new_session,
+            initial_runtime_state=managed.start_outcome.initial_runtime_state,
+            session_restarted=managed.start_outcome.session_restarted,
+        )
         if invocation.output_selector is not None:
-            payload["selected_output"] = invocation.output_selector
-            payload["selected_text"] = select_exec_output(payload, invocation.output_selector)
+            payload.selected_output = invocation.output_selector
+            serialized_payload = serialize_command_data("exec", payload)
+            payload.selected_text = selected_exec_output(
+                serialized_payload,
+                cast(str, invocation.output_selector),
+            )
         session_python = self._session_python()
         if session_python is not None:
-            payload["session_python"] = session_python
+            payload.session_python = session_python
         namespace_delta = self._file_exec_namespace_delta(payload)
         if namespace_delta is not None:
-            payload["namespace_delta"] = namespace_delta
+            payload.namespace_delta = namespace_delta
         return payload
 
     def _file_exec_namespace_snapshot(self) -> list[VarDisplayEntry] | None:
@@ -1163,12 +1081,13 @@ class _ExecPayloadBuilder:
             wait_for_usable=True,
         )
 
-    def _file_exec_namespace_delta(self, payload: ExecPayload) -> NamespaceDeltaPayload | None:
+    def _file_exec_namespace_delta(self, payload: ExecCommandData) -> NamespaceDeltaPayload | None:
         if self.request.source_kind != "file" or self.request.invocation.is_background:
             return None
-        if payload.get("status") == "error":
+        if payload.record.status == "error":
             return None
-        if self.namespace_before is None or not _exec_payload_is_empty(payload):
+        serialized_payload = serialize_command_data("exec", payload)
+        if self.namespace_before is None or not _exec_payload_is_empty(serialized_payload):
             return None
         after = self._ephemeral_vars_snapshot(
             ensure_started=False,
@@ -1212,14 +1131,31 @@ class _ExecPayloadBuilder:
         return None
 
 
-def _exec_payload_is_empty(payload: ExecPayload) -> bool:
+def _exec_payload_is_empty(payload: Mapping[str, object]) -> bool:
     for key in ("result", "stdout", "stderr", "selected_text"):
         value = payload.get(key)
         if isinstance(value, str) and value:
             return False
     namespace_delta = payload.get("namespace_delta")
-    entries = namespace_delta.get("entries") if isinstance(namespace_delta, dict) else None
+    entries = (
+        cast(Mapping[str, object], namespace_delta).get("entries")
+        if isinstance(namespace_delta, dict)
+        else None
+    )
     return not entries
+
+
+def _kernel_session_data_from_access(access: SessionAccessOutcome) -> KernelSessionData:
+    assert access.status is not None
+    return KernelSessionData.from_kernel_status(
+        access.status,
+        runtime_state=access.runtime_state,
+        session_exists=access.status.alive,
+        waited=access.waited,
+        waited_for=access.waited_for,
+        waited_ms=access.waited_ms,
+        initial_runtime_state=access.initial_runtime_state,
+    )
 
 
 def _namespace_delta(
@@ -1268,41 +1204,3 @@ def _namespace_delta(
         "updated_count": updated_count,
         "truncated": len(changed) > len(limited),
     }
-
-
-def _public_run_payload(
-    run: ExecutionRecord | Mapping[str, object],
-    *,
-    include_output: bool = True,
-    snapshot_stale: bool = False,
-) -> RunSnapshot:
-    raw_payload = run.to_dict() if isinstance(run, ExecutionRecord) else dict(run)
-    hidden_keys = {"outputs"}
-    if not include_output:
-        hidden_keys.update({"stdout", "stderr", "result", "events"})
-    payload = {key: value for key, value in raw_payload.items() if key not in hidden_keys}
-    if snapshot_stale or (
-        isinstance(run, ExecutionRecord) and run.status in {"starting", "running"}
-    ):
-        payload["snapshot_stale"] = True
-    for key in ("traceback", "recorded_traceback"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            payload[key] = strip_ansi_lines(cast(list[str], value))
-    events = payload.get("events")
-    if isinstance(events, list):
-        sanitized_events: list[dict[str, object]] = []
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            sanitized_event = dict(event)
-            metadata = sanitized_event.get("metadata")
-            if isinstance(metadata, dict):
-                sanitized_metadata = dict(metadata)
-                traceback = sanitized_metadata.get("traceback")
-                if isinstance(traceback, list):
-                    sanitized_metadata["traceback"] = strip_ansi_lines(cast(list[str], traceback))
-                sanitized_event["metadata"] = sanitized_metadata
-            sanitized_events.append(sanitized_event)
-        payload["events"] = sanitized_events
-    return cast(RunSnapshot, payload)

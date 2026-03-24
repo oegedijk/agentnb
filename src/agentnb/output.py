@@ -7,6 +7,17 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import cast
 
+from .command_data import (
+    ExecCommandData,
+    HistoryCommandData,
+    InspectCommandData,
+    KernelSessionData,
+    ReloadCommandData,
+    RunLookupCommandData,
+    RunsListCommandData,
+    RunSnapshotData,
+    VarsCommandData,
+)
 from .compact import preview_text, summarize_history_text
 from .contracts import CommandResponse
 from .payloads import (
@@ -30,6 +41,11 @@ from .payloads import (
     VarsPayload,
 )
 from .projection import ResponseProjector
+from .response_serialization import (
+    compact_history_entry,
+    compact_inspect_payload,
+    full_history_entry,
+)
 
 projector = ResponseProjector()
 
@@ -133,6 +149,7 @@ def render_stream_completion(
 
 
 def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
+    command_data = response.command_data
     if response.status == "error":
         body = _render_error(response)
     else:
@@ -142,6 +159,8 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         quiet_commands = {"start", "status", "wait", "stop", "interrupt", "reload", "doctor"}
         if options.quiet and command in quiet_commands:
             body = ""
+        elif command == "start" and isinstance(command_data, KernelSessionData):
+            body = _render_kernel_session(command_data, response.session_id, mode="start")
         elif command == "start":
             start_data = cast(StartPayload, data)
             if start_data.get("alive"):
@@ -158,6 +177,8 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             else:
                 body = "Kernel is not running."
 
+        elif command == "status" and isinstance(command_data, KernelSessionData):
+            body = _render_kernel_session(command_data, response.session_id, mode="status")
         elif command == "status":
             status_data = cast(StatusPayload, data)
             session_label = f"session: {response.session_id}, " if response.session_id else ""
@@ -202,6 +223,8 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 )
             else:
                 body = "Kernel is not running."
+        elif command == "wait" and isinstance(command_data, KernelSessionData):
+            body = _render_kernel_session(command_data, response.session_id, mode="wait")
         elif command == "wait":
             status_data = cast(StatusPayload, data)
             session_label = f"session: {response.session_id}, " if response.session_id else ""
@@ -240,12 +263,16 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         elif command == "interrupt":
             body = "Interrupt signal sent."
 
+        elif command == "exec" and isinstance(command_data, ExecCommandData):
+            body = _render_exec_command_data(command_data)
         elif command == "exec":
             body = _render_exec_like(cast(ExecPayload, data))
 
         elif command == "reset":
             body = "Namespace cleared."
 
+        elif command == "vars" and isinstance(command_data, VarsCommandData):
+            body = _render_vars_command_data(command_data, response.session_id)
         elif command == "vars":
             vars_data = cast(VarsPayload, data).get("vars", [])
             if not vars_data:
@@ -257,6 +284,8 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             if not options.quiet:
                 body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
+        elif command == "inspect" and isinstance(command_data, InspectCommandData):
+            body = _render_inspect_command_data(command_data, response.session_id)
         elif command == "inspect":
             inspect_response = cast(InspectResponsePayload, data)
             inspect_data = inspect_response.get("inspect", {})
@@ -291,10 +320,18 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             body = _prepend_session_identity(body, response.session_id)
             body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
+        elif command == "reload" and isinstance(command_data, ReloadCommandData):
+            body = _render_reload_command_data(command_data)
+            body = _append_helper_access_note(
+                body,
+                command_data.access_metadata.merge_data(),
+            )
         elif command == "reload":
             body = _render_reload(cast(ReloadReport, data))
             body = _append_helper_access_note(body, cast(Mapping[str, object], data))
 
+        elif command == "history" and isinstance(command_data, HistoryCommandData):
+            body = _render_history_command_data(command_data)
         elif command == "history":
             entries = cast(HistoryPayload, data).get("entries", [])
             if not entries:
@@ -364,6 +401,8 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 body = f"Deleted {len(deleted)} session(s): {', '.join(str(s) for s in deleted)}"
             else:
                 body = "No sessions to delete."
+        elif command == "runs-list" and isinstance(command_data, RunsListCommandData):
+            body = _render_runs_list_command_data(command_data)
         elif command == "runs-list":
             runs = cast(RunsListPayload, data).get("runs", [])
             if not runs:
@@ -381,6 +420,17 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                         f"{run.get('command_type')} {run.get('duration_ms')}ms"
                     )
                 body = "\n".join(lines)
+        elif command in {"runs-show", "runs-wait", "runs-follow"} and isinstance(
+            command_data, RunLookupCommandData
+        ):
+            body = _render_run_lookup_command_data(
+                command_data,
+                snapshot_only=(command == "runs-show"),
+            )
+            if command == "runs-follow":
+                follow_note = _render_follow_completion_note_data(command_data)
+                if follow_note is not None:
+                    body = f"{body}\n{follow_note}" if body else follow_note
         elif command in {"runs-show", "runs-wait", "runs-follow"}:
             run_lookup = cast(RunLookupPayload, data)
             run_data = run_lookup.get("run")
@@ -462,6 +512,70 @@ def _render_exec_like(data: ExecPayload) -> str:
     return "\n".join(lines)
 
 
+def _render_exec_command_data(data: ExecCommandData) -> str:
+    selector = data.selected_output
+    if selector is not None:
+        return (data.selected_text or "").rstrip("\n")
+
+    lines: list[str] = []
+    outcome = data.record.outcome()
+    stdout = outcome.stdout
+    stderr = outcome.stderr
+    result = outcome.result
+
+    if stdout:
+        lines.append(stdout.rstrip("\n"))
+    if stderr:
+        lines.append("[stderr]")
+        lines.append(stderr.rstrip("\n"))
+    if result is not None:
+        lines.append(_render_exec_result_data(data))
+    if not lines:
+        if data.background:
+            return f"Background execution started ({data.record.execution_id})."
+        file_exec_hint = _render_file_exec_hint_data(data)
+        if file_exec_hint is not None:
+            return file_exec_hint
+        lines.append("Execution completed.")
+    return "\n".join(lines)
+
+
+def _render_exec_result_data(data: ExecCommandData) -> str:
+    outcome = data.record.outcome()
+    preview = outcome.result_preview
+    result = outcome.result
+    if isinstance(preview, dict):
+        preview_payload = cast(Mapping[str, object], preview)
+        if _prefer_preview_for_human_result(preview_payload, result):
+            return preview_text(cast(DataframePreview | MappingPreview | SequencePreview, preview))
+    return "" if result is None else str(result)
+
+
+def _render_file_exec_hint_data(data: ExecCommandData) -> str | None:
+    if data.source_kind != "file":
+        return None
+    if data.namespace_delta is None:
+        return "File executed."
+    payload = data.namespace_delta
+    entries = payload.get("entries", [])
+    lines = ["File executed. Namespace changes:"]
+    for entry in entries:
+        change = entry.get("change")
+        name = entry.get("name")
+        repr_text = entry.get("repr")
+        type_name = entry.get("type")
+        if not isinstance(change, str) or not isinstance(name, str):
+            continue
+        suffix = f" ({type_name})" if isinstance(type_name, str) and type_name else ""
+        summary = (
+            f"{name}: {repr_text}{suffix}" if isinstance(repr_text, str) and repr_text else name
+        )
+        lines.append(f"- {change}: {summary}")
+    if payload.get("truncated"):
+        lines.append("- ... additional namespace changes omitted")
+    return "\n".join(lines)
+
+
 def _render_exec_result(data: ExecPayload) -> str:
     result = data.get("result")
     preview = data.get("result_preview")
@@ -480,6 +594,200 @@ def _prefer_preview_for_human_result(preview: Mapping[str, object], result: obje
     if not isinstance(result, str):
         return True
     return "\n" in result or len(result) > 240
+
+
+def _render_kernel_session(
+    data: KernelSessionData,
+    session_id: str | None,
+    *,
+    mode: str,
+) -> str:
+    session_label = f"session: {session_id}, " if session_id else ""
+    session_name = f"session: {session_id}" if session_id else None
+    payload = _kernel_session_mapping(data)
+    wait_note = _wait_note(payload)
+    if mode == "start":
+        if data.alive:
+            if data.started_new:
+                if data.python:
+                    return f"Kernel started (pid {data.pid}) using {data.python}."
+                return f"Kernel started (pid {data.pid})."
+            if data.python:
+                return f"Kernel already running (pid {data.pid}) using {data.python}."
+            return f"Kernel already running (pid {data.pid})."
+        return "Kernel is not running."
+
+    if data.alive:
+        if mode == "wait":
+            waited_for = data.waited_for
+            if waited_for == "ready":
+                return (
+                    f"Kernel is ready ({session_label}pid {data.pid}{_detail_suffix(wait_note)})."
+                )
+            return f"Kernel is idle ({session_label}pid {data.pid}{_detail_suffix(wait_note)})."
+        if data.busy:
+            if isinstance(data.busy_for_ms, int):
+                busy_detail = (
+                    f"busy for {_format_duration_ms(data.busy_for_ms)}{_detail_suffix(wait_note)}"
+                )
+                return f"Kernel is running ({session_label}pid {data.pid}, {busy_detail})."
+            busy_detail = f"busy{_detail_suffix(wait_note)}"
+            return f"Kernel is running ({session_label}pid {data.pid}, {busy_detail})."
+        state_label = "idle" if data.waited_for == "idle" else "running"
+        return (
+            f"Kernel is {state_label} ({session_label}pid {data.pid}{_detail_suffix(wait_note)})."
+        )
+
+    if data.runtime_state == "starting":
+        return (
+            f"Kernel is starting ({session_name})."
+            if session_name is not None
+            else "Kernel is starting."
+        )
+    if data.runtime_state == "dead":
+        return (
+            f"Kernel is dead ({session_name})." if session_name is not None else "Kernel is dead."
+        )
+    return "Kernel is not running."
+
+
+def _render_vars_command_data(data: VarsCommandData, session_id: str | None) -> str:
+    if not data.values:
+        body = "No user variables found."
+    else:
+        body = "\n".join(_render_var_entry(item) for item in data.values)
+    body = _prepend_session_identity(body, session_id)
+    return _append_helper_access_note(body, data.access_metadata.merge_data())
+
+
+def _render_inspect_command_data(data: InspectCommandData, session_id: str | None) -> str:
+    inspect_data = compact_inspect_payload(data.payload)
+    members = inspect_data.get("members", [])
+    members_text = ", ".join(members[:30]) if members else "(none)"
+    preview = inspect_data.get("preview")
+    if isinstance(preview, dict) and preview.get("kind") == "dataframe-like":
+        lines = [
+            f"name: {inspect_data.get('name')}",
+            f"type: {inspect_data.get('type')}",
+        ]
+        lines.extend(_render_dataframe_preview(cast(DataframePreview, preview)))
+    elif isinstance(preview, dict) and preview.get("kind") in {"sequence-like", "mapping-like"}:
+        lines = [
+            f"name: {inspect_data.get('name')}",
+            f"type: {inspect_data.get('type')}",
+        ]
+        lines.extend(_render_collection_preview(cast(MappingPreview | SequencePreview, preview)))
+    else:
+        lines = [
+            f"name: {inspect_data.get('name')}",
+            f"type: {inspect_data.get('type')}",
+            f"repr: {inspect_data.get('repr')}",
+        ]
+        lines.append(f"members: {members_text}")
+    body = "\n".join(lines)
+    body = _prepend_session_identity(body, session_id)
+    return _append_helper_access_note(body, data.access_metadata.merge_data())
+
+
+def _render_reload_command_data(data: ReloadCommandData) -> str:
+    return _render_reload(data.payload)
+
+
+def _render_history_command_data(data: HistoryCommandData) -> str:
+    entries = [
+        full_history_entry(entry) if data.full else compact_history_entry(entry)
+        for entry in data.entries
+    ]
+    if not entries:
+        return "No history entries."
+    return "\n".join(_render_history_entry(entry) for entry in entries)
+
+
+def _render_runs_list_command_data(data: RunsListCommandData) -> str:
+    if not data.runs:
+        return "No runs found."
+    lines = []
+    for run in data.runs:
+        payload = run.payload
+        display_status = (
+            "cancelled" if payload.get("terminal_reason") == "cancelled" else payload.get("status")
+        )
+        lines.append(
+            f"{payload.get('ts')} [{display_status}] {payload.get('execution_id')} "
+            f"{payload.get('command_type')} {payload.get('duration_ms')}ms"
+        )
+    return "\n".join(lines)
+
+
+def _render_run_lookup_command_data(data: RunLookupCommandData, *, snapshot_only: bool) -> str:
+    return _render_run_snapshot_data(data.run, snapshot_only=snapshot_only)
+
+
+def _render_run_snapshot_data(run: RunSnapshotData, *, snapshot_only: bool) -> str:
+    payload = run.payload
+    status = "cancelled" if payload.get("terminal_reason") == "cancelled" else payload.get("status")
+    lines = [
+        "Run "
+        f"{payload.get('execution_id')} [{status}] {payload.get('command_type')} "
+        f"on session {payload.get('session_id')}."
+    ]
+    duration_ms = payload.get("duration_ms")
+    if isinstance(duration_ms, int):
+        lines.append(f"duration: {duration_ms}ms")
+    if snapshot_only and status in {"starting", "running"}:
+        lines.append("snapshot: persisted state only; use `agentnb runs follow` for live events")
+
+    if run.include_output:
+        stdout = payload.get("stdout")
+        if isinstance(stdout, str) and stdout:
+            lines.extend(_render_output_block("stdout", stdout, limit=200))
+        stderr = payload.get("stderr")
+        if isinstance(stderr, str) and stderr:
+            lines.extend(_render_output_block("stderr", stderr, limit=200))
+        result = payload.get("result")
+        if isinstance(result, str) and result:
+            lines.append(f"result: {summarize_history_text(result, limit=240) or result[:240]}")
+
+    ename = payload.get("ename")
+    evalue = payload.get("evalue")
+    if ename or evalue:
+        if ename and evalue:
+            lines.append(f"error: {ename}: {evalue}")
+        elif ename:
+            lines.append(f"error: {ename}")
+        else:
+            lines.append(f"error: {evalue}")
+
+    events = payload.get("events")
+    if run.include_output and isinstance(events, list):
+        lines.append(f"events: {len(events)} recorded")
+
+    return "\n".join(lines)
+
+
+def _render_follow_completion_note_data(run_lookup: RunLookupCommandData) -> str | None:
+    if run_lookup.completion_reason != "window_elapsed":
+        return None
+    if run_lookup.run.payload.get("status") in {"starting", "running"}:
+        return "Observation window elapsed; the run is still active."
+    return "Observation window elapsed."
+
+
+def _kernel_session_mapping(data: KernelSessionData) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "alive": data.alive,
+        "pid": data.pid,
+        "busy": data.busy,
+    }
+    if data.waited is not None:
+        payload["waited"] = data.waited
+    if data.waited_for is not None:
+        payload["waited_for"] = data.waited_for
+    if data.waited_ms is not None:
+        payload["waited_ms"] = data.waited_ms
+    if data.initial_runtime_state is not None:
+        payload["initial_runtime_state"] = data.initial_runtime_state
+    return payload
 
 
 def _prepend_session_identity(body: str, session_id: str | None) -> str:

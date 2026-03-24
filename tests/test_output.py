@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from agentnb.command_data import ExecCommandData, RunLookupCommandData, RunSnapshotData
 from agentnb.contracts import error_response, success_response
 from agentnb.output import (
     OutputProfile,
@@ -12,7 +13,8 @@ from agentnb.output import (
     render_response,
     render_stream_completion,
 )
-from tests.helpers import build_success_response
+from agentnb.projection import ResponseProjector
+from tests.helpers import build_execution_record, build_run_snapshot, build_success_response
 
 
 @pytest.mark.parametrize("profile", [OutputProfile.FULL_JSON, OutputProfile.AGENT])
@@ -1003,4 +1005,83 @@ def test_render_human_exec_restart_notice_is_explicit() -> None:
         "Error: Execution failed\n"
         "Type: NameError\n"
         "Detail: name 'x' is not defined"
+    )
+
+
+def test_typed_exec_response_keeps_full_agent_and_human_contracts() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data=ExecCommandData(
+            record=build_execution_record(result="42"),
+            source_kind="argument",
+            ensured_started=True,
+            started_new_session=False,
+        ),
+    )
+
+    assert response.to_dict()["data"] == {
+        "duration_ms": 5,
+        "status": "ok",
+        "execution_id": "run-1",
+        "result": "42",
+        "source_kind": "argument",
+        "ensured_started": True,
+        "started_new_session": False,
+    }
+    assert ResponseProjector().project(response, profile="agent")["data"] == {
+        "status": "ok",
+        "execution_id": "run-1",
+        "duration_ms": 5,
+        "result": "42",
+        "result_json": 42,
+        "source_kind": "argument",
+        "ensured_started": True,
+        "started_new_session": False,
+    }
+    assert render_human(response, options=RenderOptions()) == "42"
+
+
+def test_typed_run_lookup_response_keeps_agent_and_human_contracts() -> None:
+    response = success_response(
+        command="runs-show",
+        project="/tmp/project",
+        session_id="default",
+        data=RunLookupCommandData(
+            run=RunSnapshotData(
+                payload={
+                    key: value
+                    for key, value in build_run_snapshot(
+                        execution_id="run-7",
+                        session_id="analysis",
+                        status="running",
+                        duration_ms=12,
+                        stdout="tick\n",
+                        events=[],
+                    ).items()
+                },
+            ),
+            status="running",
+        ),
+    )
+
+    assert ResponseProjector().project(response, profile="agent")["data"] == {
+        "status": "running",
+        "run": {
+            "execution_id": "run-7",
+            "ts": "2026-03-12T00:00:00+00:00",
+            "session_id": "analysis",
+            "command_type": "exec",
+            "status": "running",
+            "duration_ms": 12,
+            "stdout_preview": "tick",
+        },
+    }
+    assert render_human(response, options=RenderOptions()) == (
+        "Run run-7 [running] exec on session analysis.\n"
+        "duration: 12ms\n"
+        "snapshot: persisted state only; use `agentnb runs follow` for live events\n"
+        "stdout: tick\n"
+        "events: 0 recorded"
     )

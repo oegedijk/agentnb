@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from agentnb.command_data import ExecCommandData
 from agentnb.contracts import (
     SCHEMA_VERSION,
     ExecutionEvent,
@@ -8,6 +9,7 @@ from agentnb.contracts import (
     success_response,
 )
 from agentnb.execution_output import OutputItem
+from agentnb.runs.store import ExecutionRecord
 
 
 def test_success_response_to_dict_preserves_schema_and_payload() -> None:
@@ -57,6 +59,40 @@ def test_error_response_to_dict_preserves_nested_error_fields() -> None:
         "ename": "RuntimeError",
         "evalue": "missing kernel",
         "traceback": ["line1"],
+    }
+
+
+def test_success_response_serializes_typed_command_data_into_stable_envelope() -> None:
+    response = success_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        data=ExecCommandData(
+            record=ExecutionRecord(
+                execution_id="run-1",
+                ts="2026-03-12T00:00:00+00:00",
+                session_id="default",
+                command_type="exec",
+                status="ok",
+                duration_ms=5,
+                result="42",
+            ),
+            source_kind="argument",
+            ensured_started=True,
+            started_new_session=False,
+        ),
+    )
+
+    payload = response.to_dict()
+
+    assert payload["data"] == {
+        "duration_ms": 5,
+        "status": "ok",
+        "execution_id": "run-1",
+        "result": "42",
+        "source_kind": "argument",
+        "ensured_started": True,
+        "started_new_session": False,
     }
 
 

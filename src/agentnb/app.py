@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,8 +22,8 @@ from .contracts import (
     error_response,
     success_response,
 )
-from .errors import AgentNBException, KernelWaitTimedOutError
-from .execution import ExecutionService, ManagedExecution
+from .errors import AgentNBException
+from .execution import ExecutionService, ManagedExecution, SessionAccessOutcome
 from .execution_invocation import ExecInvocationPolicy, ExecSourceKind, OutputSelector
 from .introspection import HelperExecutionPolicy
 from .ops import NotebookOps
@@ -53,7 +52,6 @@ from .payloads import (
 )
 from .runtime import (
     KernelRuntime,
-    KernelWaitResult,
     RuntimeState,
     RuntimeStateKind,
 )
@@ -65,16 +63,36 @@ from .selectors import (
     RunSelectorResolver,
 )
 from .session import DEFAULT_SESSION_ID
-from .session_targeting import ResolutionSource, SessionTargetingPolicy
+from .session_targeting import (
+    CommandSemantics,
+    ResolutionSource,
+    SessionTargetingPolicy,
+)
 from .state import CommandLockInfo
 
 StatusWaitFor = Literal["ready", "idle"]
-_ACTIVE_RUN_STATUSES = frozenset({"starting", "running"})
 _HELPER_EXECUTION_POLICY = HelperExecutionPolicy(
     ensure_started=True,
     wait_for_usable=True,
     retry_on_busy=True,
 )
+_START_COMMAND = CommandSemantics(
+    require_live_session=False,
+    persist_explicit_preference=True,
+    announce_switch=True,
+)
+_LIVE_COMMAND = CommandSemantics(
+    require_live_session=True,
+    persist_explicit_preference=True,
+    announce_switch=True,
+)
+_LIVE_READ_COMMAND = CommandSemantics(
+    require_live_session=True,
+    persist_explicit_preference=True,
+    announce_switch=True,
+    reject_starting_session=True,
+)
+_PASSIVE_COMMAND = CommandSemantics(require_live_session=False)
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -236,8 +254,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=False,
-            announce_session_switch=True,
+            semantics=_START_COMMAND,
             handler=lambda session_id: self._start_payload(request=request, session_id=session_id),
         )
 
@@ -256,8 +273,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            announce_session_switch=True,
+            semantics=_LIVE_COMMAND,
             handler=lambda session_id: self._exec_payload(
                 request=request,
                 session_id=session_id,
@@ -271,8 +287,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            announce_session_switch=True,
+            semantics=_LIVE_COMMAND,
             handler=lambda session_id: self._status_payload(request=request, session_id=session_id),
         )
 
@@ -282,8 +297,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            announce_session_switch=True,
+            semantics=_LIVE_COMMAND,
             handler=lambda session_id: self._wait_payload(request=request, session_id=session_id),
         )
 
@@ -293,9 +307,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            project_starting_state=True,
-            announce_session_switch=True,
+            semantics=_LIVE_READ_COMMAND,
             handler=lambda session_id: self._vars_payload(request=request, session_id=session_id),
         )
 
@@ -305,9 +317,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            project_starting_state=True,
-            announce_session_switch=True,
+            semantics=_LIVE_READ_COMMAND,
             handler=lambda session_id: self._inspect_payload(
                 request=request,
                 session_id=session_id,
@@ -320,9 +330,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            project_starting_state=True,
-            announce_session_switch=True,
+            semantics=_LIVE_READ_COMMAND,
             handler=lambda session_id: self._reload_payload(request=request, session_id=session_id),
         )
 
@@ -336,8 +344,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            announce_session_switch=True,
+            semantics=_LIVE_COMMAND,
             handler=lambda session_id: self._history_payload(
                 request=request,
                 session_id=session_id,
@@ -350,8 +357,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            announce_session_switch=True,
+            semantics=_LIVE_COMMAND,
             handler=lambda session_id: self._interrupt_payload(
                 request=request, session_id=session_id
             ),
@@ -363,8 +369,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            announce_session_switch=True,
+            semantics=_LIVE_COMMAND,
             handler=lambda session_id: self._reset_payload(request=request, session_id=session_id),
         )
 
@@ -374,8 +379,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=True,
-            announce_session_switch=True,
+            semantics=_LIVE_COMMAND,
             handler=lambda session_id: self._stop_payload(request=request, session_id=session_id),
         )
 
@@ -385,7 +389,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=False,
+            semantics=_PASSIVE_COMMAND,
             handler=lambda session_id: self._doctor_payload(request=request, session_id=session_id),
         )
 
@@ -395,7 +399,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=None,
-            require_live_session=False,
+            semantics=_PASSIVE_COMMAND,
             handler=lambda _: _sessions_list_payload(
                 self.runtime.list_sessions(project_root=request.project_root),
                 hidden_non_live_count=self.runtime.hidden_non_live_session_count(
@@ -410,7 +414,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_name,
-            require_live_session=False,
+            semantics=_PASSIVE_COMMAND,
             handler=lambda _: self.runtime.delete_session(
                 project_root=request.project_root,
                 session_id=request.session_name,
@@ -423,7 +427,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=None,
-            require_live_session=False,
+            semantics=_PASSIVE_COMMAND,
             handler=lambda _: self._sessions_delete_bulk_payload(request),
         )
 
@@ -448,7 +452,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=request.session_id,
-            require_live_session=False,
+            semantics=_PASSIVE_COMMAND,
             handler=lambda _: self._runs_list_payload(request=request),
         )
 
@@ -458,7 +462,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=None,
-            require_live_session=False,
+            semantics=_PASSIVE_COMMAND,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
                 run_reference=request.run_reference,
@@ -474,7 +478,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=None,
-            require_live_session=False,
+            semantics=_PASSIVE_COMMAND,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
                 run_reference=request.run_reference,
@@ -495,7 +499,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=None,
-            require_live_session=False,
+            semantics=_PASSIVE_COMMAND,
             handler=lambda _: self._run_lookup_payload(
                 project_root=request.project_root,
                 run_reference=request.run_reference,
@@ -513,7 +517,7 @@ class AgentNBApp:
             project_root=request.project_root,
             project_override=request.project_override,
             requested_session_id=None,
-            require_live_session=False,
+            semantics=_PASSIVE_COMMAND,
             handler=lambda _: self.executions.cancel_run(
                 project_root=request.project_root,
                 execution_id=self.run_selectors.resolve_execution_id(
@@ -583,43 +587,21 @@ class AgentNBApp:
 
     def _status_payload(self, *, request: StatusRequest, session_id: str) -> StatusPayload:
         if request.wait_for == "idle":
-            wait_result = self._wait_for_idle_status(
+            access = self.executions.wait_for_session_access(
                 project_root=request.project_root,
                 session_id=session_id,
                 timeout_s=request.timeout_s,
+                target="idle",
             )
-            payload = _kernel_status_payload(
-                wait_result.status,
-                runtime_state=wait_result.runtime_state,
-                session_exists=True,
-            )
-            payload["waited"] = wait_result.waited
-            payload["waited_for"] = wait_result.waited_for or "idle"
-            waited_ms = getattr(wait_result, "waited_ms", None)
-            payload["waited_ms"] = waited_ms if isinstance(waited_ms, int) else 0
-            initial_runtime_state = getattr(wait_result, "initial_runtime_state", None)
-            if isinstance(initial_runtime_state, str):
-                payload["initial_runtime_state"] = initial_runtime_state
-            return payload
+            return _status_payload_from_access_outcome(access)
         if request.wait_for == "ready":
-            wait_result = self.runtime.wait_until_ready(
+            access = self.executions.wait_for_session_access(
                 project_root=request.project_root,
                 session_id=session_id,
                 timeout_s=request.timeout_s,
+                target="ready",
             )
-            payload = _kernel_status_payload(
-                wait_result.status,
-                runtime_state=wait_result.runtime_state,
-                session_exists=True,
-            )
-            payload["waited"] = wait_result.waited
-            payload["waited_for"] = wait_result.waited_for or "ready"
-            waited_ms = getattr(wait_result, "waited_ms", None)
-            payload["waited_ms"] = waited_ms if isinstance(waited_ms, int) else 0
-            initial_runtime_state = getattr(wait_result, "initial_runtime_state", None)
-            if isinstance(initial_runtime_state, str):
-                payload["initial_runtime_state"] = initial_runtime_state
-            return payload
+            return _status_payload_from_access_outcome(access)
         return _status_payload_from_runtime_state(
             self.runtime.runtime_state(
                 project_root=request.project_root,
@@ -627,96 +609,14 @@ class AgentNBApp:
             )
         )
 
-    def _wait_for_idle_status(
-        self,
-        *,
-        project_root: Path,
-        session_id: str,
-        timeout_s: float,
-    ) -> KernelWaitResult:
-        started_at = time.monotonic()
-        waited_for_run = False
-        initial_runtime_state: RuntimeStateKind | None = None
-        deadline = time.monotonic() + timeout_s
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise KernelWaitTimedOutError(timeout_s, waiting_for="idle")
-            wait_result = self.runtime.wait_until_idle(
-                project_root=project_root,
-                session_id=session_id,
-                timeout_s=remaining,
-            )
-            if initial_runtime_state is None:
-                initial_runtime_state = (
-                    wait_result.initial_runtime_state or wait_result.runtime_state
-                )
-            active_execution_id = self._active_execution_id_for_session(
-                project_root=project_root,
-                session_id=session_id,
-            )
-            if active_execution_id is None:
-                if waited_for_run:
-                    waited_ms = max(
-                        wait_result.waited_ms,
-                        int((time.monotonic() - started_at) * 1000),
-                    )
-                    return KernelWaitResult(
-                        status=wait_result.status,
-                        waited=True,
-                        waited_for=wait_result.waited_for or "idle",
-                        runtime_state=wait_result.runtime_state,
-                        waited_ms=waited_ms,
-                        initial_runtime_state=initial_runtime_state,
-                    )
-                return wait_result
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise KernelWaitTimedOutError(timeout_s, waiting_for="idle")
-            self.executions.wait_for_run(
-                project_root=project_root,
-                execution_id=active_execution_id,
-                timeout_s=remaining,
-            )
-            waited_for_run = True
-
-    def _active_execution_id_for_session(
-        self,
-        *,
-        project_root: Path,
-        session_id: str,
-    ) -> str | None:
-        runs = self.executions.list_runs(
-            project_root=project_root,
-            session_id=session_id,
-        )
-        for run in reversed(runs):
-            status = run.get("status")
-            execution_id = run.get("execution_id")
-            if status in _ACTIVE_RUN_STATUSES and isinstance(execution_id, str) and execution_id:
-                return execution_id
-        return None
-
     def _wait_payload(self, *, request: WaitRequest, session_id: str) -> StatusPayload:
-        wait_result = self.runtime.wait_for_usable(
+        access = self.executions.wait_for_session_access(
             project_root=request.project_root,
             session_id=session_id,
             timeout_s=request.timeout_s,
+            target="usable",
         )
-        payload = _kernel_status_payload(
-            wait_result.status,
-            runtime_state=wait_result.runtime_state,
-            session_exists=wait_result.status.alive,
-        )
-        payload["waited"] = wait_result.waited
-        if wait_result.waited_for is not None:
-            payload["waited_for"] = wait_result.waited_for
-        waited_ms = getattr(wait_result, "waited_ms", None)
-        payload["waited_ms"] = waited_ms if isinstance(waited_ms, int) else 0
-        initial_runtime_state = getattr(wait_result, "initial_runtime_state", None)
-        if isinstance(initial_runtime_state, str):
-            payload["initial_runtime_state"] = initial_runtime_state
-        return payload
+        return _status_payload_from_access_outcome(access)
 
     def _vars_payload(self, *, request: VarsRequest, session_id: str) -> VarsPayload:
         helper_result = self.ops.list_vars_result(
@@ -956,80 +856,24 @@ class AgentNBApp:
         project_root: Path,
         project_override: Path | None,
         requested_session_id: str | None,
-        require_live_session: bool,
+        semantics: CommandSemantics,
         handler: Callable[[str], Mapping[str, object]],
-        project_starting_state: bool = False,
-        announce_session_switch: bool = False,
         response_session_id_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
     ) -> CommandResponse:
         response_session_id = requested_session_id or DEFAULT_SESSION_ID
 
         try:
-            decision = self.session_targeting.resolve_command_target(
+            context = self.session_targeting.resolve_command_context(
                 project_root=project_root,
                 requested_session_id=requested_session_id,
-                require_live_session=require_live_session,
-                persist_explicit_preference=_should_persist_explicit_session_preference(
-                    command_name
-                ),
-                announce_switch=announce_session_switch,
+                semantics=semantics,
             )
-            resolved_session_id = decision.session_id
+            resolved_session_id = context.session_id
             response_session_id = resolved_session_id
-            if project_starting_state:
-                state = self.runtime.runtime_state(
-                    project_root=project_root,
-                    session_id=resolved_session_id,
-                )
-                if state.kind == "starting":
-                    error = AgentNBException(
-                        code="KERNEL_NOT_READY",
-                        message=(
-                            "Kernel startup is still in progress or not yet ready. Wait and retry."
-                        ),
-                        data=dict(_status_payload_from_runtime_state(state)),
-                    )
-                    return error_response(
-                        command=command_name,
-                        project=str(project_root),
-                        session_id=response_session_id,
-                        code=error.code,
-                        message=error.message,
-                        ename=error.ename,
-                        evalue=error.evalue,
-                        traceback=error.traceback,
-                        data=error.data,
-                        suggestions=self.advisor.suggestions(
-                            self._advice_context(
-                                command_name=command_name,
-                                response_status="error",
-                                data=error.data,
-                                project_override=project_override,
-                                session_id=response_session_id,
-                                session_source=decision.source,
-                                error_code=error.code,
-                                error_name=error.ename,
-                                error_value=error.evalue,
-                            )
-                        ),
-                        suggestion_actions=self.advisor.suggestion_actions(
-                            self._advice_context(
-                                command_name=command_name,
-                                response_status="error",
-                                data=error.data,
-                                project_override=project_override,
-                                session_id=response_session_id,
-                                session_source=decision.source,
-                                error_code=error.code,
-                                error_name=error.ename,
-                                error_value=error.evalue,
-                            )
-                        ),
-                    )
             data = handler(resolved_session_id)
-            if decision.switched_session is not None:
+            if context.switched_session is not None:
                 data = dict(data)
-                data["switched_session"] = decision.switched_session
+                data["switched_session"] = context.switched_session
             if response_session_id_resolver is not None:
                 response_session_id = response_session_id_resolver(response_session_id, data)
             return success_response(
@@ -1044,7 +888,7 @@ class AgentNBApp:
                         data=data,
                         project_override=project_override,
                         session_id=resolved_session_id,
-                        session_source=decision.source,
+                        session_source=context.source,
                     )
                 ),
                 suggestion_actions=self.advisor.suggestion_actions(
@@ -1054,15 +898,24 @@ class AgentNBApp:
                         data=data,
                         project_override=project_override,
                         session_id=resolved_session_id,
-                        session_source=decision.source,
+                        session_source=context.source,
                     )
                 ),
             )
         except AgentNBException as exc:
+            error_session_id = response_session_id
+            error_session_hint = exc.data.get("session_id")
+            if isinstance(error_session_hint, str) and error_session_hint:
+                error_session_id = error_session_hint
+            error_session_source = "explicit" if requested_session_id is not None else None
+            if error_session_source is None:
+                session_source_hint = exc.data.get("session_source")
+                if session_source_hint in {"explicit", "remembered", "sole_live", "default"}:
+                    error_session_source = cast(ResolutionSource, session_source_hint)
             return error_response(
                 command=command_name,
                 project=str(project_root),
-                session_id=response_session_id,
+                session_id=error_session_id,
                 code=exc.code,
                 message=exc.message,
                 ename=exc.ename,
@@ -1075,8 +928,8 @@ class AgentNBApp:
                         response_status="error",
                         data=exc.data,
                         project_override=project_override,
-                        session_id=response_session_id,
-                        session_source="explicit" if requested_session_id is not None else None,
+                        session_id=error_session_id,
+                        session_source=error_session_source,
                         error_code=exc.code,
                         error_name=exc.ename,
                         error_value=exc.evalue,
@@ -1088,8 +941,8 @@ class AgentNBApp:
                         response_status="error",
                         data=exc.data,
                         project_override=project_override,
-                        session_id=response_session_id,
-                        session_source="explicit" if requested_session_id is not None else None,
+                        session_id=error_session_id,
+                        session_source=error_session_source,
                         error_code=exc.code,
                         error_name=exc.ename,
                         error_value=exc.evalue,
@@ -1169,22 +1022,6 @@ def _run_response_session_id(current_session_id: str, data: Mapping[str, object]
     return current_session_id
 
 
-def _should_persist_explicit_session_preference(command_name: str) -> bool:
-    return command_name in {
-        "start",
-        "exec",
-        "status",
-        "wait",
-        "vars",
-        "inspect",
-        "reload",
-        "history",
-        "interrupt",
-        "reset",
-        "stop",
-    }
-
-
 def select_exec_output(payload: Mapping[str, object], selector: OutputSelector) -> str:
     if selector == "result":
         preview = payload.get("result_preview")
@@ -1216,6 +1053,22 @@ def _status_payload_from_runtime_state(state: RuntimeState) -> StatusPayload:
     )
 
 
+def _status_payload_from_access_outcome(access: SessionAccessOutcome) -> StatusPayload:
+    assert access.status is not None
+    payload = _kernel_status_payload(
+        access.status,
+        runtime_state=access.runtime_state,
+        session_exists=access.status.alive,
+    )
+    payload["waited"] = access.waited
+    if access.waited_for is not None:
+        payload["waited_for"] = access.waited_for
+    payload["waited_ms"] = access.waited_ms
+    if access.initial_runtime_state is not None:
+        payload["initial_runtime_state"] = access.initial_runtime_state
+    return payload
+
+
 def _kernel_status_payload(
     status: KernelStatus,
     *,
@@ -1244,14 +1097,6 @@ def _kernel_status_payload(
         if busy_for_ms is not None:
             payload["busy_for_ms"] = busy_for_ms
     return payload
-
-
-def _runtime_state_from_status(status: KernelStatus) -> RuntimeStateKind:
-    if not status.alive:
-        return "missing"
-    if status.busy:
-        return "busy"
-    return "ready"
 
 
 def _sessions_list_payload(

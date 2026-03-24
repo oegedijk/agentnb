@@ -63,7 +63,7 @@ exclude = [
     ".venv",
     "dist",
     "tests",
-    "ROADMAP.md",
+    "docs/ROADMAP.md",
     ".gitignore",
     "**/.gitignore",
     "uv.lock",

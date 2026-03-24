@@ -216,7 +216,7 @@ immediately.
   - either parent/child per-step run records
   - or a first-class composite replay record shape
 - Preserve per-step provenance, source execution ids, code, outputs, and failure attribution across replay and verify flows.
-- Extend history and journal metadata so replayed and verified steps remain distinguishable from original executions.
+- Extend history and journal metadata so replayed and verified steps remain distinguishishable from original executions.
 
 ### API / Contract Notes
 
@@ -256,26 +256,3 @@ immediately.
 - Keep persisted artifact modeling behind the dedicated artifact domain boundary.
 
 ## v0.7 - Extensibility, Policy, And Alternate Control Surfaces
-
-### Goals
-
-- Turn internal seams into stable extension points once the core CLI is already efficient.
-- Support richer integrations without contaminating the hot path.
-
-### Planned Features
-
-- Plugin interface:
-  - custom operations and renderers
-  - lifecycle hook registration
-- Policy hooks:
-  - pre/post execute checks
-  - optional allow/deny rules
-- Alternate control surfaces:
-  - a uniform `call` or RPC-like shape over existing operations
-  - stdin JSON request mode for tool wrappers and long-lived agent adapters
-
-### Internal Design Constraints
-
-- Give plugins, policy, and reliability hooks one deep home instead of growing ad hoc methods across runtime and CLI layers.
-- Define typed execution lifecycle events and extension context objects before adding plugin loading.
-- Keep extension APIs event/context-based rather than mirroring runtime internals.

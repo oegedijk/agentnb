@@ -31,4 +31,4 @@ Prefer John Ousterhout style abstractions:
 - Assert meaningful outcomes: persisted run state, event ordering, provenance, error codes, session effects. Avoid tests that only restate implementation structure.
 - Cover race-prone edges explicitly: background completion, cancellation, interrupt timing, stale worker reconciliation, and multi-step history/run interactions.
 - Whenever you make a code change, run enough smoke tests with `uv run agentnb ...` commands to verify the changed code paths through the real CLI behavior, not just unit-level contracts.
-- Use `SMOKE_SCENARIOS.md` to choose or adapt relevant end-to-end workflows; do not run every scenario, only the smallest set needed to exercise the behavior you changed through the actual `agentnb` command surface.
+- Use `docs/SMOKE_SCENARIOS.md` to choose or adapt relevant end-to-end workflows; do not run every scenario, only the smallest set needed to exercise the behavior you changed through the actual `agentnb` command surface.

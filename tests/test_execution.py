@@ -7,20 +7,27 @@ from unittest.mock import Mock
 
 import pytest
 
-from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink
+from agentnb.contracts import (
+    ExecutionEvent,
+    ExecutionResult,
+    ExecutionSink,
+    HelperAccessMetadata,
+    KernelStatus,
+)
 from agentnb.errors import AgentNBException, RunWaitTimedOutError
 from agentnb.execution import (
     ExecutionRecord,
     ExecutionRun,
     ExecutionService,
     ExecutionStore,
+    SessionAccessOutcome,
     _ExecutionProgressSink,
 )
 from agentnb.execution_output import OutputItem
 from agentnb.history import HistoryRecord
 from agentnb.runs import ManagedExecution, RunSpec
 from agentnb.runs.models import RunObservationResult
-from agentnb.runtime import KernelRuntime
+from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
 
 
 def _event_sink(kwargs: dict[str, object]) -> ExecutionSink:
@@ -458,6 +465,133 @@ def test_execution_service_reset_session_delegates_to_run_manager(project_dir: P
     assert spec.code is None
     assert spec.mode == "foreground"
     assert spec.timeout_s == 9.0
+
+
+def test_execution_service_wait_for_session_access_uses_runtime_ready(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    wait_until_ready = Mock(
+        return_value=KernelWaitResult(
+            status=KernelStatus(alive=True, pid=123, busy=False),
+            waited=True,
+            waited_for="ready",
+            runtime_state="ready",
+            waited_ms=25,
+            initial_runtime_state="starting",
+        )
+    )
+    runtime.wait_until_ready = wait_until_ready  # type: ignore[method-assign]
+    service = ExecutionService(runtime)
+
+    access = service.wait_for_session_access(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=3.0,
+        target="ready",
+    )
+
+    assert access == SessionAccessOutcome(
+        status=KernelStatus(alive=True, pid=123, busy=False),
+        waited=True,
+        waited_for="ready",
+        runtime_state="ready",
+        waited_ms=25,
+        initial_runtime_state="starting",
+    )
+    wait_until_ready.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        session_id="default",
+        timeout_s=3.0,
+        poll_interval_s=0.1,
+    )
+
+
+def test_execution_service_wait_for_session_access_waits_for_active_run_when_idle(
+    project_dir: Path,
+) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    wait_until_idle = Mock(
+        side_effect=[
+            KernelWaitResult(
+                status=KernelStatus(alive=True, pid=123, busy=False),
+                waited=False,
+                waited_for="idle",
+                runtime_state="ready",
+                initial_runtime_state="ready",
+            ),
+            KernelWaitResult(
+                status=KernelStatus(alive=True, pid=123, busy=False),
+                waited=False,
+                waited_for="idle",
+                runtime_state="ready",
+                initial_runtime_state="ready",
+            ),
+        ]
+    )
+    runtime.wait_until_idle = wait_until_idle  # type: ignore[method-assign]
+    run_manager = Mock()
+    run_manager.list_runs.side_effect = [
+        [{"execution_id": "run-1", "status": "running"}],
+        [],
+    ]
+    run_manager.wait_for_run.return_value = {
+        "execution_id": "run-1",
+        "session_id": "default",
+        "status": "ok",
+    }
+    service = ExecutionService(runtime, run_manager=run_manager)
+
+    access = service.wait_for_session_access(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=5.0,
+        target="idle",
+    )
+
+    assert access.waited is True
+    assert access.waited_for == "idle"
+    assert access.initial_runtime_state == "ready"
+    assert wait_until_idle.call_count == 2
+    run_manager.wait_for_run.assert_called_once()
+
+
+def test_execution_service_wait_for_session_access_wraps_helper_access(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    runtime.runtime_state = Mock(  # type: ignore[method-assign]
+        return_value=RuntimeState(
+            kind="ready",
+            session_id="default",
+            kernel_status=KernelStatus(alive=True, pid=123, busy=False),
+        )
+    )
+    run_manager = Mock()
+    run_manager.wait_for_helper_session_access.return_value = HelperAccessMetadata(
+        waited=True,
+        waited_for="idle",
+        waited_ms=18,
+        initial_runtime_state="busy",
+        blocking_execution_id="run-7",
+    )
+    service = ExecutionService(runtime, run_manager=run_manager)
+
+    access = service.wait_for_session_access(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=2.0,
+        target="helper",
+    )
+
+    assert access.status == KernelStatus(alive=True, pid=123, busy=False)
+    assert access.waited is True
+    assert access.waited_for == "idle"
+    assert access.waited_ms == 18
+    assert access.initial_runtime_state == "busy"
+    assert access.blocking_execution_id == "run-7"
+    run_manager.wait_for_helper_session_access.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        session_id="default",
+        timeout_s=2.0,
+        poll_interval_s=0.1,
+    )
 
 
 def test_execution_service_follow_run_raises_timeout_when_window_elapses(

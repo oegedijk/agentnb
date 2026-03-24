@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypedDict, cast
+from unittest.mock import Mock
 
 import pytest
 from click.testing import CliRunner
@@ -22,14 +23,18 @@ from agentnb.contracts import (
     success_response,
 )
 from agentnb.errors import SessionBusyError
-from agentnb.execution import ExecutionRecord, ManagedExecution, StartOutcome
+from agentnb.execution import (
+    ExecutionRecord,
+    ManagedExecution,
+    SessionAccessOutcome,
+    StartOutcome,
+)
 from agentnb.execution_output import OutputItem
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
 from agentnb.payloads import RunSnapshot
 from agentnb.runs.models import RunObservationResult
-from agentnb.runtime import KernelWaitResult
 from tests.helpers import build_run_snapshot
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
@@ -645,6 +650,10 @@ def test_cli_vars_projects_starting_state_when_connection_exists_without_session
     assert len(payload["suggestions"]) == 2
     assert any("agentnb wait" in suggestion for suggestion in payload["suggestions"])
     assert any("agentnb status" in suggestion for suggestion in payload["suggestions"])
+    assert all("--session" not in suggestion for suggestion in payload["suggestions"])
+    assert all(
+        "--session" not in " ".join(action["args"]) for action in payload["suggestion_actions"]
+    )
 
 
 def test_cli_returns_ambiguous_session_error_when_multiple_live_sessions_exist(
@@ -786,16 +795,13 @@ def test_cli_status_uses_only_live_session_when_implicit(
     assert status_calls[0]["session_id"] == "analysis"
 
 
-def test_cli_status_wait_uses_runtime_wait_for_ready(
+def test_cli_status_wait_uses_execution_service_wait_for_ready(
     cli_runner: CliRunner, project_dir: Path
 ) -> None:
     import agentnb.cli as cli
 
-    wait_calls: list[dict[str, object]] = []
-
-    def wait_stub(**kwargs: object) -> object:
-        wait_calls.append(dict(kwargs))
-        return KernelWaitResult(
+    wait_stub = Mock(
+        return_value=SessionAccessOutcome(
             status=KernelStatus(alive=True, pid=321),
             waited=True,
             waited_for="ready",
@@ -803,8 +809,9 @@ def test_cli_status_wait_uses_runtime_wait_for_ready(
             waited_ms=10,
             initial_runtime_state="starting",
         )
+    )
 
-    cli.runtime.wait_until_ready = wait_stub  # type: ignore[method-assign]
+    cli.executions.wait_for_session_access = wait_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -815,20 +822,22 @@ def test_cli_status_wait_uses_runtime_wait_for_ready(
     payload = _payload(result.output)
     assert payload["data"]["alive"] is True
     assert payload["data"]["waited"] is True
-    assert wait_calls[0]["timeout_s"] == 5.0
+    wait_stub.assert_called_once_with(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=5.0,
+        target="ready",
+    )
 
 
-def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
+def test_cli_status_wait_idle_uses_execution_service_wait_for_idle(
     cli_runner: CliRunner,
     project_dir: Path,
 ) -> None:
     import agentnb.cli as cli
 
-    wait_calls: list[dict[str, object]] = []
-
-    def wait_stub(**kwargs: object) -> object:
-        wait_calls.append(dict(kwargs))
-        return KernelWaitResult(
+    wait_stub = Mock(
+        return_value=SessionAccessOutcome(
             status=KernelStatus(alive=True, pid=321, busy=False),
             waited=True,
             waited_for="idle",
@@ -836,9 +845,9 @@ def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
             waited_ms=10,
             initial_runtime_state="busy",
         )
+    )
 
-    cli.runtime.wait_until_idle = wait_stub  # type: ignore[method-assign]
-    cli.executions.list_runs = lambda **_: []  # type: ignore[method-assign]
+    cli.executions.wait_for_session_access = wait_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -852,7 +861,12 @@ def test_cli_status_wait_idle_uses_runtime_wait_for_idle(
     assert payload["data"]["waited_for"] == "idle"
     assert payload["data"]["waited_ms"] == 10
     assert payload["data"]["initial_runtime_state"] == "busy"
-    assert 0 < cast(float, wait_calls[0]["timeout_s"]) <= 5.0
+    wait_stub.assert_called_once_with(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=5.0,
+        target="idle",
+    )
 
 
 def test_cli_status_wait_idle_waits_for_active_run_before_returning(
@@ -861,35 +875,16 @@ def test_cli_status_wait_idle_waits_for_active_run_before_returning(
 ) -> None:
     import agentnb.cli as cli
 
-    wait_calls: list[dict[str, object]] = []
-    run_wait_calls: list[dict[str, object]] = []
-    list_runs_responses = iter(
-        [
-            [{"execution_id": "run-1", "status": "running"}],
-            [],
-        ]
-    )
-
-    def wait_stub(**kwargs: object) -> object:
-        wait_calls.append(dict(kwargs))
-        return KernelWaitResult(
+    wait_stub = Mock(
+        return_value=SessionAccessOutcome(
             status=KernelStatus(alive=True, pid=321, busy=False),
             waited=True,
             waited_for="idle",
             runtime_state="ready",
         )
+    )
 
-    def list_runs_stub(**kwargs: object) -> object:
-        del kwargs
-        return next(list_runs_responses)
-
-    def wait_for_run_stub(**kwargs: object) -> object:
-        run_wait_calls.append(dict(kwargs))
-        return {"execution_id": "run-1", "status": "ok", "session_id": "default"}
-
-    cli.runtime.wait_until_idle = wait_stub  # type: ignore[method-assign]
-    cli.executions.list_runs = list_runs_stub  # type: ignore[method-assign]
-    cli.executions.wait_for_run = wait_for_run_stub  # type: ignore[method-assign]
+    cli.executions.wait_for_session_access = wait_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -899,28 +894,29 @@ def test_cli_status_wait_idle_waits_for_active_run_before_returning(
     assert result.exit_code == 0
     payload = _payload(result.output)
     assert payload["data"]["waited_for"] == "idle"
-    assert len(wait_calls) == 2
-    assert run_wait_calls[0]["execution_id"] == "run-1"
+    wait_stub.assert_called_once_with(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=5.0,
+        target="idle",
+    )
 
 
-def test_cli_wait_uses_runtime_wait_for_usable(
+def test_cli_wait_uses_execution_service_wait_for_usable(
     cli_runner: CliRunner,
     project_dir: Path,
 ) -> None:
     import agentnb.cli as cli
 
-    wait_calls: list[dict[str, object]] = []
-
-    def wait_stub(**kwargs: object) -> object:
-        wait_calls.append(dict(kwargs))
-        return SimpleNamespace(
+    wait_stub = Mock(
+        return_value=SessionAccessOutcome(
             status=KernelStatus(alive=True, pid=321, busy=False),
             waited=False,
-            waited_for=None,
             runtime_state="ready",
         )
+    )
 
-    cli.runtime.wait_for_usable = wait_stub  # type: ignore[method-assign]
+    cli.executions.wait_for_session_access = wait_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -933,7 +929,12 @@ def test_cli_wait_uses_runtime_wait_for_usable(
     assert payload["data"]["alive"] is True
     assert payload["data"]["waited"] is False
     assert "waited_for" not in payload["data"]
-    assert wait_calls[0]["timeout_s"] == 5.0
+    wait_stub.assert_called_once_with(
+        project_root=project_dir,
+        session_id="default",
+        timeout_s=5.0,
+        target="usable",
+    )
 
 
 def test_cli_quiet_suppresses_status_body_and_suggestions(

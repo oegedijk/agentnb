@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from agentnb.contracts import ExecutionEvent
 from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.history import kernel_execution_record, user_command_record
 from agentnb.journal import CommandJournal, JournalQuery
@@ -344,6 +345,40 @@ def test_command_journal_falls_back_to_projected_entries_when_persisted_journal_
     assert [entry.provenance_source for entry in selection.entries] == [
         "execution_store",
         "execution_store",
+    ]
+
+
+def test_command_journal_fallback_projection_preserves_projected_cancelled_error(
+    project_dir: Path,
+) -> None:
+    ExecutionStore(project_dir).append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:01+00:00",
+            session_id="default",
+            command_type="exec",
+            status="error",
+            duration_ms=12,
+            code="sleep()",
+            cancel_requested=True,
+            events=[
+                ExecutionEvent(
+                    kind="error",
+                    content="interrupted",
+                    metadata={"ename": "KeyboardInterrupt", "traceback": ["tb"]},
+                )
+            ],
+        )
+    )
+
+    selection = CommandJournal().select(
+        project_root=project_dir,
+        query=JournalQuery(session_id="default", include_internal=True),
+    )
+
+    assert [entry.error_type for entry in selection.entries] == [
+        "CancelledError",
+        "CancelledError",
     ]
 
 

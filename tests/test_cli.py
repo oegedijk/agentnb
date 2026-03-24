@@ -33,9 +33,8 @@ from agentnb.execution_output import OutputItem
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
-from agentnb.payloads import RunSnapshot
 from agentnb.runs.models import RunObservationResult
-from tests.helpers import build_run_snapshot
+from tests.helpers import build_execution_record
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
@@ -2369,14 +2368,11 @@ def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir:
                         session_id="default",
                     ),
                     RunObservationResult(
-                        run=cast(
-                            RunSnapshot,
-                            {
-                                "execution_id": "run-1",
-                                "session_id": "default",
-                                "status": "ok",
-                                "result": "2",
-                            },
+                        run=build_execution_record(
+                            execution_id="run-1",
+                            session_id="default",
+                            status="ok",
+                            result="2",
                         ),
                         completion_reason="terminal",
                     ),
@@ -2422,18 +2418,15 @@ def test_cli_runs_follow_stream_json_emits_events_and_final(
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         sink.accept(ExecutionEvent(kind="result", content="2"))
         return RunObservationResult(
-            run=cast(
-                RunSnapshot,
-                {
-                    "execution_id": "run-1",
-                    "session_id": "default",
-                    "status": "ok",
-                    "result": "2",
-                    "events": [
-                        {"kind": "stdout", "content": "hello\n", "metadata": {}},
-                        {"kind": "result", "content": "2", "metadata": {}},
-                    ],
-                },
+            run=build_execution_record(
+                execution_id="run-1",
+                session_id="default",
+                status="ok",
+                result="2",
+                events=[
+                    ExecutionEvent(kind="stdout", content="hello\n"),
+                    ExecutionEvent(kind="result", content="2"),
+                ],
             ),
             completion_reason="terminal",
         )
@@ -2462,7 +2455,7 @@ def test_cli_runs_follow_window_elapsed_returns_ok_final_frame(
     import agentnb.cli as cli
 
     cli.executions.observe_run = lambda **_: RunObservationResult(  # type: ignore[method-assign]
-        run=build_run_snapshot(status="running", duration_ms=12, events=[]),
+        run=build_execution_record(status="running", duration_ms=12, events=[]),
         completion_reason="window_elapsed",
         replayed_event_count=1,
         emitted_event_count=0,
@@ -2489,7 +2482,7 @@ def test_cli_runs_follow_human_window_elapsed_reuses_snapshot_renderer(
     import agentnb.cli as cli
 
     cli.executions.observe_run = lambda **_: RunObservationResult(  # type: ignore[method-assign]
-        run=build_run_snapshot(
+        run=build_execution_record(
             status="running",
             duration_ms=12,
             stdout="tick\n",

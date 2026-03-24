@@ -186,12 +186,44 @@ What this tranche intentionally did not do:
 - it did not split `state.py`
 - it did not remove the background-worker dependency on the CLI entrypoint
 
+### Tranche 2: Canonical Execution Transcript / Outcome
+
+Status: in progress
+
+Completed in the current refactor:
+
+- `execution_models.py` now owns canonical internal execution normalization
+  through `ExecutionTranscript` and `ExecutionOutcome`.
+- `contracts.ExecutionResult` now normalizes through the canonical outcome
+  model instead of duplicating compatibility projection logic.
+- `runs.store.ExecutionRecord` now keeps a transcript and derives compatibility
+  fields from the normalized outcome model.
+- history/journal/recording paths now accept `ExecutionOutcome` so preview,
+  error, and failure-origin logic does not have to be recomputed from ad hoc
+  field sets.
+- exec/run compaction now prefers `ExecutionRecord` and canonical outcome data
+  instead of partially shaped payload dicts.
+- cancelled-run projection was tightened so persisted terminal state remains
+  authoritative over raw transcript error events when rehydrating an
+  `ExecutionRecord` outcome.
+
+What is still incomplete:
+
+- serializers still shape `TypedDict` payloads directly in several app-facing
+  paths.
+- some seams still accept both mappings and domain objects, so the owning
+  internal type is not yet singular end to end.
+- projection/output layers still carry some compatibility policy that should
+  eventually move behind a smaller serializer boundary.
+
 ## Next Tranche
 
-The next highest-value work is to establish canonical internal execution/outcome
-models and reduce internal dependence on payload dicts. That should include:
+The next highest-value work is to finish pushing canonical execution/outcome
+models to the remaining seams and reduce internal dependence on payload dicts.
+That should include:
 
-- a single normalized execution transcript/outcome owner
 - pushing `TypedDict` usage outward toward serializers and response shaping
-- reducing duplicated compatibility/error/preview logic across execution,
-  history, and run storage
+- removing mixed `Mapping | ExecutionRecord` call patterns where one owning
+  internal type should suffice
+- reducing the remaining duplicated compatibility/error/preview policy across
+  app shaping, projection, and output rendering

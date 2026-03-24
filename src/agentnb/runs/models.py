@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from ..contracts import ExecutionEvent
-from ..payloads import RunSnapshot
+from .store import ExecutionRecord
 
 RunCommandType = Literal["exec", "reset"]
 RunMode = Literal["foreground", "background"]
@@ -111,7 +111,7 @@ class RunHandle:
 
 @dataclass(slots=True, frozen=True)
 class RunObservationResult:
-    run: RunSnapshot
+    run: ExecutionRecord
     completion_reason: RunObservationCompletion
     replayed_event_count: int = 0
     emitted_event_count: int = 0

@@ -11,6 +11,7 @@ from agentnb.contracts import (
     error_response,
     success_response,
 )
+from agentnb.execution import ExecutionRecord
 from agentnb.history import HistoryStore
 from agentnb.payloads import RunSnapshot
 from agentnb.runtime import KernelRuntime
@@ -168,6 +169,11 @@ def build_run_snapshot(**overrides: object) -> RunSnapshot:
     }
     payload.update(overrides)
     return cast(RunSnapshot, payload)
+
+
+def build_execution_record(**overrides: object) -> ExecutionRecord:
+    payload = dict(build_run_snapshot(**overrides))
+    return ExecutionRecord.from_dict(cast(dict[str, Any], payload))
 
 
 def build_success_response(

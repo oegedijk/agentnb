@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 
 if TYPE_CHECKING:
+    from .execution_models import ExecutionOutcome
     from .execution_output import OutputItem
 
 SCHEMA_VERSION = "1.0"
@@ -93,68 +94,36 @@ class ExecutionResult:
     traceback: list[str] | None = None
     outputs: list[OutputItem] = field(default_factory=list)
     events: list[ExecutionEvent] = field(default_factory=list)
+    _outcome: ExecutionOutcome = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        from .execution_output import (
-            ExecutionOutput,
-            compatibility_output,
-            execution_output_from_events,
-            execution_output_from_legacy_fields,
-        )
+        from .execution_models import ExecutionOutcome
 
-        if self.outputs:
-            output = ExecutionOutput(
-                items=list(self.outputs),
-                execution_count=self.execution_count,
-            )
-        elif self.events:
-            output = execution_output_from_events(self.events, execution_count=self.execution_count)
-        else:
-            output = execution_output_from_legacy_fields(
-                stdout=self.stdout,
-                stderr=self.stderr,
-                result=self.result,
-                ename=self.ename,
-                evalue=self.evalue,
-                traceback=self.traceback,
-                status=self.status,
-                execution_count=self.execution_count,
-            )
-
-        if not self.outputs:
-            self.outputs = list(output.items)
-        if not self.events:
-            self.events = output.to_events()
-
-        projected = compatibility_output(output)
-        self.stdout = projected.stdout
-        self.stderr = projected.stderr
-        self.result = projected.result
-
-        explicit_error = (
-            self.status == "error"
-            or self.ename is not None
-            or self.evalue is not None
-            or self.traceback is not None
-        )
-        if projected.status == "error":
-            self.status = projected.status
-            self.ename = projected.ename
-            self.evalue = projected.evalue
-            self.traceback = projected.traceback
-        elif explicit_error:
-            self.status = "error"
-        else:
-            self.status = projected.status
-            self.ename = projected.ename
-            self.evalue = projected.evalue
-            self.traceback = projected.traceback
+        outcome = ExecutionOutcome.from_execution_result(self)
+        self._outcome = outcome
+        self.outputs = list(outcome.outputs)
+        self.events = list(outcome.events)
+        self.stdout = outcome.stdout
+        self.stderr = outcome.stderr
+        self.result = outcome.result
+        self.status = outcome.status
+        self.ename = outcome.ename
+        self.evalue = outcome.evalue
+        self.traceback = outcome.traceback
+        self.execution_count = outcome.execution_count
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
+        payload.pop("_outcome", None)
         payload["events"] = [event.to_dict() for event in self.events]
         payload.pop("outputs", None)
         return payload
+
+    def to_outcome(self) -> ExecutionOutcome:
+        from .execution_models import ExecutionOutcome
+
+        assert isinstance(self._outcome, ExecutionOutcome)
+        return self._outcome
 
 
 @dataclass(slots=True)

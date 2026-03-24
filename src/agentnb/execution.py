@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -12,7 +13,7 @@ from .contracts import (
     HelperWaitFor,
 )
 from .errors import KernelWaitTimedOutError, RunWaitTimedOutError
-from .payloads import CancelRunResult, RunSnapshot
+from .payloads import CancelRunResult
 from .recording import CommandRecorder
 from .runs import (
     ExecutionRecord,
@@ -152,14 +153,14 @@ class ExecutionService:
         project_root: Path,
         session_id: str | None = None,
         errors_only: bool = False,
-    ) -> list[RunSnapshot]:
+    ) -> list[ExecutionRecord]:
         return self._run_manager.list_runs(
             project_root=project_root,
             session_id=session_id,
             errors_only=errors_only,
         )
 
-    def get_run(self, *, project_root: Path, execution_id: str) -> RunSnapshot:
+    def get_run(self, *, project_root: Path, execution_id: str) -> ExecutionRecord:
         return self._run_manager.get_run(project_root=project_root, execution_id=execution_id)
 
     def wait_for_run(
@@ -169,7 +170,7 @@ class ExecutionService:
         execution_id: str,
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
-    ) -> RunSnapshot:
+    ) -> ExecutionRecord:
         return self._run_manager.wait_for_run(
             project_root=project_root,
             execution_id=execution_id,
@@ -205,7 +206,7 @@ class ExecutionService:
         poll_interval_s: float = 0.1,
         event_sink: ExecutionSink | None = None,
         skip_history: bool = False,
-    ) -> RunSnapshot:
+    ) -> ExecutionRecord:
         observation = self.observe_run(
             project_root=project_root,
             execution_id=execution_id,
@@ -372,11 +373,17 @@ class ExecutionService:
             session_id=session_id,
         )
         for run in reversed(runs):
-            status = run.get("status")
-            execution_id = run.get("execution_id")
+            status = _run_field(run, "status")
+            execution_id = _run_field(run, "execution_id")
             if status in {"starting", "running"} and isinstance(execution_id, str) and execution_id:
                 return execution_id
         return None
+
+
+def _run_field(run: ExecutionRecord | Mapping[str, object], key: str) -> object:
+    if isinstance(run, ExecutionRecord):
+        return getattr(run, key, None)
+    return run.get(key)
 
 
 __all__ = [

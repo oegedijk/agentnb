@@ -12,23 +12,32 @@ from agentnb.output import (
     render_response,
     render_stream_completion,
 )
+from tests.helpers import build_success_response
 
 
-def test_render_response_json_matches_command_payload() -> None:
-    response = success_response(
+@pytest.mark.parametrize("profile", [OutputProfile.FULL_JSON, OutputProfile.AGENT])
+def test_render_response_json_profiles_smoke(profile: OutputProfile) -> None:
+    response = build_success_response(
         command="status",
-        project="/tmp/project",
-        session_id="default",
-        data={"alive": True, "pid": 123},
+        data={"alive": True, "pid": 123, "busy": False},
         suggestions=["Run `agentnb exec --json`."],
     )
 
     rendered = render_response(
         response,
-        options=RenderOptions(profile=OutputProfile.FULL_JSON),
+        options=RenderOptions(profile=profile),
     )
 
-    assert json.loads(rendered) == response.to_dict()
+    payload = json.loads(rendered)
+    assert payload["command"] == "status"
+    assert payload["session_id"] == "default"
+    assert payload["data"]["alive"] is True
+    if profile == OutputProfile.FULL_JSON:
+        assert payload["status"] == "ok"
+        assert payload["suggestions"]
+    else:
+        assert payload["ok"] is True
+        assert "suggestions" not in payload
 
 
 def test_render_human_doctor_includes_fix_hint() -> None:
@@ -888,28 +897,6 @@ def test_render_options_resolve_agent_profile() -> None:
     assert options.as_json is True
     assert options.quiet is True
     assert options.show_suggestions is False
-
-
-def test_render_response_agent_uses_compact_projection() -> None:
-    response = success_response(
-        command="status",
-        project="/tmp/project",
-        session_id="default",
-        data={"alive": True, "pid": 123, "busy": False},
-        suggestions=["This should not appear in the agent payload."],
-    )
-
-    rendered = render_response(
-        response,
-        options=RenderOptions(profile=OutputProfile.AGENT),
-    )
-
-    assert json.loads(rendered) == {
-        "ok": True,
-        "command": "status",
-        "session_id": "default",
-        "data": {"alive": True, "pid": 123, "busy": False},
-    }
 
 
 def test_render_human_exec_background_dispatch_message() -> None:

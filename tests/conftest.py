@@ -13,7 +13,7 @@ from click.testing import CliRunner
 
 from agentnb.contracts import KernelStatus
 from agentnb.execution import ExecutionRecord, ExecutionService, ExecutionStore
-from agentnb.history import HistoryStore, user_command_record
+from agentnb.history import HistoryRecord, HistoryStore, user_command_record
 from agentnb.kernel.backend import LocalIPythonBackend, _close_client, _hard_kill_signal
 from agentnb.ops import NotebookOps
 from agentnb.runtime import KernelRuntime
@@ -152,6 +152,7 @@ def journal_builder(project_dir: Path):
         result: str | None = None,
         ename: str | None = None,
         failure_origin: Literal["kernel", "control"] | None = None,
+        journal_entries: list[HistoryRecord] | None = None,
     ) -> None:
         ExecutionStore(project_dir).append(
             ExecutionRecord(
@@ -165,6 +166,7 @@ def journal_builder(project_dir: Path):
                 result=result,
                 ename=ename,
                 failure_origin=failure_origin,
+                journal_entries=[] if journal_entries is None else journal_entries,
             )
         )
 

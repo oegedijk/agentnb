@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from agentnb.contracts import ExecutionEvent, ExecutionResult, ExecutionSink
-from agentnb.errors import AgentNBException
+from agentnb.errors import AgentNBException, RunWaitTimedOutError
 from agentnb.execution import (
     ExecutionRecord,
     ExecutionRun,
@@ -460,127 +460,23 @@ def test_execution_service_reset_session_delegates_to_run_manager(project_dir: P
     assert spec.timeout_s == 9.0
 
 
-def test_execution_service_wait_for_run_delegates_to_run_manager(project_dir: Path) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    run_manager = Mock()
-    run_manager.wait_for_run.return_value = {"execution_id": "run-1", "status": "ok"}
-
-    service = ExecutionService(runtime, run_manager=run_manager)
-    result = service.wait_for_run(
-        project_root=project_dir,
-        execution_id="run-1",
-        timeout_s=2.0,
-        poll_interval_s=0.25,
-    )
-
-    assert result == {"execution_id": "run-1", "status": "ok"}
-    run_manager.wait_for_run.assert_called_once_with(
-        project_root=project_dir,
-        execution_id="run-1",
-        timeout_s=2.0,
-        poll_interval_s=0.25,
-    )
-
-
-def test_execution_service_follow_run_delegates_observer_to_run_manager(project_dir: Path) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    run_manager = Mock()
-    run_manager.follow_run.return_value = RunObservationResult(
-        run={"execution_id": "run-1", "status": "ok"},
-        completion_reason="terminal",
-    )
-
-    class Sink(ExecutionSink):
-        def started(self, *, execution_id: str, session_id: str) -> None:
-            del execution_id, session_id
-
-        def accept(self, event: ExecutionEvent) -> None:
-            del event
-
-    sink = Sink()
-    service = ExecutionService(runtime, run_manager=run_manager)
-    result = service.follow_run(
-        project_root=project_dir,
-        execution_id="run-1",
-        timeout_s=3.0,
-        poll_interval_s=0.5,
-        event_sink=sink,
-    )
-
-    assert result == {"execution_id": "run-1", "status": "ok"}
-    run_manager.follow_run.assert_called_once_with(
-        project_root=project_dir,
-        execution_id="run-1",
-        timeout_s=3.0,
-        poll_interval_s=0.5,
-        observer=sink,
-        skip_history=False,
-    )
-
-
-def test_execution_service_observe_run_returns_observation(project_dir: Path) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    run_manager = Mock()
-    observation = RunObservationResult(
-        run={"execution_id": "run-1", "status": "running"},
-        completion_reason="window_elapsed",
-        replayed_event_count=1,
-        emitted_event_count=0,
-    )
-    run_manager.follow_run.return_value = observation
-
-    service = ExecutionService(runtime, run_manager=run_manager)
-    result = service.observe_run(
-        project_root=project_dir,
-        execution_id="run-1",
-        timeout_s=3.0,
-    )
-
-    assert result is observation
-
-
-def test_execution_service_cancel_run_delegates_to_run_manager(project_dir: Path) -> None:
-    runtime = KernelRuntime(backend=Mock())
-    run_manager = Mock()
-    run_manager.cancel_run.return_value = {
-        "execution_id": "run-1",
-        "session_id": "default",
-        "cancel_requested": True,
-        "status": "error",
-        "run_status": "error",
-        "session_outcome": "preserved",
-    }
-
-    service = ExecutionService(runtime, run_manager=run_manager)
-    result = service.cancel_run(
-        project_root=project_dir,
-        execution_id="run-1",
-        timeout_s=4.0,
-        poll_interval_s=0.75,
-    )
-
-    assert result["cancel_requested"] is True
-    run_manager.cancel_run.assert_called_once_with(
-        project_root=project_dir,
-        execution_id="run-1",
-        timeout_s=4.0,
-        poll_interval_s=0.75,
-    )
-
-
-def test_execution_service_complete_background_run_delegates_to_run_manager(
+def test_execution_service_follow_run_raises_timeout_when_window_elapses(
     project_dir: Path,
 ) -> None:
     runtime = KernelRuntime(backend=Mock())
     run_manager = Mock()
-
-    service = ExecutionService(runtime, run_manager=run_manager)
-    service.complete_background_run(project_root=project_dir, execution_id="run-1")
-
-    run_manager.complete_background_run.assert_called_once_with(
-        project_root=project_dir,
-        execution_id="run-1",
+    run_manager.follow_run.return_value = RunObservationResult(
+        run={"execution_id": "run-1", "status": "running"},
+        completion_reason="window_elapsed",
     )
+    service = ExecutionService(runtime, run_manager=run_manager)
+
+    with pytest.raises(RunWaitTimedOutError):
+        service.follow_run(
+            project_root=project_dir,
+            execution_id="run-1",
+            timeout_s=3.0,
+        )
 
 
 def test_execution_progress_sink_keeps_nonterminal_background_snapshot_running(

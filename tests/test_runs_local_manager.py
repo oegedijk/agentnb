@@ -19,6 +19,7 @@ from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.kernel.backend import BackendCapabilities
 from agentnb.runs import LocalRunManager, RunSpec
 from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
+from tests.helpers import install_fake_clock
 
 
 def _runtime(*, supports_interrupt: bool = True) -> KernelRuntime:
@@ -385,8 +386,8 @@ def test_local_run_manager_wait_for_run_returns_completed_record(project_dir: Pa
     run = LocalRunManager(_runtime()).wait_for_run(
         project_root=project_dir,
         execution_id="run-1",
-        timeout_s=0.0,
-        poll_interval_s=0.0,
+        timeout_s=1.0,
+        poll_interval_s=0.1,
     )
 
     assert run["execution_id"] == "run-1"
@@ -414,7 +415,7 @@ def test_local_run_manager_helper_access_passes_through_runtime_wait(project_dir
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
-        poll_interval_s=0.0,
+        poll_interval_s=0.1,
     )
 
     assert access.waited is True
@@ -426,29 +427,27 @@ def test_local_run_manager_helper_access_passes_through_runtime_wait(project_dir
     kwargs = runtime.wait_for_usable.call_args.kwargs
     assert kwargs["project_root"] == project_dir
     assert kwargs["session_id"] == "default"
-    assert kwargs["poll_interval_s"] == 0.0
-    assert 0.0 <= kwargs["timeout_s"] <= 1.0
+    assert kwargs["poll_interval_s"] == 0.1
+    assert kwargs["timeout_s"] == pytest.approx(1.0, rel=0.01)
 
 
-def test_local_run_manager_helper_access_waits_for_active_run(project_dir: Path, mocker) -> None:
+def test_local_run_manager_helper_access_merges_run_wait_and_runtime_wait(
+    project_dir: Path,
+    mocker,
+) -> None:
     mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    clock = install_fake_clock(mocker, "agentnb.runs.local_manager")
     runtime = Mock(spec=KernelRuntime)
     runtime.runtime_state.return_value = RuntimeState(
         kind="ready",
         session_id="default",
         kernel_status=KernelStatus(alive=True, pid=321, busy=False),
     )
-    runtime.wait_for_usable.return_value = KernelWaitResult(
-        status=KernelStatus(alive=True, pid=321, busy=False),
-        waited=False,
-        runtime_state="ready",
-        waited_ms=0,
-        initial_runtime_state="ready",
-    )
     store = ExecutionStore(project_dir)
     store.append(_active_record())
 
-    def sleep_stub(_: float) -> None:
+    def sleep_stub(seconds: float) -> None:
+        clock.sleep(seconds)
         store.append(
             ExecutionRecord(
                 execution_id="run-1",
@@ -464,16 +463,33 @@ def test_local_run_manager_helper_access_waits_for_active_run(project_dir: Path,
 
     mocker.patch("agentnb.runs.local_manager.time.sleep", side_effect=sleep_stub)
 
+    def wait_for_usable_stub(**kwargs: object) -> KernelWaitResult:
+        assert kwargs["project_root"] == project_dir
+        assert kwargs["session_id"] == "default"
+        assert kwargs["poll_interval_s"] == 0.2
+        assert kwargs["timeout_s"] == pytest.approx(0.8)
+        clock.advance(0.05)
+        return KernelWaitResult(
+            status=KernelStatus(alive=True, pid=321, busy=False),
+            waited=True,
+            waited_for="ready",
+            runtime_state="ready",
+            waited_ms=50,
+            initial_runtime_state="starting",
+        )
+
+    runtime.wait_for_usable.side_effect = wait_for_usable_stub
+
     access = LocalRunManager(runtime).wait_for_helper_session_access(
         project_root=project_dir,
         session_id="default",
         timeout_s=1.0,
-        poll_interval_s=0.0,
+        poll_interval_s=0.2,
     )
 
     assert access.waited is True
-    assert access.waited_for == "idle"
-    assert access.waited_ms >= 0
+    assert access.waited_for == "ready"
+    assert access.waited_ms == 250
     assert access.initial_runtime_state == "busy"
     assert access.blocking_execution_id == "run-1"
     runtime.wait_for_usable.assert_called_once()
@@ -484,6 +500,7 @@ def test_local_run_manager_helper_access_times_out_behind_active_run(
     mocker,
 ) -> None:
     mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    install_fake_clock(mocker, "agentnb.runs.local_manager")
     runtime = Mock(spec=KernelRuntime)
     runtime.runtime_state.return_value = RuntimeState(
         kind="ready",
@@ -496,26 +513,28 @@ def test_local_run_manager_helper_access_times_out_behind_active_run(
         LocalRunManager(runtime).wait_for_helper_session_access(
             project_root=project_dir,
             session_id="default",
-            timeout_s=0.0,
-            poll_interval_s=0.0,
+            timeout_s=0.5,
+            poll_interval_s=0.25,
         )
 
     assert exc_info.value.data["wait_behavior"] == "after_wait"
     assert exc_info.value.data["active_execution_id"] == "run-1"
     assert exc_info.value.data["lock_pid"] == 123
+    assert exc_info.value.data["waited_ms"] == 500
     runtime.wait_for_usable.assert_not_called()
 
 
 def test_local_run_manager_wait_for_run_times_out(project_dir: Path, mocker) -> None:
     mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    install_fake_clock(mocker, "agentnb.runs.local_manager")
     ExecutionStore(project_dir).append(_active_record())
 
     with pytest.raises(RunWaitTimedOutError):
         LocalRunManager(_runtime()).wait_for_run(
             project_root=project_dir,
             execution_id="run-1",
-            timeout_s=0.0,
-            poll_interval_s=0.0,
+            timeout_s=0.5,
+            poll_interval_s=0.25,
         )
 
 
@@ -585,15 +604,83 @@ def test_local_run_manager_follow_run_replays_incremental_events(project_dir: Pa
     ]
 
 
+def test_local_run_manager_follow_run_skip_history_emits_only_new_events(
+    project_dir: Path,
+    mocker,
+) -> None:
+    class Sink(ExecutionSink):
+        def __init__(self) -> None:
+            self.started_calls: list[tuple[str, str]] = []
+            self.events: list[ExecutionEvent] = []
+
+        def started(self, *, execution_id: str, session_id: str) -> None:
+            self.started_calls.append((execution_id, session_id))
+
+        def accept(self, event: ExecutionEvent) -> None:
+            self.events.append(event)
+
+    mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    store = ExecutionStore(project_dir)
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+            worker_pid=123,
+            events=[ExecutionEvent(kind="stdout", content="hello\n")],
+        )
+    )
+
+    def sleep_stub(_: float) -> None:
+        store.append(
+            ExecutionRecord(
+                execution_id="run-1",
+                ts="2026-03-10T00:00:01+00:00",
+                session_id="default",
+                command_type="exec",
+                status="ok",
+                duration_ms=10,
+                result="2",
+                events=[
+                    ExecutionEvent(kind="stdout", content="hello\n"),
+                    ExecutionEvent(kind="result", content="2"),
+                ],
+            )
+        )
+
+    mocker.patch("agentnb.runs.local_manager.time.sleep", side_effect=sleep_stub)
+
+    sink = Sink()
+    observation = LocalRunManager(_runtime()).follow_run(
+        project_root=project_dir,
+        execution_id="run-1",
+        timeout_s=1.0,
+        poll_interval_s=0.1,
+        observer=sink,
+        skip_history=True,
+    )
+
+    assert observation.completion_reason == "terminal"
+    assert observation.replayed_event_count == 0
+    assert observation.emitted_event_count == 1
+    assert observation.run["status"] == "ok"
+    assert sink.started_calls == [("run-1", "default")]
+    assert sink.events == [ExecutionEvent(kind="result", content="2")]
+
+
 def test_local_run_manager_follow_run_reports_elapsed_window(project_dir: Path, mocker) -> None:
     mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    install_fake_clock(mocker, "agentnb.runs.local_manager")
     ExecutionStore(project_dir).append(_active_record())
 
     observation = LocalRunManager(_runtime()).follow_run(
         project_root=project_dir,
         execution_id="run-1",
-        timeout_s=0.0,
-        poll_interval_s=0.0,
+        timeout_s=0.5,
+        poll_interval_s=0.25,
     )
 
     assert observation.completion_reason == "window_elapsed"
@@ -603,6 +690,7 @@ def test_local_run_manager_follow_run_reports_elapsed_window(project_dir: Path, 
 
 def test_local_run_manager_cancel_run_interrupts_session(project_dir: Path, mocker) -> None:
     mocker.patch("agentnb.runs.local_manager.pid_exists", return_value=True)
+    install_fake_clock(mocker, "agentnb.runs.local_manager")
     kill = mocker.patch("agentnb.runs.local_manager.os.kill")
     runtime = _runtime()
     interrupt = mocker.patch.object(runtime, "interrupt")
@@ -611,8 +699,8 @@ def test_local_run_manager_cancel_run_interrupts_session(project_dir: Path, mock
     payload = LocalRunManager(runtime).cancel_run(
         project_root=project_dir,
         execution_id="run-1",
-        timeout_s=0.0,
-        poll_interval_s=0.0,
+        timeout_s=0.5,
+        poll_interval_s=0.25,
     )
     stored = ExecutionStore(project_dir).get("run-1")
 
@@ -659,7 +747,7 @@ def test_local_run_manager_cancel_run_returns_finished_state_when_run_completes_
         project_root=project_dir,
         execution_id="run-1",
         timeout_s=0.2,
-        poll_interval_s=0.0,
+        poll_interval_s=0.1,
     )
 
     assert payload == {

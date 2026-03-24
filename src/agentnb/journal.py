@@ -251,6 +251,7 @@ class CommandJournal:
         helper_label = (
             "reset kernel state" if record.command_type == "reset" else "exec kernel execution"
         )
+        outcome = record.outcome()
         return [
             JournalEntry.from_history_record(
                 kernel_execution_record(
@@ -261,12 +262,8 @@ class CommandJournal:
                     label=helper_label,
                     code=record.code,
                     origin="execution_service",
-                    status=record.status,
-                    duration_ms=record.duration_ms,
-                    error_type=record.ename,
+                    outcome=outcome,
                     failure_origin=_failure_origin_for_record(record),
-                    stdout=record.stdout,
-                    result=record.result,
                 ),
                 provenance_source="execution_store",
                 provenance_detail="projected_kernel_execution",
@@ -281,12 +278,8 @@ class CommandJournal:
                     input_text=record.code,
                     code=record.code,
                     origin="execution_service",
-                    status=record.status,
-                    duration_ms=record.duration_ms,
-                    error_type=record.ename,
+                    outcome=outcome,
                     failure_origin=_failure_origin_for_record(record),
-                    stdout=record.stdout,
-                    result=record.result,
                 ),
                 provenance_source="execution_store",
                 provenance_detail="projected_user_command",

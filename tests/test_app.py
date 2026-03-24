@@ -34,12 +34,11 @@ from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry
 from agentnb.ops import NotebookOps
-from agentnb.payloads import RunSnapshot
 from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelRuntime, RuntimeState
 from agentnb.selectors import parse_history_reference, parse_run_reference
 from agentnb.state import CommandLockInfo
-from tests.helpers import build_run_snapshot
+from tests.helpers import build_execution_record, build_run_snapshot
 
 
 class DummySink:
@@ -751,12 +750,12 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
     sink = DummySink()
     executions.observe_run.return_value = RunObservationResult(
-        run={
-            "execution_id": "run-1",
-            "session_id": "analysis",
-            "status": "ok",
-            "result": "2",
-        },
+        run=build_execution_record(
+            execution_id="run-1",
+            session_id="analysis",
+            status="ok",
+            result="2",
+        ),
         completion_reason="terminal",
     )
     app = AgentNBApp(runtime=runtime, executions=executions)
@@ -804,9 +803,12 @@ def test_app_run_lookup_sanitizes_tracebacks_and_hides_follow_output_fields(proj
         ],
         outputs=[{"kind": "result", "text": "2", "mime": {"text/plain": "2"}}],
     )
+    record_run = build_execution_record(
+        **{key: value for key, value in dict(raw_run).items() if key != "outputs"}
+    )
     executions.get_run.return_value = dict(raw_run)
     executions.observe_run.return_value = RunObservationResult(
-        run=build_run_snapshot(**dict(raw_run)),
+        run=record_run,
         completion_reason="window_elapsed",
     )
     app = AgentNBApp(runtime=runtime, executions=executions)
@@ -830,7 +832,7 @@ def test_app_run_lookup_sanitizes_tracebacks_and_hides_follow_output_fields(proj
     assert "outputs" not in show_run
 
     follow_run = follow_response.data["run"]
-    assert follow_run["traceback"] == ["Traceback line"]
+    assert follow_run["traceback"] == ["frame 1"]
     assert follow_run["recorded_traceback"] == ["KeyboardInterrupt"]
     for hidden_key in ("stdout", "stderr", "result", "events", "outputs"):
         assert hidden_key not in follow_run
@@ -919,17 +921,17 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
         "recorded_ename": "KeyboardInterrupt",
         "outputs": [{"kind": "result", "text": "2", "mime": {"text/plain": "2"}}],
     }
-    observed_run: RunSnapshot = {
-        "execution_id": "run-1",
-        "session_id": "analysis",
-        "status": "error",
-        "result": "2",
-        "terminal_reason": "cancelled",
-        "cancel_requested": True,
-        "recorded_ename": "KeyboardInterrupt",
-    }
-    executions.get_run.return_value = dict(run_payload)
-    executions.wait_for_run.return_value = dict(run_payload)
+    observed_run = build_execution_record(
+        execution_id="run-1",
+        session_id="analysis",
+        status="error",
+        result="2",
+        terminal_reason="cancelled",
+        cancel_requested=True,
+        recorded_ename="KeyboardInterrupt",
+    )
+    executions.get_run.return_value = build_execution_record(**dict(run_payload))
+    executions.wait_for_run.return_value = build_execution_record(**dict(run_payload))
     executions.observe_run.return_value = RunObservationResult(
         run=observed_run,
         completion_reason="terminal",
@@ -977,11 +979,11 @@ def test_app_runs_follow_reports_elapsed_window(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
     sink = DummySink()
     executions.observe_run.return_value = RunObservationResult(
-        run={
-            "execution_id": "run-1",
-            "session_id": "analysis",
-            "status": "running",
-        },
+        run=build_execution_record(
+            execution_id="run-1",
+            session_id="analysis",
+            status="running",
+        ),
         completion_reason="window_elapsed",
     )
     app = AgentNBApp(runtime=runtime, executions=executions)

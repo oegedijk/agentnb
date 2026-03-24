@@ -15,7 +15,7 @@ from ..errors import (
     RunWaitTimedOutError,
     SessionBusyError,
 )
-from ..payloads import CancelRunResult, RunSnapshot
+from ..payloads import CancelRunResult
 from ..recording import CommandRecorder, CommandRecording
 from ..session import pid_exists
 from .executor import LocalRunExecutor, RunExecutor
@@ -27,6 +27,7 @@ from .store import (
     ExecutionStore,
     ManagedExecution,
     StartOutcome,
+    execution_record_payload,
     new_execution_id,
 )
 
@@ -61,27 +62,22 @@ class LocalRunManager(RunManager):
         project_root: Path,
         session_id: str | None = None,
         errors_only: bool = False,
-    ) -> list[RunSnapshot]:
-        return [
-            record.to_dict()
-            for record in self._read_runs(
-                project_root=project_root,
-                session_id=session_id,
-                command_types={"exec", "reset"},
-                errors_only=errors_only,
-            )
-        ]
+    ) -> list[ExecutionRecord]:
+        return self._read_runs(
+            project_root=project_root,
+            session_id=session_id,
+            command_types={"exec", "reset"},
+            errors_only=errors_only,
+        )
 
-    def get_run(self, *, project_root: Path, execution_id: str) -> RunSnapshot:
+    def get_run(self, *, project_root: Path, execution_id: str) -> ExecutionRecord:
         record = self._load_run(project_root=project_root, execution_id=execution_id)
         if record is None:
             raise AgentNBException(
                 code="EXECUTION_NOT_FOUND",
                 message=f"Execution not found: {execution_id}",
             )
-        payload = record.to_dict()
-        payload["snapshot_stale"] = record.status in _ACTIVE_RUN_STATUSES
-        return payload
+        return record
 
     def wait_for_run(
         self,
@@ -90,7 +86,7 @@ class LocalRunManager(RunManager):
         execution_id: str,
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
-    ) -> RunSnapshot:
+    ) -> ExecutionRecord:
         deadline = time.monotonic() + timeout_s
         while True:
             record = self._load_run(project_root=project_root, execution_id=execution_id)
@@ -100,7 +96,7 @@ class LocalRunManager(RunManager):
                     message=f"Execution not found: {execution_id}",
                 )
             if record.status not in _ACTIVE_RUN_STATUSES:
-                return record.to_dict()
+                return record
             if time.monotonic() >= deadline:
                 raise RunWaitTimedOutError(timeout_s)
             time.sleep(poll_interval_s)
@@ -149,18 +145,15 @@ class LocalRunManager(RunManager):
                     emitted_event_count += len(new_events)
                 emitted_events = len(record.events)
             if record.status not in _ACTIVE_RUN_STATUSES:
-                payload = record.to_dict()
                 return RunObservationResult(
-                    run=payload,
+                    run=record,
                     completion_reason="terminal",
                     replayed_event_count=replayed_event_count,
                     emitted_event_count=emitted_event_count,
                 )
             if time.monotonic() >= deadline:
-                payload = record.to_dict()
-                payload["snapshot_stale"] = True
                 return RunObservationResult(
-                    run=payload,
+                    run=record,
                     completion_reason="window_elapsed",
                     replayed_event_count=replayed_event_count,
                     emitted_event_count=emitted_event_count,
@@ -366,7 +359,7 @@ class LocalRunManager(RunManager):
                     ename=exc.ename,
                     evalue=exc.evalue,
                     traceback=exc.traceback,
-                    data=dict(record.to_execution_payload()),
+                    data=execution_record_payload(record),
                 ) from exc
             raise
 
@@ -406,7 +399,7 @@ class LocalRunManager(RunManager):
                         ename=exc.ename,
                         evalue=exc.evalue,
                         traceback=exc.traceback,
-                        data=dict(record.to_execution_payload()),
+                        data=execution_record_payload(record),
                     ) from exc
             raise
 

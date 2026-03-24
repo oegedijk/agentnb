@@ -4,9 +4,9 @@ from pathlib import Path
 from typing import Protocol
 
 from ..contracts import HelperAccessMetadata
-from ..payloads import CancelRunResult, RunSnapshot
+from ..payloads import CancelRunResult
 from .models import RunObservationResult, RunObserver, RunSpec
-from .store import ManagedExecution
+from .store import ExecutionRecord, ManagedExecution
 
 
 class RunManager(Protocol):
@@ -18,9 +18,9 @@ class RunManager(Protocol):
         project_root: Path,
         session_id: str | None = None,
         errors_only: bool = False,
-    ) -> list[RunSnapshot]: ...
+    ) -> list[ExecutionRecord]: ...
 
-    def get_run(self, *, project_root: Path, execution_id: str) -> RunSnapshot: ...
+    def get_run(self, *, project_root: Path, execution_id: str) -> ExecutionRecord: ...
 
     def wait_for_run(
         self,
@@ -29,7 +29,7 @@ class RunManager(Protocol):
         execution_id: str,
         timeout_s: float = 30.0,
         poll_interval_s: float = 0.1,
-    ) -> RunSnapshot: ...
+    ) -> ExecutionRecord: ...
 
     def follow_run(
         self,

@@ -29,7 +29,6 @@ from .introspection import HelperExecutionPolicy
 from .ops import NotebookOps
 from .payloads import (
     BulkDeleteResult,
-    CompactExecPayloadInput,
     DoctorPayload,
     ExecPayload,
     HistoryPayload,
@@ -50,6 +49,7 @@ from .payloads import (
     VarDisplayEntry,
     VarsPayload,
 )
+from .runs.store import ExecutionRecord
 from .runtime import (
     KernelRuntime,
     RuntimeState,
@@ -696,9 +696,7 @@ class AgentNBApp:
             session_id=session_id,
             timeout_s=request.timeout_s,
         )
-        payload = compact_execution_payload(
-            cast(CompactExecPayloadInput, managed.record.to_execution_payload())
-        )
+        payload = compact_execution_payload(managed.record)
         if managed.record.status == "error":
             raise AgentNBException(
                 code="EXECUTION_ERROR",
@@ -775,9 +773,11 @@ class AgentNBApp:
             "run": _public_run_payload(
                 run,
                 include_output=not (observation is not None and skip_history),
+                snapshot_stale=observation is not None
+                and observation.completion_reason == "window_elapsed",
             )
         }
-        status = run.get("status")
+        status = run.status if isinstance(run, ExecutionRecord) else run.get("status")
         if isinstance(status, str):
             payload["status"] = status
         if observation is not None:
@@ -1123,10 +1123,7 @@ class _ExecPayloadBuilder:
 
     def build(self, managed: ManagedExecution) -> ExecPayload:
         invocation = self.request.invocation
-        payload = compact_execution_payload(
-            cast(CompactExecPayloadInput, managed.record.to_execution_payload()),
-            no_truncate=invocation.no_truncate,
-        )
+        payload = compact_execution_payload(managed.record, no_truncate=invocation.no_truncate)
         payload["source_kind"] = self.request.source_kind
         if self.request.source_path is not None:
             payload["source_path"] = str(self.request.source_path)
@@ -1273,11 +1270,21 @@ def _namespace_delta(
     }
 
 
-def _public_run_payload(run: Mapping[str, object], *, include_output: bool = True) -> RunSnapshot:
+def _public_run_payload(
+    run: ExecutionRecord | Mapping[str, object],
+    *,
+    include_output: bool = True,
+    snapshot_stale: bool = False,
+) -> RunSnapshot:
+    raw_payload = run.to_dict() if isinstance(run, ExecutionRecord) else dict(run)
     hidden_keys = {"outputs"}
     if not include_output:
         hidden_keys.update({"stdout", "stderr", "result", "events"})
-    payload = {key: value for key, value in run.items() if key not in hidden_keys}
+    payload = {key: value for key, value in raw_payload.items() if key not in hidden_keys}
+    if snapshot_stale or (
+        isinstance(run, ExecutionRecord) and run.status in {"starting", "running"}
+    ):
+        payload["snapshot_stale"] = True
     for key in ("traceback", "recorded_traceback"):
         value = payload.get(key)
         if isinstance(value, list):

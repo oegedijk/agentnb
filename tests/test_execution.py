@@ -600,7 +600,14 @@ def test_execution_service_follow_run_raises_timeout_when_window_elapses(
     runtime = KernelRuntime(backend=Mock())
     run_manager = Mock()
     run_manager.follow_run.return_value = RunObservationResult(
-        run={"execution_id": "run-1", "status": "running"},
+        run=ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="running",
+            duration_ms=0,
+        ),
         completion_reason="window_elapsed",
     )
     service = ExecutionService(runtime, run_manager=run_manager)

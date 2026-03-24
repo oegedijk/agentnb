@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, TypedDict, cast
 
 from .contracts import ExecutionResult, utc_now_iso
-from .execution_output import compatibility_output
+from .execution_models import ExecutionOutcome
 from .session import DEFAULT_SESSION_ID
 from .state import StateRepository
 
@@ -166,6 +166,7 @@ def user_command_record(
     code: str | None = None,
     origin: str | None = None,
     execution: ExecutionResult | None = None,
+    outcome: ExecutionOutcome | None = None,
     error: Exception | None = None,
     status: str | None = None,
     duration_ms: int | None = None,
@@ -174,17 +175,19 @@ def user_command_record(
     stdout: str | None = None,
     result: str | None = None,
 ) -> HistoryRecord:
-    resolved_status, resolved_duration, resolved_error_type, result_preview, stdout_preview = (
-        _resolve_execution_metadata(
-            execution=execution,
-            error=error,
-            status=status,
-            duration_ms=duration_ms,
-            error_type=error_type,
-            stdout=stdout,
-            result=result,
-        )
+    resolved_outcome = _resolve_outcome(
+        execution=execution,
+        outcome=outcome,
+        error=error,
+        status=status,
+        duration_ms=duration_ms,
+        error_type=error_type,
+        stdout=stdout,
+        result=result,
     )
+    resolved_status = resolved_outcome.status
+    resolved_duration = resolved_outcome.duration_ms
+    resolved_error_type = resolved_outcome.ename
     return HistoryRecord(
         kind="user_command",
         ts=utc_now_iso() if ts is None else ts,
@@ -200,13 +203,13 @@ def user_command_record(
         user_visible=True,
         error_type=resolved_error_type,
         failure_origin=_resolved_failure_origin(
-            execution=execution,
+            outcome=resolved_outcome,
             error=error,
             status=resolved_status,
             failure_origin=failure_origin,
         ),
-        result_preview=result_preview,
-        stdout_preview=stdout_preview,
+        result_preview=resolved_outcome.result_preview_text(limit=_PREVIEW_LIMIT),
+        stdout_preview=resolved_outcome.stdout_preview_text(limit=_PREVIEW_LIMIT),
     )
 
 
@@ -220,6 +223,7 @@ def kernel_execution_record(
     code: str | None,
     origin: str,
     execution: ExecutionResult | None = None,
+    outcome: ExecutionOutcome | None = None,
     error: Exception | None = None,
     status: str | None = None,
     duration_ms: int | None = None,
@@ -228,17 +232,19 @@ def kernel_execution_record(
     stdout: str | None = None,
     result: str | None = None,
 ) -> HistoryRecord:
-    resolved_status, resolved_duration, resolved_error_type, result_preview, stdout_preview = (
-        _resolve_execution_metadata(
-            execution=execution,
-            error=error,
-            status=status,
-            duration_ms=duration_ms,
-            error_type=error_type,
-            stdout=stdout,
-            result=result,
-        )
+    resolved_outcome = _resolve_outcome(
+        execution=execution,
+        outcome=outcome,
+        error=error,
+        status=status,
+        duration_ms=duration_ms,
+        error_type=error_type,
+        stdout=stdout,
+        result=result,
     )
+    resolved_status = resolved_outcome.status
+    resolved_duration = resolved_outcome.duration_ms
+    resolved_error_type = resolved_outcome.ename
     return HistoryRecord(
         kind="kernel_execution",
         ts=utc_now_iso() if ts is None else ts,
@@ -253,13 +259,13 @@ def kernel_execution_record(
         user_visible=False,
         error_type=resolved_error_type,
         failure_origin=_resolved_failure_origin(
-            execution=execution,
+            outcome=resolved_outcome,
             error=error,
             status=resolved_status,
             failure_origin=failure_origin,
         ),
-        result_preview=result_preview,
-        stdout_preview=stdout_preview,
+        result_preview=resolved_outcome.result_preview_text(limit=_PREVIEW_LIMIT),
+        stdout_preview=resolved_outcome.stdout_preview_text(limit=_PREVIEW_LIMIT),
     )
 
 
@@ -307,50 +313,35 @@ def summarize_history_multiline(
     return compact[: limit - 3].rstrip("\n") + "..."
 
 
-def _resolve_execution_metadata(
+def _resolve_outcome(
     *,
     execution: ExecutionResult | None,
+    outcome: ExecutionOutcome | None,
     error: Exception | None,
     status: str | None,
     duration_ms: int | None,
     error_type: str | None,
     stdout: str | None,
     result: str | None,
-) -> tuple[str, int, str | None, str | None, str | None]:
-    resolved_status = status
+) -> ExecutionOutcome:
+    if outcome is not None:
+        return outcome
+    if execution is not None:
+        return execution.to_outcome()
+    resolved_status: Literal["ok", "error"] = "error" if status == "error" else "ok"
     resolved_duration = 0 if duration_ms is None else duration_ms
     resolved_error_type = error_type
-    resolved_stdout = stdout
-    resolved_result = result
-
-    if execution is not None:
-        projected = compatibility_output(execution_output_from_execution_result(execution))
-        if resolved_status is None:
-            resolved_status = execution.status
-        if duration_ms is None:
-            resolved_duration = execution.duration_ms
-        if resolved_error_type is None:
-            resolved_error_type = projected.ename
-        if resolved_stdout is None:
-            resolved_stdout = projected.stdout
-        if resolved_result is None:
-            resolved_result = projected.result
-
-    if error is not None:
-        if resolved_status is None:
-            resolved_status = "error"
-        if resolved_error_type is None:
-            resolved_error_type = type(error).__name__
-
-    if resolved_status is None:
-        resolved_status = "ok"
-
-    return (
-        resolved_status,
-        resolved_duration,
-        resolved_error_type,
-        summarize_history_text(resolved_result),
-        summarize_history_text(resolved_stdout),
+    if resolved_error_type is not None and status is None:
+        resolved_status = "error"
+    if error is not None and resolved_error_type is None:
+        resolved_error_type = type(error).__name__
+        resolved_status = "error"
+    return ExecutionOutcome.from_runtime_fields(
+        status=resolved_status,
+        duration_ms=resolved_duration,
+        stdout="" if stdout is None else stdout,
+        result=result,
+        ename=resolved_error_type,
     )
 
 
@@ -358,15 +349,6 @@ def _normalized_history_lines(value: str | None) -> list[str]:
     if value is None:
         return []
     return [" ".join(line.split()) for line in value.strip().splitlines() if line.strip()]
-
-
-def execution_output_from_execution_result(execution: ExecutionResult):
-    from .execution_output import ExecutionOutput
-
-    return ExecutionOutput(
-        items=list(execution.outputs),
-        execution_count=execution.execution_count,
-    )
 
 
 def _require_literal(payload: Mapping[str, object], key: str, allowed: set[str]) -> str:
@@ -417,7 +399,7 @@ def _optional_failure_origin(payload: Mapping[str, object], key: str) -> Failure
 
 def _resolved_failure_origin(
     *,
-    execution: ExecutionResult | None,
+    outcome: ExecutionOutcome | None,
     error: Exception | None,
     status: str,
     failure_origin: FailureOrigin | None,
@@ -426,6 +408,8 @@ def _resolved_failure_origin(
         return failure_origin
     if status != "error":
         return None
-    if execution is not None or error is not None:
+    if outcome is not None and outcome.failure_origin is not None:
+        return outcome.failure_origin
+    if outcome is not None or error is not None:
         return "kernel"
     return None

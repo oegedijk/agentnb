@@ -8,13 +8,8 @@ from typing import Any, Literal, cast
 
 from ..contracts import ExecutionEvent, ExecutionResult, ExecutionSink, utc_now_iso
 from ..errors import AgentNBException
-from ..execution_output import (
-    ExecutionOutput,
-    OutputItem,
-    compatibility_output,
-    execution_output_from_events,
-    execution_output_from_legacy_fields,
-)
+from ..execution_models import ExecutionOutcome, ExecutionTranscript
+from ..execution_output import OutputItem
 from ..history import HistoryRecord
 from ..payloads import ExecutionEventPayload, JSONValue, RunSnapshot, StoredRunSnapshot
 from ..recording import CommandRecorder, CommandRecording
@@ -67,17 +62,25 @@ class ExecutionRecord:
     recorded_traceback: list[str] | None = None
     failure_origin: FailureOrigin | None = None
     error_data: dict[str, JSONValue] | None = None
+    _transcript: ExecutionTranscript = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.outputs:
-            output = ExecutionOutput(
-                items=list(self.outputs),
-                execution_count=self.execution_count,
+            from ..execution_output import ExecutionOutput
+
+            transcript = ExecutionTranscript.from_output(
+                ExecutionOutput(
+                    items=list(self.outputs),
+                    execution_count=self.execution_count,
+                )
             )
         elif self.events:
-            output = execution_output_from_events(self.events, execution_count=self.execution_count)
+            transcript = ExecutionTranscript.from_events(
+                self.events,
+                execution_count=self.execution_count,
+            )
         else:
-            output = execution_output_from_legacy_fields(
+            transcript = ExecutionTranscript.from_legacy_fields(
                 stdout=self.stdout,
                 stderr=self.stderr,
                 result=self.result,
@@ -87,36 +90,60 @@ class ExecutionRecord:
                 status="error" if self.status == "error" else "ok",
                 execution_count=self.execution_count,
             )
-
-        if not self.outputs:
-            self.outputs = list(output.items)
-        if not self.events:
-            self.events = output.to_events()
-
-        projected = compatibility_output(output)
-        self.stdout = projected.stdout
-        self.stderr = projected.stderr
-        self.result = projected.result
-
-        explicit_error = (
-            self.status == "error"
-            or self.ename is not None
-            or self.evalue is not None
-            or self.traceback is not None
+        self._transcript = transcript
+        outcome = ExecutionOutcome.from_transcript(
+            transcript=transcript,
+            status="error" if self.status == "error" else "ok",
+            duration_ms=self.duration_ms,
+            ename=self.ename,
+            evalue=self.evalue,
+            traceback=self.traceback,
+            failure_origin=self.failure_origin,
+            error_data=self.error_data,
         )
-        if projected.status == "error":
-            self.status = "error"
-            self.ename = projected.ename
-            self.evalue = projected.evalue
-            self.traceback = projected.traceback
-        elif explicit_error:
-            self.status = "error"
-        else:
-            self.ename = projected.ename
-            self.evalue = projected.evalue
-            self.traceback = projected.traceback
-
+        self.outputs = list(outcome.outputs)
+        self.events = list(outcome.events)
+        self.stdout = outcome.stdout
+        self.stderr = outcome.stderr
+        self.result = outcome.result
+        self.status = "error" if outcome.status == "error" else self.status
+        self.ename = outcome.ename
+        self.evalue = outcome.evalue
+        self.traceback = outcome.traceback
+        self.execution_count = outcome.execution_count
+        self.failure_origin = outcome.failure_origin
+        self.error_data = outcome.error_data
         self._apply_terminal_projection()
+
+    @property
+    def transcript(self) -> ExecutionTranscript:
+        return self._transcript
+
+    def outcome(self) -> ExecutionOutcome:
+        return ExecutionOutcome.from_transcript(
+            transcript=self._transcript,
+            status="error" if self.status == "error" else "ok",
+            duration_ms=self.duration_ms,
+            ename=self.ename,
+            evalue=self.evalue,
+            traceback=self.traceback,
+            failure_origin=self.failure_origin,
+            error_data=self.error_data,
+            prefer_explicit_error=True,
+        )
+
+    def get(self, key: str, default: object | None = None) -> object:
+        if key == "snapshot_stale":
+            return self.status in _ACTIVE_RUN_STATUSES
+        return self.to_dict().get(key, default)
+
+    def __getitem__(self, key: str) -> object:
+        if key == "snapshot_stale":
+            return self.status in _ACTIVE_RUN_STATUSES
+        payload = dict(self.to_dict())
+        if key not in payload:
+            raise KeyError(key)
+        return payload[key]
 
     def to_dict(self) -> RunSnapshot:
         payload: RunSnapshot = {
@@ -236,20 +263,6 @@ class ExecutionRecord:
             failure_origin=_optional_failure_origin(payload, "failure_origin"),
             error_data=_optional_json_object(payload, "error_data"),
         )
-
-    def to_execution_payload(self) -> RunSnapshot:
-        payload = self.to_dict()
-        output = ExecutionOutput(
-            items=list(self.outputs),
-            execution_count=self.execution_count,
-        )
-        result_preview = output.result_preview()
-        if result_preview is not None:
-            payload["result_preview"] = result_preview
-        error_data = payload.pop("error_data", None)
-        if isinstance(error_data, dict):
-            payload.update(error_data)
-        return payload
 
     def with_cancel_requested(
         self,
@@ -437,6 +450,7 @@ class ExecutionRun:
                 session_id=self.record.session_id,
                 execution_id=self.record.execution_id,
                 execution=execution,
+                outcome=execution.to_outcome(),
             ),
         )
 
@@ -478,6 +492,11 @@ class ExecutionRun:
                 session_id=self.record.session_id,
                 execution_id=self.record.execution_id,
                 error=error,
+                outcome=ExecutionOutcome.from_exception(
+                    error,
+                    duration_ms=duration_ms,
+                    failure_origin=_failure_origin(error),
+                ),
                 duration_ms=duration_ms,
                 failure_origin=_failure_origin(error),
             ),
@@ -535,6 +554,7 @@ def execution_record_from_result(
             session_id=session_id,
             execution_id=record.execution_id,
             execution=execution,
+            outcome=execution.to_outcome(),
             failure_origin="kernel" if execution.status == "error" else None,
         ),
     )
@@ -576,6 +596,11 @@ def execution_record_from_exception(
             session_id=session_id,
             execution_id=record.execution_id,
             error=error,
+            outcome=ExecutionOutcome.from_exception(
+                error,
+                duration_ms=record.duration_ms,
+                failure_origin=_failure_origin(error),
+            ),
             failure_origin=_failure_origin(error),
         ),
     )
@@ -740,3 +765,14 @@ def _json_value(value: object) -> JSONValue:
             normalized[key] = _json_value(item)
         return normalized
     return str(value)
+
+
+def execution_record_payload(record: ExecutionRecord) -> dict[str, object]:
+    payload = dict(record.to_dict())
+    result_preview = record.outcome().result_preview
+    if isinstance(result_preview, dict):
+        payload["result_preview"] = result_preview
+    error_data = payload.pop("error_data", None)
+    if isinstance(error_data, dict):
+        payload.update(error_data)
+    return payload

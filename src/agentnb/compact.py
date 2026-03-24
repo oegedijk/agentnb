@@ -4,6 +4,7 @@ import re
 from typing import Any, cast
 from urllib.parse import urlsplit
 
+from .execution_models import ExecutionOutcome
 from .execution_output import preview_from_result_text
 from .history import (
     summarize_history_lines_inline,
@@ -12,7 +13,6 @@ from .history import (
 )
 from .journal import JournalEntry
 from .payloads import (
-    CompactExecPayloadInput,
     DataframePreview,
     ExecPayload,
     HistoryEntryPayload,
@@ -24,6 +24,7 @@ from .payloads import (
     RunSnapshot,
     SequencePreview,
 )
+from .runs.store import ExecutionRecord
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 _URL_RE = re.compile(r"https?://[^\s'\"`]+")
@@ -58,26 +59,21 @@ def strip_ansi_lines(lines: list[str]) -> list[str]:
 
 
 def compact_execution_payload(
-    payload: CompactExecPayloadInput,
+    record: ExecutionRecord,
     *,
     no_truncate: bool = False,
 ) -> ExecPayload:
-    compacted: ExecPayload = {"duration_ms": payload.get("duration_ms", 0)}
+    outcome = record.outcome()
+    compacted: ExecPayload = {"duration_ms": record.duration_ms}
+    compacted["status"] = record.status
+    compacted["execution_id"] = record.execution_id
 
-    status = payload.get("status")
-    if status is not None:
-        compacted["status"] = status
-
-    execution_id = payload.get("execution_id")
-    if execution_id is not None:
-        compacted["execution_id"] = execution_id
-
-    execution_count = payload.get("execution_count")
+    execution_count = outcome.execution_count
     if execution_count is not None:
         compacted["execution_count"] = execution_count
 
-    stdout = payload.get("stdout")
-    if isinstance(stdout, str) and stdout:
+    stdout = outcome.stdout
+    if stdout:
         if no_truncate:
             compacted["stdout"] = stdout
         else:
@@ -88,8 +84,8 @@ def compact_execution_payload(
                     summary = summary + f" [{len(stdout) - _STDOUT_LIMIT} chars truncated]"
                 compacted["stdout"] = summary
 
-    stderr = payload.get("stderr")
-    if isinstance(stderr, str) and stderr:
+    stderr = outcome.stderr
+    if stderr:
         if no_truncate:
             compacted["stderr"] = stderr
         else:
@@ -100,7 +96,7 @@ def compact_execution_payload(
                     summary = summary + f" [{len(stderr) - _STDOUT_LIMIT} chars truncated]"
                 compacted["stderr"] = summary
 
-    result = payload.get("result")
+    result = outcome.result
     if isinstance(result, str) and result:
         if no_truncate:
             compacted["result"] = result
@@ -112,34 +108,19 @@ def compact_execution_payload(
                 compacted["result"] = summary
 
     result_preview = compact_result_preview(
-        result_preview=payload.get("result_preview"),
+        result_preview=outcome.result_preview,
         result=result,
     )
     if result_preview is not None:
         compacted["result_preview"] = result_preview
 
-    ename = payload.get("ename")
+    ename = outcome.ename
     if isinstance(ename, str):
         compacted["ename"] = ename
 
-    evalue = payload.get("evalue")
+    evalue = outcome.evalue
     if isinstance(evalue, str):
         compacted["evalue"] = evalue
-
-    source_kind = payload.get("source_kind")
-    if isinstance(source_kind, str):
-        compacted["source_kind"] = cast(Any, source_kind)
-    source_path = payload.get("source_path")
-    if isinstance(source_path, str) and source_path:
-        compacted["source_path"] = source_path
-    namespace_delta = payload.get("namespace_delta")
-    if isinstance(namespace_delta, dict):
-        compacted["namespace_delta"] = cast(Any, dict(namespace_delta))
-
-    selected_output = payload.get("selected_output")
-    if isinstance(selected_output, str):
-        compacted["selected_output"] = selected_output
-        compacted["selected_text"] = str(payload.get("selected_text", ""))
 
     return compacted
 
@@ -386,47 +367,62 @@ def compact_history_entry(entry: JournalEntry) -> HistoryEntryPayload:
     return compacted
 
 
-def compact_run_entry(entry: RunSnapshot) -> RunListEntryPayload:
+def compact_run_entry(entry: ExecutionRecord | RunSnapshot) -> RunListEntryPayload:
+    outcome = _run_outcome(entry)
     compacted: RunListEntryPayload = {
-        "execution_id": entry.get("execution_id"),
-        "ts": entry.get("ts"),
-        "session_id": entry.get("session_id"),
-        "command_type": entry.get("command_type"),
-        "status": entry.get("status"),
-        "duration_ms": entry.get("duration_ms"),
+        "execution_id": cast(str | None, _run_value(entry, "execution_id")),
+        "ts": cast(str | None, _run_value(entry, "ts")),
+        "session_id": cast(str | None, _run_value(entry, "session_id")),
+        "command_type": cast(str | None, _run_value(entry, "command_type")),
+        "status": cast(str | None, _run_value(entry, "status")),
+        "duration_ms": cast(int | None, _run_value(entry, "duration_ms")),
     }
 
-    terminal_reason = entry.get("terminal_reason")
+    terminal_reason = _run_value(entry, "terminal_reason")
     if terminal_reason is not None:
-        compacted["terminal_reason"] = terminal_reason
+        compacted["terminal_reason"] = cast(str, terminal_reason)
 
-    if "cancel_requested" in entry:
-        compacted["cancel_requested"] = bool(entry.get("cancel_requested"))
+    if isinstance(entry, ExecutionRecord) or "cancel_requested" in entry:
+        compacted["cancel_requested"] = bool(_run_value(entry, "cancel_requested"))
 
     result_preview = compact_result_preview(
-        result_preview=entry.get("result_preview"),
-        result=entry.get("result"),
+        result_preview=outcome.result_preview
+        if outcome is not None
+        else _run_value(entry, "result_preview"),
+        result=outcome.result if outcome is not None else _run_value(entry, "result"),
     )
     if result_preview is not None:
         compacted["result_preview"] = result_preview
     else:
-        result = entry.get("result")
+        result = outcome.result if outcome is not None else _run_value(entry, "result")
         if isinstance(result, str) and result:
             summary = summarize_history_text(result, limit=_RESULT_LIMIT)
             if summary is not None:
                 compacted["result_preview"] = summary
 
-    stdout = entry.get("stdout")
+    stdout = outcome.stdout if outcome is not None else _run_value(entry, "stdout")
     if isinstance(stdout, str) and stdout:
         summary = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
         if summary is not None:
             compacted["stdout_preview"] = summary
 
-    ename = entry.get("ename")
+    ename = outcome.ename if outcome is not None else _run_value(entry, "ename")
     if ename is not None:
-        compacted["error_type"] = ename
+        compacted["error_type"] = cast(str, ename)
 
     return compacted
+
+
+def _run_value(entry: ExecutionRecord | RunSnapshot, key: str) -> object:
+    if isinstance(entry, ExecutionRecord):
+        return getattr(entry, key, None)
+    return entry.get(key)
+
+
+def _run_outcome(entry: ExecutionRecord | RunSnapshot) -> ExecutionOutcome | None:
+    if isinstance(entry, ExecutionRecord):
+        return entry.outcome()
+    return None
 
 
 def summarize_exec_label(value: str | None, limit: int = _HISTORY_INPUT_LIMIT) -> str | None:

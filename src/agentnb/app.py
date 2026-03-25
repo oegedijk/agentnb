@@ -37,7 +37,7 @@ from .contracts import (
     error_response,
     success_response,
 )
-from .errors import AgentNBException
+from .errors import AgentNBException, ErrorContext
 from .execution import ExecutionService, ManagedExecution, SessionAccessOutcome
 from .execution_invocation import ExecInvocationPolicy, ExecSourceKind
 from .introspection import HelperExecutionPolicy
@@ -574,7 +574,7 @@ class AgentNBApp:
                 ename=managed.record.ename,
                 evalue=managed.record.evalue,
                 traceback=managed.record.traceback,
-                data=serialize_command_data("exec", payload),
+                command_data=payload,
             )
         return payload
 
@@ -695,7 +695,7 @@ class AgentNBApp:
                 ename=managed.record.ename,
                 evalue=managed.record.evalue,
                 traceback=managed.record.traceback,
-                data=serialize_command_data("reset", payload),
+                command_data=payload,
             )
         return payload
 
@@ -909,14 +909,14 @@ class AgentNBApp:
             )
         except AgentNBException as exc:
             error_session_id = response_session_id
-            error_session_hint = exc.data.get("session_id")
-            if isinstance(error_session_hint, str) and error_session_hint:
-                error_session_id = error_session_hint
+            if exc.error_context.session_id:
+                error_session_id = exc.error_context.session_id
             error_session_source = "explicit" if requested_session_id is not None else None
             if error_session_source is None:
-                session_source_hint = exc.data.get("session_source")
+                session_source_hint = exc.error_context.session_source
                 if session_source_hint in {"explicit", "remembered", "sole_live", "default"}:
                     error_session_source = cast(ResolutionSource, session_source_hint)
+            error_payload = exc.command_data if exc.command_data is not None else exc.data
             return error_response(
                 command=command_name,
                 project=str(project_root),
@@ -926,16 +926,18 @@ class AgentNBApp:
                 ename=exc.ename,
                 evalue=exc.evalue,
                 traceback=exc.traceback,
-                data=exc.data,
+                data=error_payload,
                 suggestions=self.advisor.suggestions(
                     self._advice_context(
                         command_name=command_name,
                         response_status="error",
-                        data=exc.data,
+                        command_data=cast(CommandDataLike | None, exc.command_data),
+                        data=None,
                         project_override=project_override,
                         session_id=error_session_id,
                         session_source=error_session_source,
                         error_code=exc.code,
+                        error_context=exc.error_context,
                         error_name=exc.ename,
                         error_value=exc.evalue,
                     )
@@ -944,11 +946,13 @@ class AgentNBApp:
                     self._advice_context(
                         command_name=command_name,
                         response_status="error",
-                        data=exc.data,
+                        command_data=cast(CommandDataLike | None, exc.command_data),
+                        data=None,
                         project_override=project_override,
                         session_id=error_session_id,
                         session_source=error_session_source,
                         error_code=exc.code,
+                        error_context=exc.error_context,
                         error_name=exc.ename,
                         error_value=exc.evalue,
                     )
@@ -972,6 +976,7 @@ class AgentNBApp:
                         session_id=response_session_id,
                         session_source="explicit" if requested_session_id is not None else None,
                         error_code="INTERNAL_ERROR",
+                        error_context=ErrorContext(),
                         error_name=type(exc).__name__,
                         error_value=str(exc),
                     )
@@ -985,6 +990,7 @@ class AgentNBApp:
                         session_id=response_session_id,
                         session_source="explicit" if requested_session_id is not None else None,
                         error_code="INTERNAL_ERROR",
+                        error_context=ErrorContext(),
                         error_name=type(exc).__name__,
                         error_value=str(exc),
                     )
@@ -1002,6 +1008,7 @@ class AgentNBApp:
         session_source: ResolutionSource | None,
         command_data: CommandDataLike | None = None,
         error_code: str | None = None,
+        error_context: ErrorContext | None = None,
         error_name: str | None = None,
         error_value: str | None = None,
     ) -> AdviceContext:
@@ -1011,6 +1018,7 @@ class AgentNBApp:
             command_data=command_data,
             data={} if data is None else data,
             error_code=error_code,
+            error_context=error_context or ErrorContext(),
             error_name=error_name,
             error_value=error_value,
             session_id=session_id,

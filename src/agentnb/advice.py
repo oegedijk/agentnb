@@ -20,6 +20,7 @@ from .command_data import (
     VarsCommandData,
 )
 from .contracts import SuggestionAction
+from .errors import ErrorContext
 from .suggestions import SessionScopeSource, SuggestionOutputMode, SuggestionScope
 
 _IMPORT_PACKAGE_NAME_OVERRIDES = {
@@ -36,6 +37,7 @@ class AdviceContext:
     command_data: CommandDataLike | None = None
     data: Mapping[str, object] = field(default_factory=dict)
     error_code: str | None = None
+    error_context: ErrorContext = field(default_factory=ErrorContext)
     error_name: str | None = None
     error_value: str | None = None
     session_id: str | None = None
@@ -61,6 +63,7 @@ class AdvicePolicy:
         command_name = context.command_name
         data = context.data
         command_data = context.command_data
+        error_context = context.error_context
         scope = _scope(context)
 
         if context.error_code == "AMBIGUOUS_SESSION":
@@ -92,8 +95,12 @@ class AdvicePolicy:
             ]
 
         if context.error_code == "SESSION_BUSY":
-            execution_id = data.get("active_execution_id")
-            if isinstance(execution_id, str) and execution_id:
+            execution_id = error_context.active_execution_id
+            if not execution_id:
+                fallback_execution_id = data.get("active_execution_id")
+                if isinstance(fallback_execution_id, str) and fallback_execution_id:
+                    execution_id = fallback_execution_id
+            if execution_id:
                 return [
                     _run_step(
                         scope,
@@ -165,7 +172,7 @@ class AdvicePolicy:
             runtime_state = (
                 command_data.runtime_state
                 if isinstance(command_data, KernelSessionData)
-                else data.get("runtime_state")
+                else error_context.runtime_state or data.get("runtime_state")
             )
             if runtime_state == "starting":
                 return [
@@ -245,7 +252,7 @@ class AdvicePolicy:
         if command_name == "exec":
             if context.response_status == "ok":
                 if _file_exec_truncated(command_data, data):
-                    return _file_exec_truncation_steps(scope, data)
+                    return _file_exec_truncation_steps(scope, data, command_data)
                 if isinstance(command_data, ExecCommandData):
                     if command_data.background:
                         execution_id = command_data.record.execution_id or "EXECUTION_ID"
@@ -333,8 +340,8 @@ class AdvicePolicy:
                 return []
 
             if context.error_code == "INVALID_INPUT":
-                if data.get("input_shape") == "exec_file_path":
-                    file_path = str(data.get("source_path") or "PATH")
+                if error_context.input_shape == "exec_file_path":
+                    file_path = error_context.source_path or "PATH"
                     return [
                         _run_step(
                             scope,
@@ -367,7 +374,7 @@ class AdvicePolicy:
                         with_action=False,
                     )
                 ]
-                if data.get("interrupt_recommended"):
+                if error_context.interrupt_recommended:
                     steps.append(
                         _run_step(
                             scope,
@@ -987,7 +994,11 @@ def _extract_pip_install_target(error_value: str | None) -> str | None:
 def _missing_pip_in_called_process(context: AdviceContext) -> bool:
     if context.command_name != "exec" or context.error_name != "CalledProcessError":
         return False
-    stderr = context.data.get("stderr")
+    stderr = None
+    if isinstance(context.command_data, ExecCommandData):
+        stderr = context.command_data.record.stderr
+    if stderr is None:
+        stderr = context.data.get("stderr")
     if isinstance(stderr, str) and "No module named pip" in stderr:
         return True
     return bool(context.error_value and "No module named pip" in context.error_value)
@@ -1054,8 +1065,12 @@ def _file_exec_truncated(command_data: CommandDataLike | None, data: Mapping[str
 def _file_exec_truncation_steps(
     scope: SuggestionScope,
     data: Mapping[str, object],
+    command_data: CommandDataLike | None = None,
 ) -> list[_AdviceStep]:
-    source_path = str(data.get("source_path") or "PATH")
+    if isinstance(command_data, ExecCommandData) and command_data.source_path:
+        source_path = command_data.source_path
+    else:
+        source_path = str(data.get("source_path") or "PATH")
     return [
         _run_step(
             scope,

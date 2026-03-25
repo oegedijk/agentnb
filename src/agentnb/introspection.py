@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ast
 import json
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, Literal, TypeVar, cast
@@ -10,10 +9,14 @@ from typing import Generic, Literal, TypeVar, cast
 from .contracts import (
     ExecutionResult,
     HelperAccessMetadata,
-    HelperInitialRuntimeState,
-    HelperWaitFor,
 )
-from .errors import AgentNBException, KernelNotReadyError, NoKernelRunningError, SessionBusyError
+from .errors import (
+    AgentNBException,
+    ErrorContext,
+    KernelNotReadyError,
+    NoKernelRunningError,
+    SessionBusyError,
+)
 from .execution import ExecutionService
 from .history import HistoryStore
 from .payloads import (
@@ -187,7 +190,8 @@ class KernelIntrospection:
             if isinstance(exc, (NoKernelRunningError, KernelNotReadyError)):
                 raise
             if isinstance(exc, SessionBusyError):
-                exc = _augment_session_busy_error(exc, access_metadata)
+                if exc.error_context.wait_behavior != "after_wait":
+                    exc = _augment_session_busy_error(exc, access_metadata)
             elif isinstance(exc, AgentNBException):
                 exc = _augment_helper_error(exc, access_metadata)
             if history is not None:
@@ -222,7 +226,7 @@ class KernelIntrospection:
                 ename=execution.ename,
                 evalue=execution.evalue,
                 traceback=execution.traceback,
-                data=access_metadata.merge_data(),
+                error_context=ErrorContext(helper_access=access_metadata),
             )
 
         try:
@@ -258,10 +262,10 @@ class KernelIntrospection:
             raise AgentNBException(
                 code="KERNEL_NOT_READY",
                 message="Kernel startup is still in progress or not yet ready. Wait and retry.",
-                data={
-                    "runtime_state": state.kind,
-                    "session_exists": state.session_exists,
-                },
+                error_context=ErrorContext(
+                    runtime_state=state.kind,
+                    session_exists=state.session_exists,
+                ),
             )
         if state.kind in {"ready", "busy"}:
             return False
@@ -445,44 +449,18 @@ def _helper_access_from_wait_result(wait_result: KernelWaitResult) -> HelperAcce
     )
 
 
-def _helper_access_from_data(data: Mapping[str, object]) -> HelperAccessMetadata:
-    waited_for = data.get("waited_for")
-    initial_runtime_state = data.get("initial_runtime_state")
-    blocking_execution_id = data.get("blocking_execution_id")
-    waited_ms = data.get("waited_ms")
-    waited_for_value: HelperWaitFor | None = (
-        cast(HelperWaitFor, waited_for) if waited_for in {"ready", "idle"} else None
-    )
-    initial_runtime_state_value: HelperInitialRuntimeState | None = (
-        cast(HelperInitialRuntimeState, initial_runtime_state)
-        if initial_runtime_state in {"missing", "starting", "ready", "busy", "dead", "stale"}
-        else None
-    )
-    return HelperAccessMetadata(
-        started_new_session=data.get("started_new_session") is True,
-        waited=data.get("waited") is True,
-        waited_for=waited_for_value,
-        waited_ms=waited_ms if isinstance(waited_ms, int) else 0,
-        initial_runtime_state=initial_runtime_state_value,
-        blocking_execution_id=blocking_execution_id
-        if isinstance(blocking_execution_id, str)
-        else None,
-    )
-
-
 def _session_busy_after_wait(
     error: SessionBusyError,
     access_metadata: HelperAccessMetadata,
 ) -> SessionBusyError:
-    data = error.data
+    context = error.error_context
     return SessionBusyError(
         wait_behavior="after_wait",
         waited_ms=access_metadata.waited_ms,
-        lock_pid=cast(int | None, data.get("lock_pid")),
-        lock_acquired_at=cast(str | None, data.get("lock_acquired_at")),
-        busy_for_ms=cast(int | None, data.get("busy_for_ms")),
-        active_execution_id=cast(str | None, data.get("active_execution_id"))
-        or access_metadata.blocking_execution_id,
+        lock_pid=context.lock_pid,
+        lock_acquired_at=context.lock_acquired_at,
+        busy_for_ms=context.busy_for_ms,
+        active_execution_id=context.active_execution_id or access_metadata.blocking_execution_id,
     )
 
 
@@ -491,11 +469,19 @@ def _augment_session_busy_error(
     access_metadata: HelperAccessMetadata,
 ) -> SessionBusyError:
     combined_access = _merge_helper_access_metadata(
-        access_metadata,
-        _helper_access_from_data(error.data),
+        access_metadata, error.error_context.helper_access
     )
     augmented = _session_busy_after_wait(error, combined_access)
-    augmented.data = combined_access.merge_data(augmented.data)
+    augmented.error_context = error.error_context.with_helper_access(combined_access).merge(
+        ErrorContext(
+            wait_behavior="after_wait",
+            lock_pid=error.error_context.lock_pid,
+            lock_acquired_at=error.error_context.lock_acquired_at,
+            busy_for_ms=error.error_context.busy_for_ms,
+            active_execution_id=error.error_context.active_execution_id
+            or access_metadata.blocking_execution_id,
+        )
+    )
     return augmented
 
 
@@ -509,7 +495,8 @@ def _augment_helper_error(
         ename=error.ename,
         evalue=error.evalue,
         traceback=error.traceback,
-        data=access_metadata.merge_data(error.data),
+        error_context=error.error_context.with_helper_access(access_metadata),
+        command_data=error.command_data,
     )
 
 

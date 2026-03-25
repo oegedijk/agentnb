@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from ..contracts import HelperAccessMetadata, HelperInitialRuntimeState, utc_now_iso
 from ..errors import (
     AgentNBException,
+    ErrorContext,
     KernelNotReadyError,
     NoKernelRunningError,
     RunWaitTimedOutError,
@@ -359,6 +360,9 @@ class LocalRunManager(RunManager):
                     evalue=exc.evalue,
                     traceback=exc.traceback,
                     data=execution_record_payload(record),
+                    error_context=exc.error_context.merge(
+                        ErrorContext(execution_id=record.execution_id)
+                    ),
                 ) from exc
             raise
 
@@ -399,6 +403,9 @@ class LocalRunManager(RunManager):
                         evalue=exc.evalue,
                         traceback=exc.traceback,
                         data=execution_record_payload(record),
+                        error_context=exc.error_context.merge(
+                            ErrorContext(execution_id=record.execution_id)
+                        ),
                     ) from exc
             raise
 

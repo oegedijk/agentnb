@@ -132,6 +132,42 @@ def test_success_response_serializes_typed_command_data_into_stable_envelope() -
     }
 
 
+def test_error_response_serializes_typed_command_data_into_stable_envelope() -> None:
+    response = error_response(
+        command="exec",
+        project="/tmp/project",
+        session_id="default",
+        code="EXECUTION_ERROR",
+        message="Execution failed",
+        data=ExecCommandData(
+            record=ExecutionRecord(
+                execution_id="run-2",
+                ts="2026-03-12T00:00:00+00:00",
+                session_id="default",
+                command_type="exec",
+                status="error",
+                duration_ms=5,
+                stderr="boom",
+                ename="ValueError",
+                evalue="bad",
+            ),
+            source_kind="argument",
+        ),
+    )
+
+    payload = response.to_dict()
+
+    assert payload["data"] == {
+        "duration_ms": 5,
+        "status": "error",
+        "execution_id": "run-2",
+        "stderr": "boom",
+        "ename": "ValueError",
+        "evalue": "bad",
+        "source_kind": "argument",
+    }
+
+
 def test_execution_result_to_dict_keeps_legacy_surface_without_outputs() -> None:
     result = ExecutionResult(
         status="ok",

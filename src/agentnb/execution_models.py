@@ -267,7 +267,9 @@ class ExecutionOutcome:
             ename = error.ename or ename
             evalue = error.evalue or error.message
             traceback = error.traceback
-            error_data = _json_object(error.data) if error.data else None
+            error_data = _json_object(error.error_context.to_data())
+            if not error_data:
+                error_data = None
             if failure_origin is None:
                 failure_origin = "control" if error.code in _CONTROL_ERROR_CODES else "kernel"
         elif failure_origin is None:

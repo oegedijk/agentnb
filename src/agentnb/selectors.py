@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from .errors import AgentNBException
+from .errors import AgentNBException, ErrorContext
 from .execution import ExecutionService
 from .journal import JournalQuery
 
@@ -185,7 +185,7 @@ class RunSelectorResolver:
             raise AgentNBException(
                 code="AMBIGUOUS_EXECUTION",
                 message="Multiple active runs match; pass an execution_id explicitly.",
-                data={"execution_ids": execution_ids},
+                error_context=ErrorContext(execution_ids=execution_ids),
             )
         return _require_execution_id(active_runs[0], raw=raw)
 

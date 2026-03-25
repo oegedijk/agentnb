@@ -250,20 +250,97 @@ What is still incomplete:
 - app-facing errors still rely on mapping payloads via `AgentNBException.data`
   rather than a canonical typed internal error model.
 
+### Tranche 3: Typed Error Context + Edge-Only Compatibility
+
+Status: done
+
+Completed in the current refactor:
+
+- `errors.py` now owns canonical typed internal error context through
+  `ErrorContext`.
+- `AgentNBException` and the concrete exception types now carry typed error
+  context instead of using open-ended `data` mappings as their internal
+  transport.
+- `AgentNBException.data` remains as a derived compatibility view so the
+  external error envelope and persisted `error_data` shape remain stable.
+- app-facing error handling in `app.py` now consumes typed error context for:
+  - response session-id/session-source resolution
+  - advice generation
+  - stable envelope shaping
+- `AdviceContext` now carries typed error context, and error-path advice no
+  longer depends on raw mapping payloads for the covered cases.
+- helper/introspection error augmentation now composes helper access facts into
+  typed error context rather than mutating arbitrary payload dicts.
+- app-facing `exec`/`reset` failure responses no longer serialize payloads
+  early in `app.py`; typed command data now flows to the response edge and is
+  serialized there.
+- execution normalization and persisted run snapshots now derive `error_data`
+  from typed error context rather than from ad hoc `AgentNBException.data`
+  dicts.
+- selector/session-targeting/CLI invalid-input and ambiguity errors now
+  construct typed context directly instead of assembling loose error payload
+  mappings.
+
+What this tranche intentionally did not do:
+
+- it did not make provenance authoritative in one place
+- it did not remove all compatibility adapters
+- it did not eliminate every mapping-based error payload at explicit
+  compatibility boundaries
+- it did not yet move run-control wrapper failures to typed run command data in
+  all layers; `runs/local_manager.py` still rethrows some failures with a
+  compatibility mapping payload plus typed error context to avoid a boundary
+  cycle
+
+What is still incomplete:
+
+- `SerializedCommandData` / `compat_command_data(...)` still exist for explicit
+  compatibility callers and output/projection fallbacks.
+- some package API and serializer contracts still legitimately expose payload
+  `TypedDict`s at the public wire edge.
+- provenance remains split across write-time recording and read-time
+  reconstruction:
+  - `recording.py`
+  - `history.py`
+  - `journal.py`
+- `output.py` and `projection.py` still keep some mapping-based fallbacks for
+  responses that were not built from typed command data.
+
 ## Next Tranche
 
-The next highest-value work is to retire the remaining compatibility-first
-seams and prepare the codebase for the larger persistence/provenance refactors.
-That should include:
+The next highest-value work is now **authoritative provenance**. The response
+and error/context seams are strong enough that the next deep ownership problem
+should be addressed directly rather than continuing to polish compatibility
+edges in isolation.
 
-- shrinking `SerializedCommandData` / `compat_command_data(...)` so they are
-  true edge-only compatibility shims instead of broadly tolerated internal
-  inputs
-- introducing a typed internal error/context model so app/advice/error
-  handling no longer depend on open-ended `AgentNBException.data` mappings
-- removing legacy payload helpers and `TypedDict` dependencies where they no
-  longer serve a public compatibility purpose
-- then, with the response/command-data boundary stabilized, moving to the next
-  deeper ownership problem:
-  authoritative provenance across `recording.py`, `history.py`, and
-  `journal.py`
+That tranche should include:
+
+- introducing one write-time provenance model that owns:
+  - command kind/classification
+  - user-visible vs internal intent
+  - replayability
+  - failure origin
+  - preview/error metadata captured at record time
+- making `recording.py` the authoritative constructor for persisted command/run
+  provenance, instead of letting `journal.py` reconstruct equivalent entries
+  from partial store data
+- changing `history.py` and run persistence so they store enough canonical
+  provenance metadata that `journal.py` becomes a selector/query layer rather
+  than a projection/reconstruction owner
+- eliminating `_project_execution_record(...)` style synthetic provenance when
+  a run record lacks journal entries; missing provenance should become an
+  explicit persistence problem, not something routinely rebuilt on read
+- ensuring replay/verify-style future features can rely on a single honest
+  source for:
+  - what command happened
+  - what user-visible record it produced
+  - whether the failure was kernel vs control
+  - whether the entry is replayable
+- adding direct boundary tests at the owning modules:
+  - `recording.py` for provenance construction
+  - `history.py` / run persistence for durable storage shape
+  - `journal.py` for selection/filtering only
+
+After that, the likely tranche is to split `state.py` into clearer persistence
+domains and then revisit the remaining shallow facades (`execution.py`,
+`ops.py`) and CLI leakage into run-control.

@@ -725,9 +725,12 @@ def _merge_records(previous: ExecutionRecord, current: ExecutionRecord) -> Execu
 
 
 def _error_data(error: Exception) -> dict[str, JSONValue] | None:
-    if not isinstance(error, AgentNBException) or not error.data:
+    if not isinstance(error, AgentNBException):
         return None
-    return _json_object(error.data)
+    payload = error.error_context.to_data()
+    if not payload:
+        return None
+    return _json_object(payload)
 
 
 def _failure_origin(error: Exception) -> FailureOrigin:

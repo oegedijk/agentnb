@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from .errors import AgentNBException
+from .errors import AgentNBException, ErrorContext
 from .session import DEFAULT_SESSION_ID
 
 ResolutionSource = Literal["explicit", "remembered", "sole_live", "default"]
@@ -153,12 +153,12 @@ class SessionTargetingPolicy:
                 raise AgentNBException(
                     code="KERNEL_NOT_READY",
                     message="Kernel startup is still in progress or not yet ready. Wait and retry.",
-                    data={
-                        "session_id": decision.session_id,
-                        "session_source": decision.source,
-                        "runtime_state": runtime_state.kind,
-                        "session_exists": runtime_state.session_exists,
-                    },
+                    error_context=ErrorContext(
+                        session_id=decision.session_id,
+                        session_source=decision.source,
+                        runtime_state=runtime_state.kind,
+                        session_exists=runtime_state.session_exists,
+                    ),
                 )
         return ResolvedCommandContext(
             semantics=semantics,

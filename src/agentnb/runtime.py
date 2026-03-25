@@ -9,6 +9,7 @@ from typing import Literal, cast
 from .contracts import ExecutionResult, ExecutionSink, KernelStatus
 from .errors import (
     AmbiguousSessionError,
+    ErrorContext,
     ExecutionTimedOutError,
     KernelDiedError,
     KernelNotReadyError,
@@ -925,7 +926,7 @@ class KernelRuntime:
         return ExecutionTimedOutError(
             timeout_s,
             duration_ms=duration_ms,
-            data=recovery.to_dict(),
+            error_context=ErrorContext.from_data(recovery.to_dict()),
         )
 
     def _timeout_recovery(self, *, project_root: Path, session_id: str) -> TimeoutRecovery:

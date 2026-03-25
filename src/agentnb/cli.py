@@ -39,7 +39,7 @@ from .contracts import (
     ExecutionSink,
     error_response,
 )
-from .errors import AgentNBException
+from .errors import AgentNBException, ErrorContext
 from .execution import ExecutionService
 from .execution_invocation import ExecInvocationPolicy, OutputSelector, StartupPolicy
 from .invocation import ROOT_OPTION_SPECS, InvocationResolver
@@ -552,10 +552,10 @@ def exec_cmd(
                         "It looks like you passed a Python file path as inline code. "
                         "Use `exec --file PATH` or the top-level `agentnb PATH` form instead."
                     ),
-                    data={
-                        "input_shape": "exec_file_path",
-                        "source_path": str(resolved_candidate.resolve()),
-                    },
+                    error_context=ErrorContext(
+                        input_shape="exec_file_path",
+                        source_path=str(resolved_candidate.resolve()),
+                    ),
                 )
         source = invocations.resolve_exec_source(code=code, filepath=filepath, stdin=sys.stdin)
     except AgentNBException as exc:
@@ -569,15 +569,16 @@ def exec_cmd(
             ename=exc.ename,
             evalue=exc.evalue,
             traceback=exc.traceback,
-            data=exc.data,
+            data=exc.command_data if exc.command_data is not None else exc.data,
             suggestions=application.advisor.suggestions(
                 AdviceContext(
                     command_name="exec",
                     response_status="error",
-                    data=exc.data,
+                    error_context=exc.error_context,
                     error_code=exc.code,
                     error_name=exc.ename,
                     error_value=exc.evalue,
+                    command_data=cast(Any, exc.command_data),
                     session_id=session_id,
                     project_override=project_root if project is not None else None,
                 )
@@ -586,10 +587,11 @@ def exec_cmd(
                 AdviceContext(
                     command_name="exec",
                     response_status="error",
-                    data=exc.data,
+                    error_context=exc.error_context,
                     error_code=exc.code,
                     error_name=exc.ename,
                     error_value=exc.evalue,
+                    command_data=cast(Any, exc.command_data),
                     session_id=session_id,
                     project_override=project_root if project is not None else None,
                 )

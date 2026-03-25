@@ -280,6 +280,11 @@ Completed in the current refactor:
 - selector/session-targeting/CLI invalid-input and ambiguity errors now
   construct typed context directly instead of assembling loose error payload
   mappings.
+- typed error-context merge now preserves explicit null-clearing semantics for
+  nullable compatibility fields such as `active_execution_id`.
+- helper-access merge semantics were aligned so typed error-context merging and
+  introspection-side helper-access merging preserve the same
+  `initial_runtime_state` for the same observed helper history.
 
 What this tranche intentionally did not do:
 

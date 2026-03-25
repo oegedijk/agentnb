@@ -188,7 +188,7 @@ What this tranche intentionally did not do:
 
 ### Tranche 2: Canonical Execution Transcript / Outcome
 
-Status: in progress
+Status: done
 
 Completed in the current refactor:
 
@@ -224,33 +224,46 @@ Completed in the current refactor:
 - app/output-facing run lookup and run list paths no longer depend on mixed
   `ExecutionRecord | Mapping` seams; they normalize into dedicated typed run
   view data before serialization.
-
-What is still incomplete:
-
-- several passive command families still use the serialized-data adapter
-  instead of first-class typed command data:
+- the remaining passive/session command families now also return first-class
+  typed command data instead of payload dicts:
   - `doctor`
   - session-management commands
   - `interrupt`
   - `stop`
   - `runs-cancel`
-- `compact.py` still contains command-level compaction helpers that should be
-  reduced further so it only owns low-level preview/truncation helpers.
-- advice generation still consumes serialized response data instead of typed
-  command data by design for this tranche.
-- run-control and storage internals still expose some legacy payload-oriented
-  helpers for app-facing errors and persistence compatibility.
+- advice generation now consumes typed command data on the normal success path
+  instead of pre-serialized response mappings.
+- `compact.py` has been reduced to low-level preview/ANSI/traceback helpers;
+  command-level compaction and compatibility shaping now live in
+  `response_serialization.py`.
+- runtime/run-control internals now return typed outcomes for doctor, session
+  listing/deletion, and run cancellation instead of app-facing payload dicts.
+
+What is still incomplete:
+
+- compatibility adapters still exist for non-app callers and legacy tests:
+  - `SerializedCommandData`
+  - `compat_command_data(...)`
+  - projection/output fallbacks for responses created from plain mappings
+- some public/wire payload `TypedDict`s still remain at explicit compatibility
+  edges such as package API helpers and serializer output contracts.
+- app-facing errors still rely on mapping payloads via `AgentNBException.data`
+  rather than a canonical typed internal error model.
 
 ## Next Tranche
 
-The next highest-value work is to finish shrinking the remaining payload-first
-seams and continue consolidating ownership around typed internal models.
+The next highest-value work is to retire the remaining compatibility-first
+seams and prepare the codebase for the larger persistence/provenance refactors.
 That should include:
 
-- moving the remaining passive command families onto first-class typed command
-  data so the serialized-data adapter is no longer a normal internal path
-- reducing `compact.py` to low-level preview and truncation helpers only
-- deciding whether advice should move onto typed command data or remain a pure
-  serialized-edge consumer
-- continuing to remove legacy payload helpers where persistence or
-  compatibility concerns no longer require them
+- shrinking `SerializedCommandData` / `compat_command_data(...)` so they are
+  true edge-only compatibility shims instead of broadly tolerated internal
+  inputs
+- introducing a typed internal error/context model so app/advice/error
+  handling no longer depend on open-ended `AgentNBException.data` mappings
+- removing legacy payload helpers and `TypedDict` dependencies where they no
+  longer serve a public compatibility purpose
+- then, with the response/command-data boundary stabilized, moving to the next
+  deeper ownership problem:
+  authoritative provenance across `recording.py`, `history.py`, and
+  `journal.py`

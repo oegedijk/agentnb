@@ -8,21 +8,28 @@ from enum import StrEnum
 from typing import cast
 
 from .command_data import (
+    DoctorCommandData,
     ExecCommandData,
     HistoryCommandData,
     InspectCommandData,
+    InterruptCommandData,
     KernelSessionData,
     ReloadCommandData,
+    RunCancelCommandData,
     RunLookupCommandData,
     RunsListCommandData,
     RunSnapshotData,
+    SessionDeleteCommandData,
+    SessionsDeleteBulkCommandData,
+    SessionsListCommandData,
+    StopCommandData,
     VarsCommandData,
+    compat_command_data,
 )
-from .compact import preview_text, summarize_history_text
+from .compact import preview_text
 from .contracts import CommandResponse
 from .payloads import (
     DataframePreview,
-    DoctorPayload,
     ExecPayload,
     HistoryEntryPayload,
     HistoryPayload,
@@ -34,7 +41,6 @@ from .payloads import (
     RunsListPayload,
     RunSnapshot,
     SequencePreview,
-    SessionsListPayload,
     StartPayload,
     StatusPayload,
     VarDisplayEntry,
@@ -45,6 +51,7 @@ from .response_serialization import (
     compact_history_entry,
     compact_inspect_payload,
     full_history_entry,
+    summarize_history_text,
 )
 
 projector = ResponseProjector()
@@ -150,6 +157,8 @@ def render_stream_completion(
 
 def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
     command_data = response.command_data
+    if command_data is None and response.status == "ok":
+        command_data = compat_command_data(response.command, response.data)
     if response.status == "error":
         body = _render_error(response)
     else:
@@ -257,11 +266,11 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             else:
                 body = "Kernel is not running."
 
-        elif command == "stop":
-            body = "Kernel stopped."
+        elif command == "stop" and isinstance(command_data, StopCommandData):
+            body = _render_stop_command_data(command_data)
 
-        elif command == "interrupt":
-            body = "Interrupt signal sent."
+        elif command == "interrupt" and isinstance(command_data, InterruptCommandData):
+            body = _render_interrupt_command_data(command_data)
 
         elif command == "exec" and isinstance(command_data, ExecCommandData):
             body = _render_exec_command_data(command_data)
@@ -340,67 +349,16 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 lines = [_render_history_entry(entry) for entry in entries]
                 body = "\n".join(lines)
 
-        elif command == "doctor":
-            doctor_data = cast(DoctorPayload, data)
-            checks = doctor_data.get("checks", [])
-            headline = (
-                "Doctor checks passed." if doctor_data.get("ready") else "Doctor found issues."
-            )
-            lines = [headline]
-            for check in checks:
-                status = str(check.get("status", "unknown")).upper()
-                message = check.get("message")
-                lines.append(f"[{status}] {check.get('name')}: {message}")
-                hint = check.get("fix_hint")
-                if hint:
-                    lines.append(f"  fix: {hint}")
-            kernel_alive = doctor_data.get("kernel_alive")
-            if kernel_alive is True:
-                kernel_pid = doctor_data.get("kernel_pid")
-                lines.append(f"[OK] kernel: Kernel is running (pid {kernel_pid}).")
-            elif doctor_data.get("session_exists"):
-                lines.append("[WARN] kernel: Session exists but kernel is not running.")
-            body = "\n".join(lines)
-        elif command == "sessions-list":
-            sessions_payload = cast(SessionsListPayload, data)
-            sessions = sessions_payload.get("sessions", [])
-            hidden_non_live_count = sessions_payload.get("hidden_non_live_count")
-            if not sessions:
-                body = "No live sessions found." if hidden_non_live_count else "No sessions found."
-                hidden_note = _render_hidden_session_note(hidden_non_live_count)
-                if hidden_note is not None:
-                    body = f"{body}\n{hidden_note}"
-            else:
-                lines = []
-                for session in sessions:
-                    markers: list[str] = []
-                    if session.get("is_default"):
-                        markers.append("default")
-                    if session.get("is_preferred"):
-                        markers.append("preferred")
-                    marker = f" ({', '.join(markers)})" if markers else ""
-                    python = session.get("python")
-                    python_text = f" using {python}" if python else ""
-                    activity = _staleness_hint(session.get("last_activity"))
-                    activity_text = f", last activity {activity}" if activity else ""
-                    session_label = session.get("session_id")
-                    lines.append(
-                        f"{session_label}{marker}: pid {session.get('pid')}"
-                        f"{python_text}{activity_text}"
-                    )
-                hidden_note = _render_hidden_session_note(hidden_non_live_count)
-                if hidden_note is not None:
-                    lines.append(hidden_note)
-                body = "\n".join(lines)
-        elif command == "sessions-delete":
-            stopped = " and stopped its kernel" if data.get("stopped_running_kernel") else ""
-            body = f"Deleted session {data.get('session_id')}{stopped}."
-        elif command == "sessions-delete-bulk":
-            deleted = data.get("deleted", [])
-            if isinstance(deleted, list) and deleted:
-                body = f"Deleted {len(deleted)} session(s): {', '.join(str(s) for s in deleted)}"
-            else:
-                body = "No sessions to delete."
+        elif command == "doctor" and isinstance(command_data, DoctorCommandData):
+            body = _render_doctor_command_data(command_data)
+        elif command == "sessions-list" and isinstance(command_data, SessionsListCommandData):
+            body = _render_sessions_list_command_data(command_data)
+        elif command == "sessions-delete" and isinstance(command_data, SessionDeleteCommandData):
+            body = _render_session_delete_command_data(command_data)
+        elif command == "sessions-delete-bulk" and isinstance(
+            command_data, SessionsDeleteBulkCommandData
+        ):
+            body = _render_sessions_delete_bulk_command_data(command_data)
         elif command == "runs-list" and isinstance(command_data, RunsListCommandData):
             body = _render_runs_list_command_data(command_data)
         elif command == "runs-list":
@@ -444,26 +402,8 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
                 follow_note = _render_follow_completion_note(run_lookup)
                 if follow_note is not None:
                     body = f"{body}\n{follow_note}" if body else follow_note
-        elif command == "runs-cancel":
-            if data.get("cancel_requested"):
-                if data.get("status") == "ok":
-                    body = (
-                        f"Cancel requested for run {data.get('execution_id')}, "
-                        "but it completed before cancellation took effect."
-                    )
-                elif data.get("session_outcome") == "preserved":
-                    body = f"Cancelled run {data.get('execution_id')}. The session was preserved."
-                elif data.get("session_outcome") == "stopped":
-                    body = (
-                        f"Cancelled run {data.get('execution_id')}. "
-                        "The still-starting session was stopped."
-                    )
-                else:
-                    body = f"Cancel requested for run {data.get('execution_id')}."
-            else:
-                _terminal_labels = {"ok": "finished", "error": "failed", "cancelled": "cancelled"}
-                label = _terminal_labels.get(str(data.get("status")), str(data.get("status")))
-                body = f"Run {data.get('execution_id')} already {label}."
+        elif command == "runs-cancel" and isinstance(command_data, RunCancelCommandData):
+            body = _render_run_cancel_command_data(command_data)
         else:
             body = json.dumps(data, ensure_ascii=True, indent=2)
 
@@ -703,6 +643,67 @@ def _render_history_command_data(data: HistoryCommandData) -> str:
     return "\n".join(_render_history_entry(entry) for entry in entries)
 
 
+def _render_interrupt_command_data(data: InterruptCommandData) -> str:
+    del data
+    return "Interrupt signal sent."
+
+
+def _render_stop_command_data(data: StopCommandData) -> str:
+    del data
+    return "Kernel stopped."
+
+
+def _render_doctor_command_data(data: DoctorCommandData) -> str:
+    headline = "Doctor checks passed." if data.ready else "Doctor found issues."
+    lines = [headline]
+    for check in data.checks:
+        lines.append(f"[{check.status.upper()}] {check.name}: {check.message}")
+        if check.fix_hint:
+            lines.append(f"  fix: {check.fix_hint}")
+    if data.kernel_alive:
+        lines.append(f"[OK] kernel: Kernel is running (pid {data.kernel_pid}).")
+    elif data.session_exists:
+        lines.append("[WARN] kernel: Session exists but kernel is not running.")
+    return "\n".join(lines)
+
+
+def _render_sessions_list_command_data(data: SessionsListCommandData) -> str:
+    if not data.sessions:
+        body = "No live sessions found." if data.hidden_non_live_count else "No sessions found."
+        hidden_note = _render_hidden_session_note(data.hidden_non_live_count)
+        if hidden_note is not None:
+            body = f"{body}\n{hidden_note}"
+        return body
+
+    lines = []
+    for session in data.sessions:
+        markers: list[str] = []
+        if session.is_default:
+            markers.append("default")
+        if session.is_preferred:
+            markers.append("preferred")
+        marker = f" ({', '.join(markers)})" if markers else ""
+        python_text = f" using {session.python}" if session.python else ""
+        activity = _staleness_hint(session.last_activity)
+        activity_text = f", last activity {activity}" if activity else ""
+        lines.append(f"{session.session_id}{marker}: pid {session.pid}{python_text}{activity_text}")
+    hidden_note = _render_hidden_session_note(data.hidden_non_live_count)
+    if hidden_note is not None:
+        lines.append(hidden_note)
+    return "\n".join(lines)
+
+
+def _render_session_delete_command_data(data: SessionDeleteCommandData) -> str:
+    stopped = " and stopped its kernel" if data.stopped_running_kernel else ""
+    return f"Deleted session {data.session_id}{stopped}."
+
+
+def _render_sessions_delete_bulk_command_data(data: SessionsDeleteBulkCommandData) -> str:
+    if data.deleted:
+        return f"Deleted {len(data.deleted)} session(s): {', '.join(str(s) for s in data.deleted)}"
+    return "No sessions to delete."
+
+
 def _render_runs_list_command_data(data: RunsListCommandData) -> str:
     if not data.runs:
         return "No runs found."
@@ -771,6 +772,23 @@ def _render_follow_completion_note_data(run_lookup: RunLookupCommandData) -> str
     if run_lookup.run.payload.get("status") in {"starting", "running"}:
         return "Observation window elapsed; the run is still active."
     return "Observation window elapsed."
+
+
+def _render_run_cancel_command_data(data: RunCancelCommandData) -> str:
+    if data.cancel_requested:
+        if data.status == "ok":
+            return (
+                f"Cancel requested for run {data.execution_id}, "
+                "but it completed before cancellation took effect."
+            )
+        if data.session_outcome == "preserved":
+            return f"Cancelled run {data.execution_id}. The session was preserved."
+        if data.session_outcome == "stopped":
+            return f"Cancelled run {data.execution_id}. The still-starting session was stopped."
+        return f"Cancel requested for run {data.execution_id}."
+    terminal_labels = {"ok": "finished", "error": "failed", "cancelled": "cancelled"}
+    label = terminal_labels.get(data.status, data.status)
+    return f"Run {data.execution_id} already {label}."
 
 
 def _kernel_session_mapping(data: KernelSessionData) -> dict[str, object]:

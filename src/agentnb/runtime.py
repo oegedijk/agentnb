@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -25,8 +25,7 @@ from .kernel.backend import (
     LocalIPythonBackend,
     RuntimeBackend,
 )
-from .kernel.provisioner import KernelProvisioner
-from .payloads import DeleteSessionResult, DoctorPayload, SessionSummary
+from .kernel.provisioner import DoctorCheck, DoctorReport, KernelProvisioner
 from .session import (
     DEFAULT_SESSION_ID,
     SessionInfo,
@@ -107,6 +106,76 @@ class SessionInventoryEntry:
     @property
     def stale(self) -> bool:
         return self.runtime_state == "stale"
+
+
+@dataclass(slots=True, frozen=True)
+class SessionListEntry:
+    session_id: str
+    alive: bool
+    pid: int | None = None
+    connection_file: str | None = None
+    started_at: str | None = None
+    uptime_s: float | None = None
+    python: str | None = None
+    last_activity: str | None = None
+    is_default: bool = False
+    is_current: bool = False
+    is_preferred: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class DeleteSessionOutcome:
+    deleted: bool
+    session_id: str
+    stopped_running_kernel: bool
+
+
+@dataclass(slots=True, frozen=True)
+class DoctorStatus:
+    ready: bool
+    selected_python: str | None
+    python_source: str | None
+    checks: list[DoctorCheck]
+    stale_session_cleaned: bool
+    session_exists: bool
+    kernel_alive: bool
+    kernel_pid: int | None
+
+    @classmethod
+    def from_report(
+        cls,
+        *,
+        report: DoctorReport,
+        session_exists: bool,
+        kernel_alive: bool,
+        kernel_pid: int | None,
+        stale_session_cleaned: bool = False,
+    ) -> DoctorStatus:
+        return cls(
+            ready=report.ready,
+            selected_python=report.selected_python,
+            python_source=report.python_source,
+            checks=list(report.checks),
+            stale_session_cleaned=stale_session_cleaned,
+            session_exists=session_exists,
+            kernel_alive=kernel_alive,
+            kernel_pid=kernel_pid,
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "ready": self.ready,
+            "checks": [check.to_dict() for check in self.checks],
+            "stale_session_cleaned": self.stale_session_cleaned,
+            "session_exists": self.session_exists,
+            "kernel_alive": self.kernel_alive,
+            "kernel_pid": self.kernel_pid,
+        }
+        if self.selected_python is not None:
+            payload["selected_python"] = self.selected_python
+        if self.python_source is not None:
+            payload["python_source"] = self.python_source
+        return payload
 
 
 @dataclass(slots=True, frozen=True)
@@ -242,32 +311,32 @@ class KernelRuntime:
         project_root: Path,
         *,
         probe_backend: bool = True,
-    ) -> list[SessionSummary]:
+    ) -> list[SessionListEntry]:
         current_session_id = self.current_session_id(project_root=project_root)
-        entries: list[SessionSummary] = []
+        entries: list[SessionListEntry] = []
         for entry in self.session_inventory(project_root=project_root, probe_backend=probe_backend):
             if not entry.alive:
                 continue
             current = entry.session
             status = entry.kernel_status
             entries.append(
-                {
-                    "session_id": current.session_id,
-                    "alive": status.alive,
-                    "pid": status.pid,
-                    "connection_file": status.connection_file,
-                    "started_at": status.started_at,
-                    "uptime_s": status.uptime_s,
-                    "python": status.python,
-                    "last_activity": self._last_activity(project_root, current.session_id),
-                    "is_default": current.session_id == DEFAULT_SESSION_ID,
-                    "is_current": current.session_id == current_session_id,
-                    "is_preferred": current.session_id == current_session_id,
-                }
+                SessionListEntry(
+                    session_id=current.session_id,
+                    alive=status.alive,
+                    pid=status.pid,
+                    connection_file=status.connection_file,
+                    started_at=status.started_at,
+                    uptime_s=status.uptime_s,
+                    python=status.python,
+                    last_activity=self._last_activity(project_root, current.session_id),
+                    is_default=current.session_id == DEFAULT_SESSION_ID,
+                    is_current=current.session_id == current_session_id,
+                    is_preferred=current.session_id == current_session_id,
+                )
             )
         return entries
 
-    def delete_session(self, project_root: Path, session_id: str) -> DeleteSessionResult:
+    def delete_session(self, project_root: Path, session_id: str) -> DeleteSessionOutcome:
         store = SessionStore(project_root=project_root, session_id=session_id)
         session = store.load_session()
         if session is None:
@@ -284,11 +353,11 @@ class KernelRuntime:
 
         store.delete_session()
         self.clear_current_session_id(project_root=project_root, expected_session_id=session_id)
-        return {
-            "deleted": True,
-            "session_id": session_id,
-            "stopped_running_kernel": stopped,
-        }
+        return DeleteSessionOutcome(
+            deleted=True,
+            session_id=session_id,
+            stopped_running_kernel=stopped,
+        )
 
     def cleanup_stale_sessions(self, project_root: Path) -> list[str]:
         deleted: list[str] = []
@@ -334,9 +403,9 @@ class KernelRuntime:
             return DEFAULT_SESSION_ID
 
         live_session_ids = [
-            str(session["session_id"])
+            session_id
             for session in self.list_sessions(project_root=project_root, probe_backend=False)
-            if isinstance(session.get("session_id"), str) and session["session_id"]
+            if (session_id := _session_list_entry_id(session))
         ]
         if (
             live_session_ids
@@ -361,9 +430,9 @@ class KernelRuntime:
         self, *, project_root: Path, requested_session_id: str
     ) -> None:
         live_ids = [
-            str(session["session_id"])
+            session_id
             for session in self.list_sessions(project_root=project_root, probe_backend=False)
-            if isinstance(session.get("session_id"), str) and session["session_id"]
+            if (session_id := _session_list_entry_id(session))
         ]
         if not live_ids:
             return
@@ -432,8 +501,7 @@ class KernelRuntime:
 
     def is_live_session(self, *, project_root: Path, session_id: str) -> bool:
         for session in self.list_sessions(project_root=project_root, probe_backend=False):
-            candidate = session.get("session_id")
-            if isinstance(candidate, str) and candidate == session_id:
+            if _session_list_entry_id(session) == session_id:
                 return True
         return False
 
@@ -704,12 +772,12 @@ class KernelRuntime:
     ) -> JournalSelection:
         return self._journal.select(project_root=project_root, query=query)
 
-    def doctor(
+    def doctor_status(
         self,
         project_root: Path,
         session_id: str = DEFAULT_SESSION_ID,
         python_executable: Path | None = None,
-    ) -> DoctorPayload:
+    ) -> DoctorStatus:
         store, state = self._resolve_runtime_state(
             project_root=project_root,
             session_id=session_id,
@@ -717,14 +785,26 @@ class KernelRuntime:
         report = self._provisioner_factory(store.project_root).doctor(
             preferred_python=python_executable,
         )
-        payload = cast(DoctorPayload, report.to_dict())
         status = state.to_kernel_status()
-        payload["stale_session_cleaned"] = False
-        payload["session_exists"] = state.session_exists
-        payload["kernel_alive"] = status.alive
-        payload["kernel_pid"] = status.pid
+        return DoctorStatus.from_report(
+            report=report,
+            session_exists=state.session_exists,
+            kernel_alive=status.alive,
+            kernel_pid=status.pid,
+            stale_session_cleaned=False,
+        )
 
-        return payload
+    def doctor(
+        self,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        python_executable: Path | None = None,
+    ) -> dict[str, object]:
+        return self.doctor_status(
+            project_root=project_root,
+            session_id=session_id,
+            python_executable=python_executable,
+        ).to_payload()
 
     def _require_session(
         self, project_root: Path, session_id: str
@@ -856,3 +936,13 @@ class KernelRuntime:
             session_busy=bool(state.busy),
             interrupt_recommended=interrupt_recommended,
         )
+
+
+def _session_list_entry_id(entry: SessionListEntry | Mapping[str, object]) -> str | None:
+    if isinstance(entry, Mapping):
+        mapping = cast(Mapping[str, object], entry)
+        session_id = mapping.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            return session_id
+        return None
+    return entry.session_id

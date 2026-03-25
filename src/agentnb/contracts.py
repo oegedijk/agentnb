@@ -267,11 +267,11 @@ def _normalize_response_data(
     command: str,
     data: Mapping[str, object] | object | None,
 ) -> tuple[dict[str, Any], object | None]:
-    if data is None:
-        return {}, None
     from .command_data import CommandData
     from .response_serialization import serialize_command_data
 
+    if data is None:
+        return {}, None
     if isinstance(data, CommandData):
         return serialize_command_data(command, data), data
     if isinstance(data, Mapping):

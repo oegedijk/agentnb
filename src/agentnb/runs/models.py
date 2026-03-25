@@ -10,6 +10,7 @@ from .store import ExecutionRecord
 RunCommandType = Literal["exec", "reset"]
 RunMode = Literal["foreground", "background"]
 RunObservationCompletion = Literal["terminal", "window_elapsed"]
+RunCancelSessionOutcome = Literal["unchanged", "preserved", "stopped"]
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -115,6 +116,16 @@ class RunObservationResult:
     completion_reason: RunObservationCompletion
     replayed_event_count: int = 0
     emitted_event_count: int = 0
+
+
+@dataclass(slots=True, frozen=True)
+class RunCancelOutcome:
+    execution_id: str
+    session_id: str
+    cancel_requested: bool
+    status: str
+    run_status: str
+    session_outcome: RunCancelSessionOutcome = "unchanged"
 
 
 class RunObserver(Protocol):

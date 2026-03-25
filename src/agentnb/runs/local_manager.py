@@ -15,12 +15,11 @@ from ..errors import (
     RunWaitTimedOutError,
     SessionBusyError,
 )
-from ..payloads import CancelRunResult
 from ..recording import CommandRecorder, CommandRecording
 from ..session import pid_exists
 from .executor import LocalRunExecutor, RunExecutor
 from .manager import RunManager
-from .models import RunObservationResult, RunObserver, RunPlan, RunSpec
+from .models import RunCancelOutcome, RunObservationResult, RunObserver, RunPlan, RunSpec
 from .store import (
     ExecutionRecord,
     ExecutionRun,
@@ -167,7 +166,7 @@ class LocalRunManager(RunManager):
         execution_id: str,
         timeout_s: float = 10.0,
         poll_interval_s: float = 0.1,
-    ) -> CancelRunResult:
+    ) -> RunCancelOutcome:
         if not self.runtime.capabilities.supports_interrupt:
             raise AgentNBException(
                 code="UNSUPPORTED_OPERATION",
@@ -183,14 +182,14 @@ class LocalRunManager(RunManager):
                     message=f"Execution not found: {execution_id}",
                 )
             if record.status not in _ACTIVE_RUN_STATUSES:
-                return {
-                    "execution_id": execution_id,
-                    "session_id": record.session_id,
-                    "cancel_requested": False,
-                    "status": record.status,
-                    "run_status": record.status,
-                    "session_outcome": "unchanged",
-                }
+                return RunCancelOutcome(
+                    execution_id=execution_id,
+                    session_id=record.session_id,
+                    cancel_requested=False,
+                    status=record.status,
+                    run_status=record.status,
+                    session_outcome="unchanged",
+                )
             record = self._record_cancel_request(project_root=project_root, record=record)
 
             try:
@@ -498,9 +497,9 @@ class LocalRunManager(RunManager):
         *,
         project_root: Path,
         record: ExecutionRecord,
-        session_outcome: str,
+        session_outcome: Literal["unchanged", "preserved", "stopped"],
         started_mono: float | None = None,
-    ) -> CancelRunResult:
+    ) -> RunCancelOutcome:
         if record.worker_pid is not None:
             _terminate_process(record.worker_pid)
         duration_ms = record.duration_ms
@@ -543,18 +542,18 @@ class LocalRunManager(RunManager):
         record: ExecutionRecord,
         *,
         cancel_requested: bool | None = None,
-        session_outcome: str = "unchanged",
-    ) -> CancelRunResult:
-        return {
-            "execution_id": record.execution_id,
-            "session_id": record.session_id,
-            "cancel_requested": record.cancel_requested
+        session_outcome: Literal["unchanged", "preserved", "stopped"] = "unchanged",
+    ) -> RunCancelOutcome:
+        return RunCancelOutcome(
+            execution_id=record.execution_id,
+            session_id=record.session_id,
+            cancel_requested=record.cancel_requested
             if cancel_requested is None
             else cancel_requested,
-            "status": record.status,
-            "run_status": record.status,
-            "session_outcome": session_outcome,
-        }
+            status=record.status,
+            run_status=record.status,
+            session_outcome=session_outcome,
+        )
 
     def _wait_for_run_state_change(
         self,

@@ -62,6 +62,42 @@ def test_error_response_to_dict_preserves_nested_error_fields() -> None:
     }
 
 
+def test_error_response_preserves_mapping_payload_for_sessions_delete() -> None:
+    response = error_response(
+        command="sessions-delete",
+        project="/tmp/project",
+        session_id="default",
+        code="SESSION_NOT_FOUND",
+        message="Session not found.",
+        data={"session_id": "analysis"},
+    )
+
+    assert response.data == {"session_id": "analysis"}
+    assert response.command_data is None
+    assert response.to_dict()["data"] == {"session_id": "analysis"}
+
+
+def test_success_response_preserves_partial_mapping_payload_for_runs_cancel() -> None:
+    response = success_response(
+        command="runs-cancel",
+        project="/tmp/project",
+        session_id="default",
+        data={"execution_id": "run-1", "cancel_requested": False, "status": "ok"},
+    )
+
+    assert response.data == {
+        "execution_id": "run-1",
+        "cancel_requested": False,
+        "status": "ok",
+    }
+    assert response.command_data is None
+    assert response.to_dict()["data"] == {
+        "execution_id": "run-1",
+        "cancel_requested": False,
+        "status": "ok",
+    }
+
+
 def test_success_response_serializes_typed_command_data_into_stable_envelope() -> None:
     response = success_response(
         command="exec",

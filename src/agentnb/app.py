@@ -8,16 +8,25 @@ from typing import Literal, cast
 from .advice import AdviceContext, AdvicePolicy
 from .command_data import (
     CommandDataLike,
+    DoctorCommandData,
     ExecCommandData,
     HistoryCommandData,
     InspectCommandData,
+    InterruptCommandData,
     KernelSessionData,
     ReloadCommandData,
+    RunCancelCommandData,
     RunListEntryData,
     RunLookupCommandData,
     RunsListCommandData,
     RunSnapshotData,
+    SessionDeleteCommandData,
+    SessionListEntryData,
+    SessionsDeleteBulkCommandData,
+    SessionsListCommandData,
+    StopCommandData,
     VarsCommandData,
+    ensure_command_data,
     normalize_run_payload,
     run_lookup_session_id,
     with_switched_session,
@@ -33,17 +42,7 @@ from .execution import ExecutionService, ManagedExecution, SessionAccessOutcome
 from .execution_invocation import ExecInvocationPolicy, ExecSourceKind
 from .introspection import HelperExecutionPolicy
 from .ops import NotebookOps
-from .payloads import (
-    BulkDeleteResult,
-    DoctorPayload,
-    InterruptPayload,
-    NamespaceDeltaEntry,
-    NamespaceDeltaPayload,
-    SessionsListPayload,
-    SessionSummary,
-    StopPayload,
-    VarDisplayEntry,
-)
+from .payloads import NamespaceDeltaEntry, NamespaceDeltaPayload, VarDisplayEntry
 from .response_serialization import selected_exec_output, serialize_command_data
 from .runtime import (
     KernelRuntime,
@@ -392,8 +391,11 @@ class AgentNBApp:
             project_override=request.project_override,
             requested_session_id=None,
             semantics=_PASSIVE_COMMAND,
-            handler=lambda _: _sessions_list_payload(
-                self.runtime.list_sessions(project_root=request.project_root),
+            handler=lambda _: SessionsListCommandData(
+                sessions=[
+                    SessionListEntryData.from_runtime_entry(entry)
+                    for entry in self.runtime.list_sessions(project_root=request.project_root)
+                ],
                 hidden_non_live_count=self.runtime.hidden_non_live_session_count(
                     project_root=request.project_root
                 ),
@@ -407,10 +409,7 @@ class AgentNBApp:
             project_override=request.project_override,
             requested_session_id=request.session_name,
             semantics=_PASSIVE_COMMAND,
-            handler=lambda _: self.runtime.delete_session(
-                project_root=request.project_root,
-                session_id=request.session_name,
-            ),
+            handler=lambda _: self._sessions_delete_payload(request=request),
         )
 
     def sessions_delete_bulk(self, request: SessionsDeleteBulkRequest) -> CommandResponse:
@@ -423,10 +422,12 @@ class AgentNBApp:
             handler=lambda _: self._sessions_delete_bulk_payload(request),
         )
 
-    def _sessions_delete_bulk_payload(self, request: SessionsDeleteBulkRequest) -> BulkDeleteResult:
+    def _sessions_delete_bulk_payload(
+        self, request: SessionsDeleteBulkRequest
+    ) -> SessionsDeleteBulkCommandData:
         if request.stale_only:
             deleted = self.runtime.cleanup_stale_sessions(project_root=request.project_root)
-            return {"deleted": deleted, "count": len(deleted)}
+            return SessionsDeleteBulkCommandData(deleted=deleted, count=len(deleted))
 
         deleted: list[str] = []
         for session in self.runtime.session_inventory(project_root=request.project_root):
@@ -436,7 +437,7 @@ class AgentNBApp:
                 deleted.append(sid)
             except Exception:
                 pass
-        return {"deleted": deleted, "count": len(deleted)}
+        return SessionsDeleteBulkCommandData(deleted=deleted, count=len(deleted))
 
     def runs_list(self, request: RunsListRequest) -> CommandResponse:
         return self._handle_command(
@@ -510,16 +511,18 @@ class AgentNBApp:
             project_override=request.project_override,
             requested_session_id=None,
             semantics=_PASSIVE_COMMAND,
-            handler=lambda _: self.executions.cancel_run(
-                project_root=request.project_root,
-                execution_id=self.run_selectors.resolve_execution_id(
+            handler=lambda _: RunCancelCommandData.from_outcome(
+                self.executions.cancel_run(
                     project_root=request.project_root,
-                    reference=request.run_reference,
-                    current_session_id=self.session_targeting.current_run_preference(
+                    execution_id=self.run_selectors.resolve_execution_id(
                         project_root=request.project_root,
+                        reference=request.run_reference,
+                        current_session_id=self.session_targeting.current_run_preference(
+                            project_root=request.project_root,
+                        ),
+                        default_behavior="active",
                     ),
-                    default_behavior="active",
-                ),
+                )
             ),
         )
 
@@ -672,9 +675,11 @@ class AgentNBApp:
         )
         return HistoryCommandData(entries=list(selection.entries), full=request.full)
 
-    def _interrupt_payload(self, *, request: InterruptRequest, session_id: str) -> InterruptPayload:
+    def _interrupt_payload(
+        self, *, request: InterruptRequest, session_id: str
+    ) -> InterruptCommandData:
         self.runtime.interrupt(project_root=request.project_root, session_id=session_id)
-        return {"interrupted": True}
+        return InterruptCommandData()
 
     def _reset_payload(self, *, request: ResetRequest, session_id: str) -> ExecCommandData:
         managed = self.executions.reset_session(
@@ -694,15 +699,27 @@ class AgentNBApp:
             )
         return payload
 
-    def _stop_payload(self, *, request: StopRequest, session_id: str) -> StopPayload:
+    def _stop_payload(self, *, request: StopRequest, session_id: str) -> StopCommandData:
         self.runtime.stop(project_root=request.project_root, session_id=session_id)
-        return {"stopped": True}
+        return StopCommandData()
 
-    def _doctor_payload(self, *, request: DoctorRequest, session_id: str) -> DoctorPayload:
-        return self.runtime.doctor(
-            project_root=request.project_root,
-            session_id=session_id,
-            python_executable=request.python_executable,
+    def _doctor_payload(self, *, request: DoctorRequest, session_id: str) -> DoctorCommandData:
+        return DoctorCommandData.from_status(
+            self.runtime.doctor(
+                project_root=request.project_root,
+                session_id=session_id,
+                python_executable=request.python_executable,
+            )
+        )
+
+    def _sessions_delete_payload(
+        self, *, request: SessionsDeleteRequest
+    ) -> SessionDeleteCommandData:
+        return SessionDeleteCommandData.from_outcome(
+            self.runtime.delete_session(
+                project_root=request.project_root,
+                session_id=request.session_name,
+            )
         )
 
     def _runs_list_payload(self, *, request: RunsListRequest) -> RunsListCommandData:
@@ -859,7 +876,7 @@ class AgentNBApp:
             data = handler(resolved_session_id)
             if context.switched_session is not None:
                 data = with_switched_session(data, context.switched_session)
-            serialized_data = serialize_command_data(command_name, data)
+            command_data = ensure_command_data(data)
             if response_session_id_resolver is not None:
                 response_session_id = response_session_id_resolver(response_session_id, data)
             return success_response(
@@ -871,7 +888,8 @@ class AgentNBApp:
                     self._advice_context(
                         command_name=command_name,
                         response_status="ok",
-                        data=serialized_data,
+                        command_data=command_data,
+                        data=None,
                         project_override=project_override,
                         session_id=resolved_session_id,
                         session_source=context.source,
@@ -881,7 +899,8 @@ class AgentNBApp:
                     self._advice_context(
                         command_name=command_name,
                         response_status="ok",
-                        data=serialized_data,
+                        command_data=command_data,
+                        data=None,
                         project_override=project_override,
                         session_id=resolved_session_id,
                         session_source=context.source,
@@ -977,10 +996,11 @@ class AgentNBApp:
         *,
         command_name: str,
         response_status: str,
-        data: Mapping[str, object],
+        data: Mapping[str, object] | None,
         project_override: Path | None,
         session_id: str | None,
         session_source: ResolutionSource | None,
+        command_data: CommandDataLike | None = None,
         error_code: str | None = None,
         error_name: str | None = None,
         error_value: str | None = None,
@@ -988,7 +1008,8 @@ class AgentNBApp:
         return AdviceContext(
             command_name=command_name,
             response_status=response_status,
-            data=data,
+            command_data=command_data,
+            data={} if data is None else data,
             error_code=error_code,
             error_name=error_name,
             error_value=error_value,
@@ -1011,17 +1032,6 @@ def _run_response_session_id(current_session_id: str, data: CommandDataLike) -> 
             if isinstance(session_id, str) and session_id:
                 return session_id
     return current_session_id
-
-
-def _sessions_list_payload(
-    sessions: list[SessionSummary],
-    *,
-    hidden_non_live_count: int = 0,
-) -> SessionsListPayload:
-    payload: SessionsListPayload = {"sessions": sessions}
-    if hidden_non_live_count > 0:
-        payload["hidden_non_live_count"] = hidden_non_live_count
-    return payload
 
 
 @dataclass(slots=True)

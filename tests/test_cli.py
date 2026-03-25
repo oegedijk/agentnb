@@ -971,14 +971,14 @@ def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path
     payload = _payload(result.output)
     assert payload["status"] == "ok"
     assert payload["command"] == "doctor"
-    assert payload["data"] == {
-        "ready": True,
-        "checks": [{"name": "python", "status": "ok", "message": "ok"}],
-        "selected_python": "python",
-        "python_source": "current",
-        "session_exists": False,
-        "stale_session_cleaned": False,
-    }
+    assert payload["data"]["ready"] is True
+    assert payload["data"]["selected_python"] == "python"
+    assert payload["data"]["python_source"] == "current"
+    assert payload["data"]["session_exists"] is False
+    assert payload["data"]["stale_session_cleaned"] is False
+    assert payload["data"]["checks"][0]["name"] == "python"
+    assert payload["data"]["checks"][0]["status"] == "ok"
+    assert payload["data"]["checks"][0]["message"] == "ok"
 
 
 def test_cli_start_uses_manual_recovery_contract(
@@ -1994,7 +1994,7 @@ def test_cli_bare_sessions_shortcut_accepts_group_options(
     assert result.exit_code == 0
     payload = _payload(result.output)
     assert payload["command"] == "sessions-list"
-    assert payload["data"]["sessions"] == [{"session_id": "default"}]
+    assert payload["data"]["sessions"][0]["session_id"] == "default"
 
 
 def test_cli_sessions_list_empty_has_actionable_suggestions(

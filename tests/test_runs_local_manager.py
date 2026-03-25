@@ -704,9 +704,9 @@ def test_local_run_manager_cancel_run_interrupts_session(project_dir: Path, mock
     )
     stored = ExecutionStore(project_dir).get("run-1")
 
-    assert payload["cancel_requested"] is True
-    assert payload["status"] == "error"
-    assert payload["session_outcome"] == "preserved"
+    assert payload.cancel_requested is True
+    assert payload.status == "error"
+    assert payload.session_outcome == "preserved"
     interrupt.assert_called_once_with(project_root=project_dir, session_id="default")
     kill.assert_called_once()
     assert stored is not None
@@ -750,14 +750,12 @@ def test_local_run_manager_cancel_run_returns_finished_state_when_run_completes_
         poll_interval_s=0.1,
     )
 
-    assert payload == {
-        "execution_id": "run-1",
-        "session_id": "default",
-        "cancel_requested": True,
-        "status": "ok",
-        "run_status": "ok",
-        "session_outcome": "preserved",
-    }
+    assert payload.execution_id == "run-1"
+    assert payload.session_id == "default"
+    assert payload.cancel_requested is True
+    assert payload.status == "ok"
+    assert payload.run_status == "ok"
+    assert payload.session_outcome == "preserved"
     interrupt.assert_called_once_with(project_root=project_dir, session_id="default")
     kill.assert_not_called()
     stored = store.get("run-1")
@@ -779,9 +777,9 @@ def test_local_run_manager_cancel_run_stops_starting_session(project_dir: Path, 
     )
     stored = ExecutionStore(project_dir).get("run-1")
 
-    assert payload["cancel_requested"] is True
-    assert payload["status"] == "error"
-    assert payload["session_outcome"] == "stopped"
+    assert payload.cancel_requested is True
+    assert payload.status == "error"
+    assert payload.session_outcome == "stopped"
     stop_starting.assert_called_once_with(project_root=project_dir, session_id="default")
     kill.assert_not_called()
     assert stored is not None
@@ -809,14 +807,12 @@ def test_local_run_manager_cancel_run_returns_unchanged_for_finished_run(project
         execution_id="run-1",
     )
 
-    assert payload == {
-        "execution_id": "run-1",
-        "session_id": "default",
-        "cancel_requested": False,
-        "status": "ok",
-        "run_status": "ok",
-        "session_outcome": "unchanged",
-    }
+    assert payload.execution_id == "run-1"
+    assert payload.session_id == "default"
+    assert payload.cancel_requested is False
+    assert payload.status == "ok"
+    assert payload.run_status == "ok"
+    assert payload.session_outcome == "unchanged"
 
 
 def test_local_run_manager_marks_exited_background_worker_as_error(

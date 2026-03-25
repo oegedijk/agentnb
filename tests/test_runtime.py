@@ -202,11 +202,11 @@ def test_runtime_list_sessions_reports_alive_entries(project_dir: Path) -> None:
 
     sessions = runtime.list_sessions(project_root=project_dir)
 
-    assert [session["session_id"] for session in sessions] == ["default", "analysis"]
-    assert sessions[0]["is_default"] is True
-    assert sessions[1]["is_default"] is False
-    assert sessions[0]["is_current"] is False
-    assert sessions[1]["is_current"] is True
+    assert [session.session_id for session in sessions] == ["default", "analysis"]
+    assert sessions[0].is_default is True
+    assert sessions[1].is_default is False
+    assert sessions[0].is_current is False
+    assert sessions[1].is_current is True
 
 
 def test_runtime_list_sessions_uses_execution_history_for_last_activity(project_dir: Path) -> None:
@@ -241,8 +241,8 @@ def test_runtime_list_sessions_uses_execution_history_for_last_activity(project_
 
     sessions = runtime.list_sessions(project_root=project_dir)
 
-    assert sessions[0]["session_id"] == "analysis"
-    assert sessions[0]["last_activity"] == "2026-03-10T00:00:00+00:00"
+    assert sessions[0].session_id == "analysis"
+    assert sessions[0].last_activity == "2026-03-10T00:00:00+00:00"
 
 
 def test_runtime_delete_session_stops_alive_kernel(project_dir: Path) -> None:
@@ -267,8 +267,8 @@ def test_runtime_delete_session_stops_alive_kernel(project_dir: Path) -> None:
 
     payload = runtime.delete_session(project_root=project_dir, session_id="analysis")
 
-    assert payload["deleted"] is True
-    assert payload["stopped_running_kernel"] is True
+    assert payload.deleted is True
+    assert payload.stopped_running_kernel is True
     backend.stop.assert_called_once()
     assert store.load_session() is None
     assert not store.connection_file.exists()

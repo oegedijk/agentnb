@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import cast
 
 from .contracts import CommandResponse, ExecutionResult, KernelStatus
 from .kernel.provisioner import DoctorReport, KernelProvisioner, ProvisionResult
 from .payloads import DoctorPayload
-from .runtime import KernelRuntime
+from .runtime import DoctorStatus, KernelRuntime
 from .session import DEFAULT_SESSION_ID, resolve_project_root
 
 
@@ -99,8 +101,35 @@ def doctor_environment(
     runtime = KernelRuntime()
     project_root = resolve_project_root(override=Path(project))
     python_path = Path(python_executable) if python_executable is not None else None
-    return runtime.doctor(
+    doctor = runtime.doctor(
         project_root=project_root,
         session_id=session_id,
         python_executable=python_path,
     )
+    return _doctor_payload(doctor)
+
+
+def _doctor_payload(doctor: DoctorStatus | Mapping[str, object]) -> DoctorPayload:
+    if isinstance(doctor, Mapping):
+        return cast(DoctorPayload, dict(doctor))
+    payload: DoctorPayload = {
+        "ready": doctor.ready,
+        "checks": [
+            {
+                "name": check.name,
+                "status": check.status,
+                "message": check.message,
+                "fix_hint": check.fix_hint,
+            }
+            for check in doctor.checks
+        ],
+        "stale_session_cleaned": doctor.stale_session_cleaned,
+        "session_exists": doctor.session_exists,
+        "kernel_alive": doctor.kernel_alive,
+        "kernel_pid": doctor.kernel_pid,
+    }
+    if doctor.selected_python is not None:
+        payload["selected_python"] = doctor.selected_python
+    if doctor.python_source is not None:
+        payload["python_source"] = doctor.python_source
+    return payload

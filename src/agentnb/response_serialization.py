@@ -7,22 +7,31 @@ from typing import Any, cast
 from .command_data import (
     CommandData,
     CommandDataLike,
+    DoctorCommandData,
     ExecCommandData,
     HistoryCommandData,
     InspectCommandData,
+    InterruptCommandData,
     KernelSessionData,
     ReloadCommandData,
+    RunCancelCommandData,
     RunListEntryData,
     RunLookupCommandData,
     RunsListCommandData,
     RunSnapshotData,
     SerializedCommandData,
+    SessionDeleteCommandData,
+    SessionsDeleteBulkCommandData,
+    SessionsListCommandData,
+    StopCommandData,
     VarsCommandData,
 )
 from .compact import compact_preview, preview_text, strip_ansi_lines, summarize_exec_label
 from .execution_output import preview_from_result_text
+from .history import summarize_history_multiline, summarize_history_text
 from .journal import JournalEntry
 from .payloads import (
+    DoctorPayload,
     ExecPayload,
     HistoryEntryPayload,
     HistoryPayload,
@@ -31,6 +40,7 @@ from .payloads import (
     RunListEntryPayload,
     RunLookupPayload,
     RunSnapshot,
+    SessionsListPayload,
 )
 
 _SENTINEL = object()
@@ -50,10 +60,24 @@ def serialize_command_data(command_name: str, data: CommandDataLike) -> dict[str
         return _mapping_to_dict(data)
     if isinstance(data, KernelSessionData):
         return _serialize_kernel_session_data(data)
+    if isinstance(data, InterruptCommandData):
+        return _with_switched_session({"interrupted": data.interrupted}, data)
+    if isinstance(data, StopCommandData):
+        return _with_switched_session({"stopped": data.stopped}, data)
+    if isinstance(data, DoctorCommandData):
+        return cast(dict[str, Any], _serialize_doctor_data(data))
     if isinstance(data, ExecCommandData):
         return _serialize_exec_data(data)
+    if isinstance(data, SessionsListCommandData):
+        return cast(dict[str, Any], _serialize_sessions_list_data(data))
+    if isinstance(data, SessionDeleteCommandData):
+        return _serialize_session_delete_data(data)
+    if isinstance(data, SessionsDeleteBulkCommandData):
+        return _serialize_sessions_delete_bulk_data(data)
     if isinstance(data, RunsListCommandData):
         return {"runs": [_serialize_run_list_entry(item) for item in data.runs]}
+    if isinstance(data, RunCancelCommandData):
+        return _serialize_run_cancel_data(data)
     if isinstance(data, RunLookupCommandData):
         payload: RunLookupPayload = {"run": _serialize_run_snapshot(data.run)}
         if data.status is not None:
@@ -411,6 +435,83 @@ def _serialize_exec_data(data: ExecCommandData) -> dict[str, Any]:
     return _with_switched_session(payload, data)
 
 
+def _serialize_doctor_data(data: DoctorCommandData) -> DoctorPayload:
+    payload: DoctorPayload = {
+        "ready": data.ready,
+        "checks": [
+            {
+                "name": check.name,
+                "status": check.status,
+                "message": check.message,
+                "fix_hint": check.fix_hint,
+            }
+            for check in data.checks
+        ],
+        "stale_session_cleaned": data.stale_session_cleaned,
+        "session_exists": data.session_exists,
+        "kernel_alive": data.kernel_alive,
+        "kernel_pid": data.kernel_pid,
+    }
+    if data.selected_python is not None:
+        payload["selected_python"] = data.selected_python
+    if data.python_source is not None:
+        payload["python_source"] = data.python_source
+    return cast(DoctorPayload, _with_switched_session(payload, data))
+
+
+def _serialize_sessions_list_data(data: SessionsListCommandData) -> SessionsListPayload:
+    payload: SessionsListPayload = {
+        "sessions": [
+            {
+                "session_id": session.session_id,
+                "alive": session.alive,
+                "pid": session.pid,
+                "connection_file": session.connection_file,
+                "started_at": session.started_at,
+                "uptime_s": session.uptime_s,
+                "python": session.python,
+                "last_activity": session.last_activity,
+                "is_default": session.is_default,
+                "is_current": session.is_current,
+                "is_preferred": session.is_preferred,
+            }
+            for session in data.sessions
+        ]
+    }
+    if data.hidden_non_live_count > 0:
+        payload["hidden_non_live_count"] = data.hidden_non_live_count
+    return cast(SessionsListPayload, _with_switched_session(payload, data))
+
+
+def _serialize_session_delete_data(data: SessionDeleteCommandData) -> dict[str, Any]:
+    return _with_switched_session(
+        {
+            "deleted": data.deleted,
+            "session_id": data.session_id,
+            "stopped_running_kernel": data.stopped_running_kernel,
+        },
+        data,
+    )
+
+
+def _serialize_sessions_delete_bulk_data(data: SessionsDeleteBulkCommandData) -> dict[str, Any]:
+    return _with_switched_session({"deleted": list(data.deleted), "count": data.count}, data)
+
+
+def _serialize_run_cancel_data(data: RunCancelCommandData) -> dict[str, Any]:
+    return _with_switched_session(
+        {
+            "execution_id": data.execution_id,
+            "session_id": data.session_id,
+            "cancel_requested": data.cancel_requested,
+            "status": data.status,
+            "run_status": data.run_status,
+            "session_outcome": data.session_outcome,
+        },
+        data,
+    )
+
+
 def _serialize_run_snapshot(data: RunSnapshotData) -> RunSnapshot:
     raw_payload = _mapping_to_dict(data.payload)
     hidden_keys = {"outputs"}
@@ -466,9 +567,10 @@ def _serialize_run_list_entry(data: RunListEntryData) -> RunListEntryPayload:
         compacted["result_preview"] = result_preview
     else:
         result = payload.get("result")
-        summary = summarize_history_text(result, limit=_RESULT_LIMIT)
-        if summary is not None:
-            compacted["result_preview"] = summary
+        if isinstance(result, str):
+            summary = summarize_history_text(result, limit=_RESULT_LIMIT)
+            if summary is not None:
+                compacted["result_preview"] = summary
 
     stdout = payload.get("stdout")
     if isinstance(stdout, str) and stdout:
@@ -593,29 +695,6 @@ def _prefer_preview_text(preview: object, result: object) -> bool:
     if not isinstance(result, str):
         return True
     return "\n" in result or len(result) > 120
-
-
-def summarize_history_text(value: object, limit: int = 100) -> str | None:
-    if not isinstance(value, str):
-        return None
-    compact = " ".join(value.strip().split())
-    if not compact:
-        return None
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 3] + "..."
-
-
-def summarize_history_multiline(value: object, limit: int = 100) -> str | None:
-    if not isinstance(value, str):
-        return None
-    lines = [line.strip() for line in value.splitlines() if line.strip()]
-    if not lines:
-        return None
-    compact = " | ".join(lines)
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 3] + "..."
 
 
 def _mapping_to_dict(payload: Mapping[str, object]) -> dict[str, object]:

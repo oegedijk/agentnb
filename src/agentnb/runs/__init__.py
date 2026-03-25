@@ -2,6 +2,7 @@ from .executor import LocalRunExecutor, _ExecutionProgressSink
 from .local_manager import LocalRunManager
 from .manager import RunManager
 from .models import (
+    RunCancelOutcome,
     RunCommandType,
     RunHandle,
     RunMode,
@@ -19,6 +20,7 @@ __all__ = [
     "LocalRunExecutor",
     "LocalRunManager",
     "ManagedExecution",
+    "RunCancelOutcome",
     "RunCommandType",
     "RunHandle",
     "RunManager",

@@ -1017,7 +1017,7 @@ def test_app_sessions_list_routes_through_handle_command(project_dir) -> None:
     response = app.sessions_list(SessionsListRequest(project_root=project_dir))
 
     assert response.status == "ok"
-    assert response.data["sessions"] == [{"session_id": "default"}]
+    assert response.data["sessions"][0]["session_id"] == "default"
     assert response.data["hidden_non_live_count"] == 2
     _assert_called_with_subset(
         runtime.resolve_session_id,

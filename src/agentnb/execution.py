@@ -12,7 +12,6 @@ from .contracts import (
     HelperWaitFor,
 )
 from .errors import KernelWaitTimedOutError, RunWaitTimedOutError
-from .payloads import CancelRunResult
 from .recording import CommandRecorder
 from .runs import (
     ExecutionRecord,
@@ -20,6 +19,7 @@ from .runs import (
     ExecutionStore,
     LocalRunManager,
     ManagedExecution,
+    RunCancelOutcome,
     RunManager,
     RunObservationResult,
     RunSpec,
@@ -225,7 +225,7 @@ class ExecutionService:
         execution_id: str,
         timeout_s: float = 10.0,
         poll_interval_s: float = 0.1,
-    ) -> CancelRunResult:
+    ) -> RunCancelOutcome:
         return self._run_manager.cancel_run(
             project_root=project_root,
             execution_id=execution_id,

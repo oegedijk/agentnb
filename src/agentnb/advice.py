@@ -2,23 +2,39 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
+from .command_data import (
+    CommandDataLike,
+    DoctorCommandData,
+    ExecCommandData,
+    HistoryCommandData,
+    KernelSessionData,
+    ReloadCommandData,
+    RunCancelCommandData,
+    RunLookupCommandData,
+    RunsListCommandData,
+    SessionsListCommandData,
+    VarsCommandData,
+)
 from .contracts import SuggestionAction
 from .suggestions import SessionScopeSource, SuggestionOutputMode, SuggestionScope
 
 _IMPORT_PACKAGE_NAME_OVERRIDES = {
     "sklearn": "scikit-learn",
 }
+_STDOUT_LIMIT = 200
+_RESULT_LIMIT = 240
 
 
 @dataclass(slots=True, frozen=True)
 class AdviceContext:
     command_name: str
     response_status: str
-    data: Mapping[str, object]
+    command_data: CommandDataLike | None = None
+    data: Mapping[str, object] = field(default_factory=dict)
     error_code: str | None = None
     error_name: str | None = None
     error_value: str | None = None
@@ -44,6 +60,7 @@ class AdvicePolicy:
     def _steps(self, context: AdviceContext) -> list[_AdviceStep]:
         command_name = context.command_name
         data = context.data
+        command_data = context.command_data
         scope = _scope(context)
 
         if context.error_code == "AMBIGUOUS_SESSION":
@@ -145,7 +162,11 @@ class AdvicePolicy:
             return []
 
         if command_name == "status":
-            runtime_state = data.get("runtime_state")
+            runtime_state = (
+                command_data.runtime_state
+                if isinstance(command_data, KernelSessionData)
+                else data.get("runtime_state")
+            )
             if runtime_state == "starting":
                 return [
                     _run_step(
@@ -157,8 +178,18 @@ class AdvicePolicy:
                         with_action=False,
                     )
                 ]
-            if data.get("alive"):
-                if data.get("busy"):
+            alive = (
+                command_data.alive
+                if isinstance(command_data, KernelSessionData)
+                else data.get("alive")
+            )
+            busy = (
+                command_data.busy
+                if isinstance(command_data, KernelSessionData)
+                else data.get("busy")
+            )
+            if alive:
+                if busy:
                     return [
                         _run_step(
                             scope,
@@ -213,9 +244,38 @@ class AdvicePolicy:
 
         if command_name == "exec":
             if context.response_status == "ok":
-                if _file_exec_truncated(data):
+                if _file_exec_truncated(command_data, data):
                     return _file_exec_truncation_steps(scope, data)
-                if data.get("background"):
+                if isinstance(command_data, ExecCommandData):
+                    if command_data.background:
+                        execution_id = command_data.record.execution_id or "EXECUTION_ID"
+                        return [
+                            _run_step(
+                                scope,
+                                "Wait for run",
+                                "to wait for the final result.",
+                                "runs",
+                                "wait",
+                                execution_id,
+                            ),
+                            _run_step(
+                                scope,
+                                "Show run",
+                                "to inspect the current run record.",
+                                "runs",
+                                "show",
+                                execution_id,
+                            ),
+                            _run_step(
+                                scope,
+                                "Cancel run",
+                                "to stop the background run.",
+                                "runs",
+                                "cancel",
+                                execution_id,
+                            ),
+                        ]
+                elif data.get("background"):
                     execution_id = _execution_id(data)
                     return [
                         _run_step(
@@ -243,8 +303,12 @@ class AdvicePolicy:
                             execution_id,
                         ),
                     ]
-                if _exec_output_is_empty(data):
-                    execution_id = _execution_id(data)
+                if _exec_output_is_empty(command_data, data):
+                    execution_id = (
+                        command_data.record.execution_id
+                        if isinstance(command_data, ExecCommandData)
+                        else _execution_id(data)
+                    )
                     return [
                         _run_step(
                             scope,
@@ -330,7 +394,7 @@ class AdvicePolicy:
                 module = _extract_module_name(context.error_value)
                 if module:
                     package = _package_name_for_import(module)
-                    session_python = _session_python(data)
+                    session_python = _session_python(data, command_data)
                     if session_python:
                         return [
                             _shell_step(
@@ -375,7 +439,7 @@ class AdvicePolicy:
 
             if _missing_pip_in_called_process(context):
                 package = _extract_pip_install_target(context.error_value)
-                session_python = _session_python(data)
+                session_python = _session_python(data, command_data)
                 if package and session_python:
                     return [
                         _text_step(
@@ -483,7 +547,11 @@ class AdvicePolicy:
             ]
 
         if command_name == "vars":
-            if not data.get("vars"):
+            if isinstance(command_data, VarsCommandData):
+                has_vars = bool(command_data.values)
+            else:
+                has_vars = bool(data.get("vars"))
+            if not has_vars:
                 return [
                     _run_step(
                         scope,
@@ -499,7 +567,11 @@ class AdvicePolicy:
             return []
 
         if command_name == "reload":
-            stale_names = data.get("stale_names")
+            stale_names = (
+                command_data.payload.get("stale_names")
+                if isinstance(command_data, ReloadCommandData)
+                else data.get("stale_names")
+            )
             if stale_names:
                 return [
                     _run_step(
@@ -511,7 +583,11 @@ class AdvicePolicy:
                         with_action=False,
                     )
                 ]
-            reloaded = data.get("reloaded_modules")
+            reloaded = (
+                command_data.payload.get("reloaded_modules")
+                if isinstance(command_data, ReloadCommandData)
+                else data.get("reloaded_modules")
+            )
             if isinstance(reloaded, list) and not reloaded:
                 return [
                     _text_step("No project-local modules were found to reload."),
@@ -523,7 +599,12 @@ class AdvicePolicy:
             return []
 
         if command_name == "history":
-            if not data.get("entries"):
+            entries = (
+                command_data.entries
+                if isinstance(command_data, HistoryCommandData)
+                else data.get("entries")
+            )
+            if not entries:
                 return [
                     _run_step(
                         scope,
@@ -571,10 +652,18 @@ class AdvicePolicy:
             return []
 
         if command_name == "doctor":
-            if data.get("ready"):
-                if data.get("kernel_alive"):
+            if isinstance(command_data, DoctorCommandData):
+                ready = command_data.ready
+                kernel_alive = command_data.kernel_alive
+                session_exists = command_data.session_exists
+            else:
+                ready = bool(data.get("ready"))
+                kernel_alive = bool(data.get("kernel_alive"))
+                session_exists = bool(data.get("session_exists"))
+            if ready:
+                if kernel_alive:
                     return [_text_step("Kernel is already running.")]
-                if data.get("session_exists"):
+                if session_exists:
                     return [
                         _text_step("Session exists but kernel is not running."),
                         _run_step(
@@ -617,7 +706,12 @@ class AdvicePolicy:
             ]
 
         if command_name == "sessions-list":
-            if not data.get("sessions"):
+            has_sessions = (
+                bool(command_data.sessions)
+                if isinstance(command_data, SessionsListCommandData)
+                else bool(data.get("sessions"))
+            )
+            if not has_sessions:
                 return [
                     _run_step(
                         scope,
@@ -641,7 +735,12 @@ class AdvicePolicy:
             return []
 
         if command_name == "runs-list":
-            if not data.get("runs"):
+            has_runs = (
+                bool(command_data.runs)
+                if isinstance(command_data, RunsListCommandData)
+                else bool(data.get("runs"))
+            )
+            if not has_runs:
                 return [
                     _run_step(
                         scope,
@@ -655,9 +754,13 @@ class AdvicePolicy:
             return []
 
         if command_name == "runs-show":
-            run = data.get("run")
-            run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
-            run_status = run_payload.get("status") if run_payload is not None else None
+            if isinstance(command_data, RunLookupCommandData):
+                run_payload = command_data.run.payload
+                run_status = run_payload.get("status")
+            else:
+                run = data.get("run")
+                run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
+                run_status = run_payload.get("status") if run_payload is not None else None
             if _run_is_active(run_status):
                 execution_id = _execution_id(run_payload)
                 return [
@@ -692,9 +795,13 @@ class AdvicePolicy:
             return []
 
         if command_name == "runs-follow":
-            run = data.get("run")
-            run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
-            run_status = run_payload.get("status") if run_payload is not None else None
+            if isinstance(command_data, RunLookupCommandData):
+                run_payload = command_data.run.payload
+                run_status = run_payload.get("status")
+            else:
+                run = data.get("run")
+                run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
+                run_status = run_payload.get("status") if run_payload is not None else None
             if _run_is_active(run_status):
                 execution_id = _execution_id(run_payload)
                 return [
@@ -729,9 +836,33 @@ class AdvicePolicy:
             return []
 
         if command_name == "runs-cancel":
-            execution_id = _execution_id(data)
-            if data.get("cancel_requested"):
-                if data.get("status") == "ok":
+            execution_id = (
+                command_data.execution_id
+                if isinstance(command_data, RunCancelCommandData)
+                else _execution_id(data)
+            )
+            cancel_requested = (
+                command_data.cancel_requested
+                if isinstance(command_data, RunCancelCommandData)
+                else bool(data.get("cancel_requested"))
+            )
+            status = (
+                command_data.status
+                if isinstance(command_data, RunCancelCommandData)
+                else data.get("status")
+            )
+            session_outcome = (
+                command_data.session_outcome
+                if isinstance(command_data, RunCancelCommandData)
+                else data.get("session_outcome")
+            )
+            session_id = (
+                command_data.session_id
+                if isinstance(command_data, RunCancelCommandData)
+                else str(data.get("session_id") or "default")
+            )
+            if cancel_requested:
+                if status == "ok":
                     return [
                         _run_step(
                             scope,
@@ -753,8 +884,7 @@ class AdvicePolicy:
                             with_action=False,
                         ),
                     ]
-                if data.get("session_outcome") == "preserved":
-                    session_id = str(data.get("session_id") or "default")
+                if session_outcome == "preserved":
                     return [
                         _run_step(
                             scope,
@@ -774,7 +904,7 @@ class AdvicePolicy:
                             with_action=False,
                         ),
                     ]
-                if data.get("session_outcome") == "stopped":
+                if session_outcome == "stopped":
                     return [
                         _run_step(
                             scope,
@@ -863,14 +993,32 @@ def _missing_pip_in_called_process(context: AdviceContext) -> bool:
     return bool(context.error_value and "No module named pip" in context.error_value)
 
 
-def _session_python(data: Mapping[str, object]) -> str | None:
+def _session_python(
+    data: Mapping[str, object],
+    command_data: CommandDataLike | None = None,
+) -> str | None:
+    if isinstance(command_data, ExecCommandData):
+        return command_data.session_python
     value = data.get("session_python")
     if isinstance(value, str) and value:
         return value
     return None
 
 
-def _exec_output_is_empty(data: Mapping[str, object]) -> bool:
+def _exec_output_is_empty(
+    command_data: CommandDataLike | None,
+    data: Mapping[str, object],
+) -> bool:
+    if isinstance(command_data, ExecCommandData):
+        for value in (
+            command_data.record.result,
+            command_data.record.stdout,
+            command_data.record.stderr,
+            command_data.selected_text,
+        ):
+            if isinstance(value, str) and value:
+                return False
+        return not (command_data.namespace_delta and command_data.namespace_delta.get("entries"))
     for key in ("result", "stdout", "stderr", "selected_text"):
         value = data.get(key)
         if isinstance(value, str) and value:
@@ -884,7 +1032,19 @@ def _exec_output_is_empty(data: Mapping[str, object]) -> bool:
     return not entries
 
 
-def _file_exec_truncated(data: Mapping[str, object]) -> bool:
+def _file_exec_truncated(command_data: CommandDataLike | None, data: Mapping[str, object]) -> bool:
+    if isinstance(command_data, ExecCommandData):
+        if command_data.source_kind != "file" or command_data.no_truncate:
+            return False
+        outcome = command_data.record.outcome()
+        return any(
+            isinstance(value, str) and len(value) > limit
+            for value, limit in (
+                (outcome.stdout, _STDOUT_LIMIT),
+                (outcome.stderr, _STDOUT_LIMIT),
+                (outcome.result, _RESULT_LIMIT),
+            )
+        )
     if data.get("source_kind") != "file":
         return False
     truncation_keys = ("stdout_truncated", "stderr_truncated", "result_truncated")

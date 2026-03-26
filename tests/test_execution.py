@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import Mock
 
 import pytest
@@ -14,7 +14,7 @@ from agentnb.contracts import (
     HelperAccessMetadata,
     KernelStatus,
 )
-from agentnb.errors import AgentNBException, RunWaitTimedOutError
+from agentnb.errors import AgentNBException, RunWaitTimedOutError, StateCompatibilityError
 from agentnb.execution import (
     ExecutionRecord,
     ExecutionRun,
@@ -25,6 +25,7 @@ from agentnb.execution import (
 )
 from agentnb.execution_output import OutputItem
 from agentnb.history import HistoryRecord
+from agentnb.recording import CommandRecorder
 from agentnb.runs import ManagedExecution, RunSpec
 from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
@@ -34,6 +35,37 @@ def _event_sink(kwargs: dict[str, object]) -> ExecutionSink:
     sink = kwargs["event_sink"]
     assert sink is not None
     return cast(ExecutionSink, sink)
+
+
+def _journal_entries(
+    *,
+    execution_id: str = "run-1",
+    session_id: str = "default",
+    command_type: str = "exec",
+    code: str | None = None,
+    status: str = "ok",
+    duration_ms: int = 12,
+    error_type: str | None = None,
+    failure_origin: Literal["kernel", "control"] | None = None,
+    result: str | None = None,
+) -> list[HistoryRecord]:
+    return (
+        CommandRecorder()
+        .for_execution(
+            command_type=command_type,
+            code=code,
+        )
+        .build_records(
+            ts="2026-03-10T00:00:00+00:00",
+            session_id=session_id,
+            execution_id=execution_id,
+            status=status,
+            duration_ms=duration_ms,
+            error_type=error_type,
+            failure_origin=failure_origin,
+            result=result,
+        )
+    )
 
 
 def test_execution_store_roundtrip_and_get(project_dir: Path) -> None:
@@ -49,6 +81,7 @@ def test_execution_store_roundtrip_and_get(project_dir: Path) -> None:
         result="2",
         outputs=[OutputItem.result(text="2", mime={"text/plain": "2"})],
         events=[ExecutionEvent(kind="result", content="2")],
+        journal_entries=_journal_entries(code="1 + 1", result="2"),
     )
 
     store.append(record)
@@ -108,6 +141,27 @@ def test_execution_record_storage_dict_includes_outputs_but_public_dict_does_not
     ]
 
 
+def test_execution_store_rejects_terminal_exec_without_persisted_journal_entries(
+    project_dir: Path,
+) -> None:
+    store = ExecutionStore(project_dir)
+    store.append(
+        ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="ok",
+            duration_ms=12,
+            code="1 + 1",
+            result="2",
+        )
+    )
+
+    with pytest.raises(StateCompatibilityError):
+        store.read(session_id="default")
+
+
 def test_execution_store_preserves_terminal_error_without_synthesizing_error_event(
     project_dir: Path,
 ) -> None:
@@ -124,6 +178,7 @@ def test_execution_store_preserves_terminal_error_without_synthesizing_error_eve
         evalue="boom",
         traceback=["tb"],
         outputs=[OutputItem.stdout("hello\n")],
+        journal_entries=_journal_entries(status="error", error_type="ValueError"),
     )
 
     store.append(record)
@@ -162,6 +217,7 @@ def test_execution_store_returns_latest_version_for_same_run(project_dir: Path) 
             duration_ms=12,
             code="1 + 1",
             result="2",
+            journal_entries=_journal_entries(code="1 + 1", result="2"),
         )
     )
 
@@ -202,6 +258,11 @@ def test_execution_store_merges_cancel_provenance_into_later_terminal_record(
             ename="KeyboardInterrupt",
             evalue="interrupted",
             traceback=["tb"],
+            journal_entries=_journal_entries(
+                code="sleep()",
+                status="error",
+                error_type="KeyboardInterrupt",
+            ),
         )
     )
 
@@ -252,6 +313,11 @@ def test_execution_store_errors_only_reads_preserve_merged_cancel_provenance(
             ename="KeyboardInterrupt",
             evalue="interrupted",
             traceback=["tb"],
+            journal_entries=_journal_entries(
+                code="sleep()",
+                status="error",
+                error_type="KeyboardInterrupt",
+            ),
         )
     )
 
@@ -294,6 +360,8 @@ def test_execution_store_projects_cancelled_journal_entries_from_merged_terminal
             journal_entries=[
                 HistoryRecord(
                     kind="kernel_execution",
+                    classification="internal",
+                    provenance_detail="kernel_execution",
                     ts="2026-03-10T00:00:00+00:00",
                     session_id="default",
                     execution_id="run-1",

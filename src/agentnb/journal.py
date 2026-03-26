@@ -4,27 +4,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .execution import ExecutionRecord, ExecutionStore
+from .execution import ExecutionStore
 from .history import (
     FailureOrigin,
+    HistoryClassification,
+    HistoryProvenanceDetail,
     HistoryRecord,
     HistoryStore,
-    kernel_execution_record,
-    user_command_record,
 )
 from .session import DEFAULT_SESSION_ID
 
-JournalClassification = Literal["replayable", "inspection", "control", "internal"]
 JournalProvenanceSource = Literal["history_store", "execution_store"]
-JournalProvenanceDetail = Literal[
-    "history_record",
-    "projected_kernel_execution",
-    "projected_user_command",
-]
-
-_REPLAYABLE_COMMAND_TYPES = frozenset({"exec", "reset"})
-_INSPECTION_COMMAND_TYPES = frozenset({"vars", "inspect", "history"})
-_CONTROL_COMMAND_TYPES = frozenset({"reload", "interrupt", "start", "stop"})
+JournalProvenanceDetail = HistoryProvenanceDetail
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -59,7 +50,7 @@ class JournalEntry:
     command_type: str
     label: str
     user_visible: bool
-    classification: JournalClassification
+    classification: HistoryClassification
     provenance_source: JournalProvenanceSource
     provenance_detail: JournalProvenanceDetail
     input: str | None = None
@@ -84,6 +75,9 @@ class JournalEntry:
             "command_type": self.command_type,
             "label": self.label,
             "user_visible": self.user_visible,
+            "classification": self.classification,
+            "provenance_source": self.provenance_source,
+            "provenance_detail": self.provenance_detail,
             **({"execution_id": self.execution_id} if self.execution_id is not None else {}),
             **({"input": self.input} if self.input is not None else {}),
             **({"code": self.code} if self.code is not None else {}),
@@ -100,7 +94,6 @@ class JournalEntry:
         record: HistoryRecord,
         *,
         provenance_source: JournalProvenanceSource = "history_store",
-        provenance_detail: JournalProvenanceDetail = "history_record",
     ) -> JournalEntry:
         return cls(
             kind=record.kind,
@@ -112,9 +105,9 @@ class JournalEntry:
             command_type=record.command_type,
             label=record.label,
             user_visible=record.user_visible,
-            classification=_classify_entry(record.command_type, record.user_visible),
+            classification=record.classification,
             provenance_source=provenance_source,
-            provenance_detail=provenance_detail,
+            provenance_detail=record.provenance_detail,
             input=record.input,
             code=record.code,
             origin=record.origin,
@@ -233,58 +226,11 @@ class CommandJournal:
         for record in records:
             if record.status not in {"ok", "error"}:
                 continue
-            entries.extend(self._project_execution_record(record))
-        return entries
-
-    def _project_execution_record(self, record: ExecutionRecord) -> list[JournalEntry]:
-        if record.journal_entries:
-            return [
-                JournalEntry.from_history_record(
-                    entry,
-                    provenance_source="execution_store",
-                    provenance_detail=_execution_provenance_detail(entry),
-                )
+            entries.extend(
+                JournalEntry.from_history_record(entry, provenance_source="execution_store")
                 for entry in record.journal_entries
-            ]
-
-        label = "reset" if record.command_type == "reset" else "exec"
-        helper_label = (
-            "reset kernel state" if record.command_type == "reset" else "exec kernel execution"
-        )
-        outcome = record.outcome()
-        return [
-            JournalEntry.from_history_record(
-                kernel_execution_record(
-                    ts=record.ts,
-                    session_id=record.session_id,
-                    execution_id=record.execution_id,
-                    command_type=record.command_type,
-                    label=helper_label,
-                    code=record.code,
-                    origin="execution_service",
-                    outcome=outcome,
-                    failure_origin=_failure_origin_for_record(record),
-                ),
-                provenance_source="execution_store",
-                provenance_detail="projected_kernel_execution",
-            ),
-            JournalEntry.from_history_record(
-                user_command_record(
-                    ts=record.ts,
-                    session_id=record.session_id,
-                    execution_id=record.execution_id,
-                    command_type=record.command_type,
-                    label=label,
-                    input_text=record.code,
-                    code=record.code,
-                    origin="execution_service",
-                    outcome=outcome,
-                    failure_origin=_failure_origin_for_record(record),
-                ),
-                provenance_source="execution_store",
-                provenance_detail="projected_user_command",
-            ),
-        ]
+            )
+        return entries
 
     def _apply_query(
         self,
@@ -309,31 +255,3 @@ class CommandJournal:
         if query.last is not None:
             return selected[-query.last :]
         return selected
-
-
-def _classify_entry(command_type: str, user_visible: bool) -> JournalClassification:
-    if not user_visible:
-        return "internal"
-    if command_type in _REPLAYABLE_COMMAND_TYPES:
-        return "replayable"
-    if command_type in _INSPECTION_COMMAND_TYPES:
-        return "inspection"
-    if command_type in _CONTROL_COMMAND_TYPES:
-        return "control"
-    return "control"
-
-
-def _execution_provenance_detail(record: HistoryRecord) -> JournalProvenanceDetail:
-    if record.kind == "kernel_execution":
-        return "projected_kernel_execution"
-    return "projected_user_command"
-
-
-def _failure_origin_for_record(record: ExecutionRecord) -> FailureOrigin | None:
-    if record.failure_origin is not None:
-        return record.failure_origin
-    if record.status != "error":
-        return None
-    if record.ename == "SessionBusyError":
-        return "control"
-    return "kernel"

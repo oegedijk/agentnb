@@ -586,7 +586,7 @@ def test_app_history_compacts_entries_and_applies_last_selection(project_dir) ->
             user_visible=True,
             classification="replayable",
             provenance_source="history_store",
-            provenance_detail="history_record",
+            provenance_detail="user_command",
             input="beta = 2\nbeta + 1",
         ),
         JournalEntry(
@@ -601,7 +601,7 @@ def test_app_history_compacts_entries_and_applies_last_selection(project_dir) ->
             user_visible=True,
             classification="inspection",
             provenance_source="history_store",
-            provenance_detail="history_record",
+            provenance_detail="user_command",
         ),
     ]
     app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))

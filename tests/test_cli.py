@@ -91,6 +91,40 @@ def _write_module(project_dir: Path, name: str, body: str) -> None:
     (project_dir / f"{name}.py").write_text(body, encoding="utf-8")
 
 
+def test_cli_exec_rejects_legacy_state_without_manifest(
+    cli_runner: CliRunner,
+    project_dir: Path,
+) -> None:
+    state_dir = project_dir / ".agentnb"
+    state_dir.mkdir()
+    (state_dir / "executions.jsonl").write_text(
+        json.dumps(
+            {
+                "execution_id": "run-1",
+                "ts": "2026-03-10T00:00:00+00:00",
+                "session_id": "default",
+                "command_type": "exec",
+                "status": "ok",
+                "duration_ms": 1,
+                "result": "2",
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = cli_runner.invoke(
+        main,
+        ["exec", "--project", str(project_dir), "--json", "1 + 1"],
+    )
+
+    assert result.exit_code == 1
+    payload = _payload(result.output)
+    assert _error(payload)["code"] == "STATE_SCHEMA_INCOMPATIBLE"
+    assert _error(payload)["message"] == "State manifest is missing for existing state."
+
+
 def _ok_execution(
     *,
     result: str | None = None,
@@ -174,7 +208,7 @@ def _journal_entry(
         if not user_visible
         else ("replayable" if command_type in {"exec", "reset"} else "inspection"),
         provenance_source="history_store",
-        provenance_detail="history_record",
+        provenance_detail="kernel_execution" if kind == "kernel_execution" else "user_command",
         input=input_text,
         code=code,
         error_type=error_type,

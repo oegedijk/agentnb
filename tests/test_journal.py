@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from agentnb.contracts import ExecutionEvent
+from agentnb.errors import StateCompatibilityError
 from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.history import kernel_execution_record, user_command_record
 from agentnb.journal import CommandJournal, JournalQuery
@@ -262,7 +262,7 @@ def test_command_journal_select_can_filter_by_execution_id(populated_journal: Pa
     assert [entry.label for entry in selection.entries] == ["exec kernel execution", "exec"]
 
 
-def test_command_journal_prefers_persisted_journal_entries_over_fallback_projection(
+def test_command_journal_reads_persisted_execution_journal_entries(
     project_dir: Path,
 ) -> None:
     ExecutionStore(project_dir).append(
@@ -280,6 +280,7 @@ def test_command_journal_prefers_persisted_journal_entries_over_fallback_project
                     ts="2026-03-10T00:00:01+00:00",
                     session_id="default",
                     execution_id="run-1",
+                    classification="internal",
                     command_type="exec",
                     label="persisted helper",
                     code="alpha = 1\nalpha",
@@ -292,6 +293,7 @@ def test_command_journal_prefers_persisted_journal_entries_over_fallback_project
                     ts="2026-03-10T00:00:01+00:00",
                     session_id="default",
                     execution_id="run-1",
+                    classification="replayable",
                     command_type="exec",
                     label="persisted exec",
                     input_text="alpha = 1\nalpha",
@@ -316,39 +318,12 @@ def test_command_journal_prefers_persisted_journal_entries_over_fallback_project
         "execution_store",
     ]
     assert [entry.provenance_detail for entry in selection.entries] == [
-        "projected_kernel_execution",
-        "projected_user_command",
+        "kernel_execution",
+        "user_command",
     ]
 
 
-def test_command_journal_falls_back_to_projected_entries_when_persisted_journal_is_absent(
-    project_dir: Path,
-    journal_builder: dict[str, Any],
-) -> None:
-    journal_builder["execution"](
-        execution_id="run-1",
-        ts="2026-03-10T00:00:01+00:00",
-        session_id="default",
-        command_type="exec",
-        status="ok",
-        duration_ms=12,
-        code="alpha = 1\nalpha",
-        result="1",
-    )
-
-    selection = CommandJournal().select(
-        project_root=project_dir,
-        query=JournalQuery(session_id="default", include_internal=True),
-    )
-
-    assert [entry.label for entry in selection.entries] == ["exec kernel execution", "exec"]
-    assert [entry.provenance_source for entry in selection.entries] == [
-        "execution_store",
-        "execution_store",
-    ]
-
-
-def test_command_journal_fallback_projection_preserves_projected_cancelled_error(
+def test_command_journal_rejects_terminal_exec_without_persisted_journal_entries(
     project_dir: Path,
 ) -> None:
     ExecutionStore(project_dir).append(
@@ -357,29 +332,18 @@ def test_command_journal_fallback_projection_preserves_projected_cancelled_error
             ts="2026-03-10T00:00:01+00:00",
             session_id="default",
             command_type="exec",
-            status="error",
+            status="ok",
             duration_ms=12,
-            code="sleep()",
-            cancel_requested=True,
-            events=[
-                ExecutionEvent(
-                    kind="error",
-                    content="interrupted",
-                    metadata={"ename": "KeyboardInterrupt", "traceback": ["tb"]},
-                )
-            ],
+            code="alpha = 1\nalpha",
+            result="1",
         )
     )
 
-    selection = CommandJournal().select(
-        project_root=project_dir,
-        query=JournalQuery(session_id="default", include_internal=True),
-    )
-
-    assert [entry.error_type for entry in selection.entries] == [
-        "CancelledError",
-        "CancelledError",
-    ]
+    with pytest.raises(StateCompatibilityError):
+        CommandJournal().select(
+            project_root=project_dir,
+            query=JournalQuery(session_id="default", include_internal=True),
+        )
 
 
 def test_command_journal_entries_include_classification_and_provenance(
@@ -397,6 +361,6 @@ def test_command_journal_entries_include_classification_and_provenance(
     assert by_label["reset"].classification == "replayable"
     assert by_label["exec kernel execution"].classification == "internal"
     assert by_label["exec"].provenance_source == "execution_store"
-    assert by_label["exec"].provenance_detail == "projected_user_command"
+    assert by_label["exec"].provenance_detail == "user_command"
     assert by_label["vars"].provenance_source == "history_store"
-    assert by_label["vars"].provenance_detail == "history_record"
+    assert by_label["vars"].provenance_detail == "user_command"

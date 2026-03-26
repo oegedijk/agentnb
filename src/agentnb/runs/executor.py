@@ -136,10 +136,9 @@ class _ExecutionProgressSink(ExecutionSink):
         self._accumulator.accept(event)
         elapsed_ms = int((time.monotonic() - self._started) * 1000)
         snapshot = self._accumulator.build(duration_ms=elapsed_ms)
-        status = "error" if snapshot.status == "error" else "running"
 
         self._run.replace(
-            status=status,
+            status="running",
             duration_ms=elapsed_ms,
             stdout=snapshot.stdout,
             stderr=snapshot.stderr,

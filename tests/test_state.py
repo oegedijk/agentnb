@@ -78,7 +78,7 @@ def test_state_repository_roundtrips_manifest(project_dir) -> None:
     repository = StateRepository(project_dir)
     manifest = StateManifest(
         schema_version=STATE_SCHEMA_VERSION,
-        resource_versions={"history": "1", "executions": "1"},
+        resource_versions={"history": "2", "executions": "2"},
     )
 
     repository.save_manifest(manifest)
@@ -95,6 +95,19 @@ def test_state_repository_rejects_incompatible_manifest_schema(project_dir) -> N
         repository.ensure_compatible()
 
 
+def test_state_repository_rejects_incompatible_resource_versions(project_dir) -> None:
+    repository = StateRepository(project_dir)
+    repository.save_manifest(
+        StateManifest(
+            schema_version=STATE_SCHEMA_VERSION,
+            resource_versions={"history": "1", "executions": "1"},
+        )
+    )
+
+    with pytest.raises(StateCompatibilityError):
+        repository.ensure_compatible()
+
+
 def test_state_repository_rejects_unknown_manifest_resources(project_dir) -> None:
     repository = StateRepository(project_dir)
     repository.save_manifest(
@@ -102,6 +115,30 @@ def test_state_repository_rejects_unknown_manifest_resources(project_dir) -> Non
             schema_version=STATE_SCHEMA_VERSION,
             resource_versions={"future_resource": "1"},
         )
+    )
+
+    with pytest.raises(StateCompatibilityError):
+        repository.ensure_compatible()
+
+
+def test_state_repository_rejects_existing_state_without_manifest(project_dir) -> None:
+    repository = StateRepository(project_dir)
+    repository.ensure_state_dir()
+    repository.executions_file.write_text(
+        json.dumps(
+            {
+                "execution_id": "run-1",
+                "ts": "2026-03-10T00:00:00+00:00",
+                "session_id": "default",
+                "command_type": "exec",
+                "status": "ok",
+                "duration_ms": 1,
+                "result": "2",
+            },
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
     with pytest.raises(StateCompatibilityError):
@@ -205,7 +242,7 @@ def test_state_repository_allocates_and_commits_snapshot_descriptors(project_dir
     repository = StateRepository(project_dir)
     manifest = StateManifest(
         schema_version=STATE_SCHEMA_VERSION,
-        resource_versions={"history": "1", "executions": "1", "snapshots": "1"},
+        resource_versions={"history": "2", "executions": "2", "snapshots": "1"},
     )
 
     allocation = repository.allocate_snapshot(
@@ -337,6 +374,7 @@ def test_runtime_history_surfaces_manifest_compatibility_errors(project_dir) -> 
     HistoryStore(project_dir).append(
         user_command_record(
             session_id="default",
+            classification="inspection",
             command_type="vars",
             label="vars",
             status="ok",

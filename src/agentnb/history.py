@@ -12,6 +12,8 @@ from .session import DEFAULT_SESSION_ID
 from .state import StateRepository
 
 HistoryKind = Literal["user_command", "kernel_execution"]
+HistoryClassification = Literal["replayable", "inspection", "control", "internal"]
+HistoryProvenanceDetail = Literal["user_command", "kernel_execution"]
 FailureOrigin = Literal["kernel", "control"]
 
 _PREVIEW_LIMIT = 160
@@ -19,6 +21,8 @@ _PREVIEW_LIMIT = 160
 
 class HistoryRecordPayload(TypedDict, total=False):
     kind: HistoryKind
+    classification: HistoryClassification
+    provenance_detail: HistoryProvenanceDetail
     ts: str
     session_id: str
     execution_id: str
@@ -39,6 +43,8 @@ class HistoryRecordPayload(TypedDict, total=False):
 @dataclass(slots=True)
 class HistoryRecord:
     kind: HistoryKind
+    classification: HistoryClassification
+    provenance_detail: HistoryProvenanceDetail
     ts: str
     session_id: str
     execution_id: str | None
@@ -58,6 +64,8 @@ class HistoryRecord:
     def to_dict(self) -> HistoryRecordPayload:
         payload: HistoryRecordPayload = {
             "kind": self.kind,
+            "classification": self.classification,
+            "provenance_detail": self.provenance_detail,
             "ts": self.ts,
             "session_id": self.session_id,
             "status": self.status,
@@ -91,6 +99,20 @@ class HistoryRecord:
                 HistoryKind,
                 _require_literal(payload, "kind", {"user_command", "kernel_execution"}),
             ),
+            classification=cast(
+                HistoryClassification,
+                _require_literal(
+                    payload,
+                    "classification",
+                    {"replayable", "inspection", "control", "internal"},
+                ),
+            ),
+            provenance_detail=cast(
+                HistoryProvenanceDetail,
+                _require_literal(
+                    payload, "provenance_detail", {"user_command", "kernel_execution"}
+                ),
+            ),
             ts=_require_str(payload, "ts"),
             session_id=_require_str(payload, "session_id"),
             execution_id=_optional_str(payload, "execution_id"),
@@ -118,8 +140,7 @@ class HistoryStore:
         self.history_file = self.repository.history_file
 
     def append(self, record: HistoryRecord) -> None:
-        self.repository.ensure_compatible()
-        self.repository.ensure_state_dir()
+        self.repository.ensure_initialized()
         with self.history_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=True))
             handle.write("\n")
@@ -160,6 +181,7 @@ def user_command_record(
     ts: str | None = None,
     session_id: str,
     execution_id: str | None = None,
+    classification: HistoryClassification,
     command_type: str,
     label: str,
     input_text: str | None = None,
@@ -190,6 +212,8 @@ def user_command_record(
     resolved_error_type = resolved_outcome.ename
     return HistoryRecord(
         kind="user_command",
+        classification=classification,
+        provenance_detail="user_command",
         ts=utc_now_iso() if ts is None else ts,
         session_id=session_id,
         execution_id=execution_id,
@@ -218,6 +242,7 @@ def kernel_execution_record(
     ts: str | None = None,
     session_id: str,
     execution_id: str | None = None,
+    classification: HistoryClassification,
     command_type: str,
     label: str,
     code: str | None,
@@ -247,6 +272,8 @@ def kernel_execution_record(
     resolved_error_type = resolved_outcome.ename
     return HistoryRecord(
         kind="kernel_execution",
+        classification=classification,
+        provenance_detail="kernel_execution",
         ts=utc_now_iso() if ts is None else ts,
         session_id=session_id,
         execution_id=execution_id,

@@ -178,7 +178,7 @@ def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
             user_visible=True,
             classification="replayable",
             provenance_source="history_store",
-            provenance_detail="history_record",
+            provenance_detail="user_command",
             input=(
                 "url = 'https://example.com/really/long/path/to/resource?"
                 "alpha=1&beta=2&gamma=3'\nurl"
@@ -198,7 +198,7 @@ def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
             user_visible=True,
             classification="replayable",
             provenance_source="history_store",
-            provenance_detail="history_record",
+            provenance_detail="user_command",
             error_type="ZeroDivisionError",
         )
     )
@@ -215,7 +215,7 @@ def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
             user_visible=False,
             classification="internal",
             provenance_source="history_store",
-            provenance_detail="history_record",
+            provenance_detail="kernel_execution",
             code="value = 42\nvalue",
         )
     )
@@ -232,7 +232,7 @@ def test_compact_history_entry_formats_exec_preview_and_errors() -> None:
             user_visible=False,
             classification="internal",
             provenance_source="history_store",
-            provenance_detail="history_record",
+            provenance_detail="kernel_execution",
             error_type="ZeroDivisionError",
         )
     )
@@ -260,7 +260,7 @@ def test_compact_history_entry_preserves_multiline_code_preview() -> None:
             user_visible=True,
             classification="replayable",
             provenance_source="history_store",
-            provenance_detail="history_record",
+            provenance_detail="user_command",
             code="a = 1\nb = 2\nc = a + b\nc",
             error_type="NameError",
         )

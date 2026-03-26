@@ -86,13 +86,13 @@ def test_recording_contract_is_canonical_for_exec_inspect_and_reset(
     assert exec_user.classification == "replayable"
     assert exec_internal.classification == "internal"
     assert exec_user.provenance_source == "execution_store"
-    assert exec_internal.provenance_detail == "projected_kernel_execution"
+    assert exec_internal.provenance_detail == "kernel_execution"
     assert exec_user.code == "alpha = 41\nalpha + 1"
 
     assert inspect_user.classification == "inspection"
     assert inspect_internal.classification == "internal"
     assert inspect_user.provenance_source == "history_store"
-    assert inspect_internal.provenance_detail == "history_record"
+    assert inspect_internal.provenance_detail == "kernel_execution"
 
     assert reset_user.execution_id == reset_run.record.execution_id
     assert reset_internal.execution_id == reset_run.record.execution_id

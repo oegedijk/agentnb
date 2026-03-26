@@ -21,6 +21,7 @@ from agentnb.errors import (
 from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.history import HistoryStore
 from agentnb.kernel.backend import BackendExecutionTimeout
+from agentnb.recording import CommandRecorder
 from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState, SessionResolutionPolicy
 from agentnb.session import SessionInfo, SessionStore
 from tests.conftest import TestLocalIPythonBackend
@@ -232,6 +233,19 @@ def test_runtime_list_sessions_uses_execution_history_for_last_activity(project_
             status="ok",
             duration_ms=12,
             result="2",
+            journal_entries=CommandRecorder()
+            .for_execution(
+                command_type="exec",
+                code=None,
+            )
+            .build_records(
+                ts="2026-03-10T00:00:00+00:00",
+                session_id="analysis",
+                execution_id="run-1",
+                status="ok",
+                duration_ms=12,
+                result="2",
+            ),
         )
     )
 

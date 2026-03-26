@@ -303,49 +303,90 @@ What is still incomplete:
   compatibility callers and output/projection fallbacks.
 - some package API and serializer contracts still legitimately expose payload
   `TypedDict`s at the public wire edge.
-- provenance remains split across write-time recording and read-time
-  reconstruction:
-  - `recording.py`
-  - `history.py`
-  - `journal.py`
 - `output.py` and `projection.py` still keep some mapping-based fallbacks for
   responses that were not built from typed command data.
 
+### Tranche 4: Authoritative Provenance + Explicit State Cutover
+
+Status: done
+
+Completed in the current refactor:
+
+- `recording.py` now owns first-class write-time provenance through explicit
+  command record specs instead of relying on read-time classification.
+- `history.py` now persists canonical provenance metadata on every history
+  record:
+  - `classification`
+  - `provenance_detail`
+- exec/reset/vars/inspect/reload now author provenance at record creation time
+  with stable semantics for:
+  - replayable vs inspection vs control vs internal
+  - user command vs kernel execution
+- `journal.py` is now a selector/query layer over persisted history records and
+  persisted run journal entries; it no longer reconstructs execution
+  provenance from partial run state.
+- run persistence now treats terminal exec/reset records without persisted
+  `journal_entries` as invalid state instead of silently rebuilding synthetic
+  history on read.
+- `runs/executor.py` progress snapshots were tightened so streamed error events
+  do not prematurely flip an active background run into an apparent terminal
+  error before finalization.
+- the state boundary now owns the cutover explicitly:
+  - state schema advanced to `2`
+  - `history` and `executions` resource versions advanced to `2`
+  - `StateRepository.ensure_compatible()` now rejects stale resource versions
+  - existing versioned `.agentnb/` state without a manifest now fails fast at
+    the state boundary instead of later in execution-history readers
+- direct recorder tests now assert provenance construction at the owning module.
+- runtime/CLI compatibility tests now cover the upgrade boundary rather than
+  relying only on low-level execution-store tests.
+
+What this tranche intentionally did not do:
+
+- it did not split `state.py` into separate persistence-domain modules
+- it did not remove the remaining command-data compatibility adapters
+- it did not deepen or remove the `execution.py` / `ops.py` facades
+- it did not remove the CLI dependency from background execution
+
+What is still incomplete:
+
+- `state.py` still mixes:
+  - session/runtime persistence
+  - execution/history persistence
+  - snapshot/export/artifact persistence
+  - manifest/resource-version policy
+- `execution.py` and `ops.py` still act partly as app-facing facades and partly
+  as delegation layers rather than clearly deep owning modules.
+- background run bootstrapping still depends on the CLI entrypoint through the
+  hidden `_background-run` command.
+- `SerializedCommandData` / `compat_command_data(...)` and some
+  mapping-oriented output/projection fallbacks still remain at explicit
+  compatibility edges.
+
 ## Next Tranche
 
-The next highest-value work is now **authoritative provenance**. The response
-and error/context seams are strong enough that the next deep ownership problem
-should be addressed directly rather than continuing to polish compatibility
-edges in isolation.
+The next highest-value work is now **splitting `state.py` into explicit
+persistence domains**. Provenance and compatibility cutover policy are now
+strong enough that the biggest remaining ownership problem is the state layer
+itself.
 
 That tranche should include:
 
-- introducing one write-time provenance model that owns:
-  - command kind/classification
-  - user-visible vs internal intent
-  - replayability
-  - failure origin
-  - preview/error metadata captured at record time
-- making `recording.py` the authoritative constructor for persisted command/run
-  provenance, instead of letting `journal.py` reconstruct equivalent entries
-  from partial store data
-- changing `history.py` and run persistence so they store enough canonical
-  provenance metadata that `journal.py` becomes a selector/query layer rather
-  than a projection/reconstruction owner
-- eliminating `_project_execution_record(...)` style synthetic provenance when
-  a run record lacks journal entries; missing provenance should become an
-  explicit persistence problem, not something routinely rebuilt on read
-- ensuring replay/verify-style future features can rely on a single honest
-  source for:
-  - what command happened
-  - what user-visible record it produced
-  - whether the failure was kernel vs control
-  - whether the entry is replayable
-- adding direct boundary tests at the owning modules:
-  - `recording.py` for provenance construction
-  - `history.py` / run persistence for durable storage shape
-  - `journal.py` for selection/filtering only
+- separating session/runtime state from durable command/run history state and
+  from artifact/export persistence, so each persisted domain has one owning
+  module.
+- moving manifest/resource-version policy for each persisted domain behind the
+  owning repository instead of leaving `StateRepository` as a broad catch-all.
+- making the state layer expose narrower repositories or layouts for:
+  - runtime/session files
+  - history/execution journals
+  - snapshots/exports/artifacts
+- keeping `.agentnb/` path layout ownership centralized while avoiding one
+  repository class that understands every resource lifecycle and compatibility
+  rule.
+- adding boundary tests at the new owning modules rather than routing all state
+  assertions through the monolithic repository.
 
-After that, the likely tranche is to split `state.py` into clearer persistence
-domains and then revisit the remaining shallow facades (`execution.py`,
-`ops.py`) and CLI leakage into run-control.
+After that, the likely tranche is to revisit the remaining shallow facades
+(`execution.py`, `ops.py`) and then remove the CLI dependency from background
+run-control.

@@ -14,6 +14,7 @@ def test_history_store_filters_internal_and_errors(project_dir) -> None:
     store.append(
         user_command_record(
             session_id="default",
+            classification="replayable",
             command_type="exec",
             label="exec",
             input_text="1 + 1",
@@ -24,6 +25,7 @@ def test_history_store_filters_internal_and_errors(project_dir) -> None:
     store.append(
         kernel_execution_record(
             session_id="default",
+            classification="internal",
             command_type="vars",
             label="vars helper",
             code="print('internal helper')",
@@ -48,6 +50,7 @@ def test_history_record_compacts_output_previews(project_dir) -> None:
     store.append(
         user_command_record(
             session_id="default",
+            classification="replayable",
             command_type="exec",
             label="exec",
             input_text="print('x')",

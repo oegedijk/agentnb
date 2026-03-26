@@ -6,6 +6,8 @@ from .contracts import ExecutionResult
 from .execution_models import ExecutionOutcome
 from .history import (
     FailureOrigin,
+    HistoryClassification,
+    HistoryProvenanceDetail,
     HistoryRecord,
     HistoryStore,
     kernel_execution_record,
@@ -14,12 +16,18 @@ from .history import (
 
 
 @dataclass(slots=True, frozen=True)
+class CommandProvenance:
+    classification: HistoryClassification
+    detail: HistoryProvenanceDetail
+
+
+@dataclass(slots=True, frozen=True)
 class CommandRecordSpec:
+    provenance: CommandProvenance
     label: str
     origin: str | None = None
     input_text: str | None = None
     code: str | None = None
-    user_visible: bool = True
 
 
 @dataclass(slots=True, frozen=True)
@@ -198,11 +206,12 @@ class CommandRecording:
         stdout: str | None,
         result: str | None,
     ) -> HistoryRecord:
-        if spec.user_visible:
+        if spec.provenance.detail == "user_command":
             return user_command_record(
                 ts=ts,
                 session_id=session_id,
                 execution_id=execution_id,
+                classification=spec.provenance.classification,
                 command_type=self.command_type,
                 label=spec.label,
                 input_text=spec.input_text,
@@ -222,6 +231,7 @@ class CommandRecording:
             ts=ts,
             session_id=session_id,
             execution_id=execution_id,
+            classification=spec.provenance.classification,
             command_type=self.command_type,
             label=spec.label,
             code=spec.code,
@@ -243,39 +253,66 @@ class CommandRecorder:
         return CommandRecording(
             command_type="exec",
             user=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="replayable",
+                    detail="user_command",
+                ),
                 label="exec",
                 input_text=code,
                 code=code,
                 origin="execution_service",
             ),
             internal=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="internal",
+                    detail="kernel_execution",
+                ),
                 label="exec kernel execution",
                 code=code,
                 origin="execution_service",
-                user_visible=False,
             ),
         )
 
     def reset(self) -> CommandRecording:
         return CommandRecording(
             command_type="reset",
-            user=CommandRecordSpec(label="reset", origin="execution_service"),
+            user=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="replayable",
+                    detail="user_command",
+                ),
+                label="reset",
+                origin="execution_service",
+            ),
             internal=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="internal",
+                    detail="kernel_execution",
+                ),
                 label="reset kernel state",
                 origin="execution_service",
-                user_visible=False,
             ),
         )
 
     def vars(self, *, code: str) -> CommandRecording:
         return CommandRecording(
             command_type="vars",
-            user=CommandRecordSpec(label="vars", origin="ops"),
+            user=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="inspection",
+                    detail="user_command",
+                ),
+                label="vars",
+                origin="ops",
+            ),
             internal=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="internal",
+                    detail="kernel_execution",
+                ),
                 label="vars helper",
                 code=code,
                 origin="ops_helper",
-                user_visible=False,
             ),
         )
 
@@ -283,15 +320,22 @@ class CommandRecorder:
         return CommandRecording(
             command_type="inspect",
             user=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="inspection",
+                    detail="user_command",
+                ),
                 label=f"inspect {name}",
                 input_text=name,
                 origin="ops",
             ),
             internal=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="internal",
+                    detail="kernel_execution",
+                ),
                 label=f"inspect {name} helper",
                 code=code,
                 origin="ops_helper",
-                user_visible=False,
             ),
         )
 
@@ -300,15 +344,22 @@ class CommandRecorder:
         return CommandRecording(
             command_type="reload",
             user=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="control",
+                    detail="user_command",
+                ),
                 label=label,
                 input_text=module_name,
                 origin="ops",
             ),
             internal=CommandRecordSpec(
+                provenance=CommandProvenance(
+                    classification="internal",
+                    detail="kernel_execution",
+                ),
                 label=f"{label} helper",
                 code=code,
                 origin="ops_helper",
-                user_visible=False,
             ),
         )
 

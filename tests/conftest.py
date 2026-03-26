@@ -16,6 +16,7 @@ from agentnb.execution import ExecutionRecord, ExecutionService, ExecutionStore
 from agentnb.history import HistoryRecord, HistoryStore, user_command_record
 from agentnb.kernel.backend import LocalIPythonBackend, _close_client, _hard_kill_signal
 from agentnb.ops import NotebookOps
+from agentnb.recording import CommandRecorder
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, pid_exists
 
@@ -127,10 +128,17 @@ def journal_builder(project_dir: Path):
         input_text: str | None = None,
         error_type: str | None = None,
     ) -> None:
+        if command_type in {"vars", "inspect", "history"}:
+            classification = "inspection"
+        elif command_type in {"reload", "interrupt", "start", "stop"}:
+            classification = "control"
+        else:
+            classification = "replayable"
         HistoryStore(project_dir).append(
             user_command_record(
                 ts=ts,
                 session_id=session_id,
+                classification=classification,
                 command_type=command_type,
                 label=label,
                 input_text=input_text,
@@ -154,6 +162,24 @@ def journal_builder(project_dir: Path):
         failure_origin: Literal["kernel", "control"] | None = None,
         journal_entries: list[HistoryRecord] | None = None,
     ) -> None:
+        if journal_entries is None and status in {"ok", "error"}:
+            journal_entries = (
+                CommandRecorder()
+                .for_execution(
+                    command_type=command_type,
+                    code=code,
+                )
+                .build_records(
+                    ts=ts,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    status=status,
+                    duration_ms=duration_ms,
+                    error_type=ename,
+                    failure_origin=failure_origin,
+                    result=result,
+                )
+            )
         ExecutionStore(project_dir).append(
             ExecutionRecord(
                 execution_id=execution_id,

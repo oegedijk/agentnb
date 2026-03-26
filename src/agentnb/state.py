@@ -17,7 +17,7 @@ from .errors import StateCompatibilityError
 
 STATE_DIR_NAME = ".agentnb"
 STATE_MANIFEST_FILE_NAME = "state-manifest.json"
-STATE_SCHEMA_VERSION = "1"
+STATE_SCHEMA_VERSION = "2"
 HISTORY_FILE_NAME = "history.jsonl"
 EXECUTIONS_FILE_NAME = "executions.jsonl"
 SESSION_PREFERENCES_FILE_NAME = "session-preferences.json"
@@ -37,6 +37,19 @@ _SESSION_RECORD_FILE_PATTERN = re.compile(r"^session-[a-f0-9]{12}\.json$")
 _KERNEL_CONNECTION_FILE_PATTERN = re.compile(r"^kernel-(.+)\.json$")
 _KERNEL_LOG_FILE_PATTERN = re.compile(r"^kernel-(.+)\.log$")
 _COMMAND_LOCK_ARTIFACT_PATTERN = re.compile(r"^command\.lock-(.+)$")
+HISTORY_RESOURCE_VERSION = "2"
+EXECUTIONS_RESOURCE_VERSION = "2"
+_SUPPORTED_RESOURCE_VERSIONS = {
+    "history": HISTORY_RESOURCE_VERSION,
+    "executions": EXECUTIONS_RESOURCE_VERSION,
+}
+
+
+def _default_resource_versions() -> dict[str, str]:
+    return {
+        "history": HISTORY_RESOURCE_VERSION,
+        "executions": EXECUTIONS_RESOURCE_VERSION,
+    }
 
 
 @dataclass(slots=True, frozen=True)
@@ -149,7 +162,7 @@ class CommandLockInfo:
 @dataclass(slots=True, frozen=True)
 class StateManifest:
     schema_version: str = STATE_SCHEMA_VERSION
-    resource_versions: dict[str, str] = field(default_factory=dict)
+    resource_versions: dict[str, str] = field(default_factory=_default_resource_versions)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"schema_version": self.schema_version}
@@ -452,8 +465,12 @@ class StateRepository:
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def ensure_initialized(self) -> StateManifest:
-        manifest = self.ensure_compatible()
         self.ensure_state_dir()
+        if not self.manifest_file.exists():
+            manifest = StateManifest()
+            self.save_manifest(manifest)
+            return manifest
+        manifest = self.ensure_compatible()
         return manifest
 
     def ensure_gitignore_entry(self) -> bool:
@@ -477,6 +494,23 @@ class StateRepository:
 
     def manifest(self) -> StateManifest:
         if not self.manifest_file.exists():
+            has_versioned_state = any(
+                self.resource_path(name).exists()
+                for name in (
+                    "history",
+                    "executions",
+                    "session_preferences",
+                    "snapshots",
+                    "artifacts",
+                    "exports",
+                    "metadata",
+                )
+            )
+            if has_versioned_state:
+                raise StateCompatibilityError(
+                    "State manifest is missing for existing state.",
+                    data={"state_dir": str(self.state_dir)},
+                )
             return StateManifest()
         try:
             payload = json.loads(self.manifest_file.read_text(encoding="utf-8"))
@@ -526,6 +560,19 @@ class StateRepository:
             raise StateCompatibilityError(
                 "State manifest references unknown resources.",
                 data={"unknown_resources": unknown_resources},
+            )
+        unsupported_resource_versions = {
+            name: {
+                "manifest": manifest.resource_versions.get(name),
+                "supported": version,
+            }
+            for name, version in _SUPPORTED_RESOURCE_VERSIONS.items()
+            if manifest.resource_versions.get(name) != version
+        }
+        if unsupported_resource_versions:
+            raise StateCompatibilityError(
+                "State resource versions are incompatible.",
+                data={"resource_versions": unsupported_resource_versions},
             )
 
     def ensure_compatible(self) -> StateManifest:

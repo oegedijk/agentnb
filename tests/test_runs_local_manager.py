@@ -17,6 +17,7 @@ from agentnb.errors import (
 )
 from agentnb.execution import ExecutionRecord, ExecutionStore
 from agentnb.kernel.backend import BackendCapabilities
+from agentnb.recording import CommandRecorder
 from agentnb.runs import LocalRunManager, RunSpec
 from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
 from tests.helpers import install_fake_clock
@@ -48,6 +49,47 @@ def _active_record(
         duration_ms=0,
         code=code,
         worker_pid=worker_pid,
+    )
+
+
+def _terminal_record(
+    *,
+    execution_id: str = "run-1",
+    session_id: str = "default",
+    status: Literal["ok", "error"] = "ok",
+    code: str | None = "1 + 1",
+    duration_ms: int = 1,
+    worker_pid: int | None = None,
+    result: str | None = None,
+    ename: str | None = None,
+    events: list[ExecutionEvent] | None = None,
+) -> ExecutionRecord:
+    return ExecutionRecord(
+        execution_id=execution_id,
+        ts="2026-03-10T00:00:00+00:00",
+        session_id=session_id,
+        command_type="exec",
+        status=status,
+        duration_ms=duration_ms,
+        code=code,
+        worker_pid=worker_pid,
+        result=result,
+        ename=ename,
+        events=[] if events is None else events,
+        journal_entries=CommandRecorder()
+        .for_execution(
+            command_type="exec",
+            code=code,
+        )
+        .build_records(
+            ts="2026-03-10T00:00:00+00:00",
+            session_id=session_id,
+            execution_id=execution_id,
+            status=status,
+            duration_ms=duration_ms,
+            error_type=ename,
+            result=result,
+        ),
     )
 
 
@@ -371,17 +413,7 @@ def test_local_run_manager_submit_reset_does_not_persist_kernel_state_errors(
 
 
 def test_local_run_manager_wait_for_run_returns_completed_record(project_dir: Path) -> None:
-    ExecutionStore(project_dir).append(
-        ExecutionRecord(
-            execution_id="run-1",
-            ts="2026-03-10T00:00:00+00:00",
-            session_id="default",
-            command_type="exec",
-            status="ok",
-            duration_ms=12,
-            result="2",
-        )
-    )
+    ExecutionStore(project_dir).append(_terminal_record(duration_ms=12, result="2"))
 
     run = LocalRunManager(_runtime()).wait_for_run(
         project_root=project_dir,
@@ -448,18 +480,7 @@ def test_local_run_manager_helper_access_merges_run_wait_and_runtime_wait(
 
     def sleep_stub(seconds: float) -> None:
         clock.sleep(seconds)
-        store.append(
-            ExecutionRecord(
-                execution_id="run-1",
-                ts="2026-03-10T00:00:01+00:00",
-                session_id="default",
-                command_type="exec",
-                status="ok",
-                duration_ms=10,
-                worker_pid=123,
-                result="2",
-            )
-        )
+        store.append(_terminal_record(duration_ms=10, worker_pid=123, result="2"))
 
     mocker.patch("agentnb.runs.local_manager.time.sleep", side_effect=sleep_stub)
 
@@ -567,12 +588,7 @@ def test_local_run_manager_follow_run_replays_incremental_events(project_dir: Pa
 
     def sleep_stub(_: float) -> None:
         store.append(
-            ExecutionRecord(
-                execution_id="run-1",
-                ts="2026-03-10T00:00:01+00:00",
-                session_id="default",
-                command_type="exec",
-                status="ok",
+            _terminal_record(
                 duration_ms=10,
                 result="2",
                 events=[
@@ -636,12 +652,7 @@ def test_local_run_manager_follow_run_skip_history_emits_only_new_events(
 
     def sleep_stub(_: float) -> None:
         store.append(
-            ExecutionRecord(
-                execution_id="run-1",
-                ts="2026-03-10T00:00:01+00:00",
-                session_id="default",
-                command_type="exec",
-                status="ok",
+            _terminal_record(
                 duration_ms=10,
                 result="2",
                 events=[
@@ -728,18 +739,7 @@ def test_local_run_manager_cancel_run_returns_finished_state_when_run_completes_
 
     def interrupt_stub(**kwargs: object) -> None:
         del kwargs
-        store.append(
-            ExecutionRecord(
-                execution_id="run-1",
-                ts="2026-03-10T00:00:01+00:00",
-                session_id="default",
-                command_type="exec",
-                status="ok",
-                duration_ms=7,
-                worker_pid=123,
-                result="2",
-            )
-        )
+        store.append(_terminal_record(duration_ms=7, worker_pid=123, result="2"))
 
     interrupt = mocker.patch.object(runtime, "interrupt", side_effect=interrupt_stub)
 
@@ -790,17 +790,7 @@ def test_local_run_manager_cancel_run_stops_starting_session(project_dir: Path, 
 
 
 def test_local_run_manager_cancel_run_returns_unchanged_for_finished_run(project_dir: Path) -> None:
-    ExecutionStore(project_dir).append(
-        ExecutionRecord(
-            execution_id="run-1",
-            ts="2026-03-10T00:00:00+00:00",
-            session_id="default",
-            command_type="exec",
-            status="ok",
-            duration_ms=7,
-            result="2",
-        )
-    )
+    ExecutionStore(project_dir).append(_terminal_record(duration_ms=7, result="2"))
 
     payload = LocalRunManager(_runtime()).cancel_run(
         project_root=project_dir,
@@ -902,7 +892,7 @@ def test_local_run_manager_complete_background_run_persists_streamed_progress(
         )
         in_progress = ExecutionStore(project_dir).get("run-1")
         assert in_progress is not None
-        assert in_progress.status == "error"
+        assert in_progress.status == "running"
         assert in_progress.worker_pid == os.getpid()
         assert in_progress.stdout == "hello\n"
         assert in_progress.stderr == "warn\n"
@@ -952,16 +942,7 @@ def test_local_run_manager_complete_background_run_persists_streamed_progress(
     "record",
     [
         None,
-        ExecutionRecord(
-            execution_id="run-1",
-            ts="2026-03-10T00:00:00+00:00",
-            session_id="default",
-            command_type="exec",
-            status="ok",
-            duration_ms=1,
-            code="1 + 1",
-            worker_pid=123,
-        ),
+        _terminal_record(duration_ms=1, worker_pid=123),
         ExecutionRecord(
             execution_id="run-1",
             ts="2026-03-10T00:00:00+00:00",
@@ -1014,17 +995,7 @@ def test_local_run_manager_complete_background_run_preserves_external_terminal_w
 
     def execute_stub(**kwargs: object) -> ExecutionResult:
         del kwargs
-        store.append(
-            ExecutionRecord(
-                execution_id="run-1",
-                ts="2026-03-10T00:00:01+00:00",
-                session_id="default",
-                command_type="exec",
-                status="ok",
-                duration_ms=4,
-                result="external",
-            )
-        )
+        store.append(_terminal_record(duration_ms=4, result="external"))
         return ExecutionResult(
             status="ok",
             result="internal",

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from ..contracts import ExecutionEvent, ExecutionResult, ExecutionSink, utc_now_iso
-from ..errors import AgentNBException
+from ..errors import AgentNBException, StateCompatibilityError
 from ..execution_models import ExecutionOutcome, ExecutionTranscript
 from ..execution_output import OutputItem
 from ..history import HistoryRecord
@@ -106,7 +106,8 @@ class ExecutionRecord:
         self.stdout = outcome.stdout
         self.stderr = outcome.stderr
         self.result = outcome.result
-        self.status = "error" if outcome.status == "error" else self.status
+        if self.status in {"ok", "error"} and outcome.status == "error":
+            self.status = "error"
         self.ename = outcome.ename
         self.evalue = outcome.evalue
         self.traceback = outcome.traceback
@@ -343,8 +344,7 @@ class ExecutionStore:
         self.executions_file = self.repository.executions_file
 
     def append(self, record: ExecutionRecord) -> None:
-        self.repository.ensure_compatible()
-        self.repository.ensure_state_dir()
+        self.repository.ensure_initialized()
         with self.executions_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_storage_dict(), ensure_ascii=True))
             handle.write("\n")
@@ -377,7 +377,9 @@ class ExecutionStore:
             if previous is not None:
                 record = _merge_records(previous, record)
             entries_by_id[record.execution_id] = record
-        records = list(entries_by_id.values())
+        records = [
+            self._require_terminal_journal_entries(record) for record in entries_by_id.values()
+        ]
         if errors_only:
             records = [record for record in records if record.status == "error"]
         return records
@@ -387,6 +389,21 @@ class ExecutionStore:
             if record.execution_id == execution_id:
                 return record
         return None
+
+    def _require_terminal_journal_entries(self, record: ExecutionRecord) -> ExecutionRecord:
+        if record.command_type not in {"exec", "reset"}:
+            return record
+        if record.status not in {"ok", "error"}:
+            return record
+        if record.journal_entries:
+            return record
+        raise StateCompatibilityError(
+            "Execution record is missing persisted journal entries.",
+            data={
+                "execution_id": record.execution_id,
+                "command_type": record.command_type,
+            },
+        )
 
 
 @dataclass(slots=True)

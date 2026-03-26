@@ -11,7 +11,7 @@ from typing import Literal
 
 from ..errors import InvalidInputError, ProvisioningError
 from ..payloads import DoctorCheckPayload, DoctorPayload
-from ..state import StateRepository
+from ..state_layout import StateLayout
 
 IPYKERNEL_REQUIREMENT = "ipykernel>=6.0"
 
@@ -235,7 +235,7 @@ class KernelProvisioner:
         return unique
 
     def _check_state_directory(self) -> DoctorCheck:
-        state_dir = StateRepository(self.project_root).state_dir
+        state_dir = StateLayout(self.project_root).state_dir
         try:
             state_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(

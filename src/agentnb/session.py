@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from .errors import InvalidInputError
-from .state import CommandLockInfo, StateRepository
+from .state import CommandLockInfo
+from .state_runtime import RuntimeStateRepository
 
 DEFAULT_SESSION_ID = "default"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -83,8 +84,8 @@ def validate_session_id(session_id: str) -> str:
 
 class SessionStore:
     def __init__(self, project_root: Path, session_id: str = DEFAULT_SESSION_ID) -> None:
-        self.repository = StateRepository(project_root)
-        self.project_root = self.repository.project_root
+        self.repository = RuntimeStateRepository(resolve_project_root(override=project_root))
+        self.project_root = self.repository.layout.project_root
         self.session_id = validate_session_id(session_id)
         self.state = self.repository.session_runtime(self.session_id)
         self.state_dir = self.state.state_dir
@@ -182,7 +183,7 @@ class SessionStore:
 
     @classmethod
     def list_sessions(cls, project_root: Path) -> list[SessionInfo]:
-        repository = StateRepository(project_root)
+        repository = RuntimeStateRepository(resolve_project_root(override=project_root))
         repository.ensure_compatible()
         state_dir = repository.state_dir
         if not state_dir.exists():

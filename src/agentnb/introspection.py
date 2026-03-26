@@ -33,7 +33,7 @@ from .payloads import (
 from .recording import CommandRecorder, CommandRecording
 from .runtime import KernelRuntime, KernelWaitResult
 from .session import DEFAULT_SESSION_ID
-from .state import StateRepository
+from .state_layout import StateLayout
 
 PayloadT = TypeVar("PayloadT")
 
@@ -1177,7 +1177,7 @@ print(json.dumps(_payload, default=str))
 def _reload_helper(*, project_root: Path, module_name: str | None) -> KernelHelperRequest:
     escaped_module = repr(module_name)
     escaped_root = repr(str(project_root.resolve()))
-    escaped_state_dir = repr(str(StateRepository(project_root).state_dir))
+    escaped_state_dir = repr(str(StateLayout(project_root).state_dir))
     return KernelHelperRequest(
         command_type="reload",
         label="reload" if module_name is None else f"reload {module_name}",

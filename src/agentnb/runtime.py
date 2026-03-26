@@ -33,7 +33,8 @@ from .session import (
     SessionStore,
     StaleSessionReason,
 )
-from .state import CommandLockInfo, StateRepository
+from .state import CommandLockInfo
+from .state_runtime import RuntimeStateRepository
 
 WaitedFor = Literal["ready", "idle"]
 RuntimeStateKind = Literal["missing", "starting", "ready", "busy", "dead", "stale"]
@@ -498,7 +499,7 @@ class KernelRuntime:
         )
 
     def current_session_id(self, *, project_root: Path) -> str | None:
-        return StateRepository(project_root).session_preferences().current_session_id
+        return RuntimeStateRepository(project_root).session_preferences().current_session_id
 
     def is_live_session(self, *, project_root: Path, session_id: str) -> bool:
         for session in self.list_sessions(project_root=project_root, probe_backend=False):
@@ -522,7 +523,7 @@ class KernelRuntime:
         canonical_session_id = SessionStore(
             project_root=project_root, session_id=session_id
         ).session_id
-        StateRepository(project_root).set_current_session_id(canonical_session_id)
+        RuntimeStateRepository(project_root).set_current_session_id(canonical_session_id)
 
     def clear_current_session_id(
         self,
@@ -530,7 +531,7 @@ class KernelRuntime:
         project_root: Path,
         expected_session_id: str | None = None,
     ) -> None:
-        StateRepository(project_root).clear_current_session_id(
+        RuntimeStateRepository(project_root).clear_current_session_id(
             expected_session_id=expected_session_id
         )
 

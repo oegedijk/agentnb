@@ -5,15 +5,20 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .contracts import utc_now_iso
-from .errors import StateCompatibilityError
+
+if TYPE_CHECKING:
+    from .state_layout import StateLayout
+    from .state_manifest import StateManifestRepository
+    from .state_persisted_resources import PersistedResourceRepository
+    from .state_runtime import RuntimeStateRepository
 
 STATE_DIR_NAME = ".agentnb"
 STATE_MANIFEST_FILE_NAME = "state-manifest.json"
@@ -39,10 +44,6 @@ _KERNEL_LOG_FILE_PATTERN = re.compile(r"^kernel-(.+)\.log$")
 _COMMAND_LOCK_ARTIFACT_PATTERN = re.compile(r"^command\.lock-(.+)$")
 HISTORY_RESOURCE_VERSION = "2"
 EXECUTIONS_RESOURCE_VERSION = "2"
-_SUPPORTED_RESOURCE_VERSIONS = {
-    "history": HISTORY_RESOURCE_VERSION,
-    "executions": EXECUTIONS_RESOURCE_VERSION,
-}
 
 
 def _default_resource_versions() -> dict[str, str]:
@@ -374,615 +375,6 @@ def command_lock_file(state_dir: Path, session_id: str) -> Path:
     return state_dir / f"{COMMAND_LOCK_FILE_NAME}-{session_id}"
 
 
-@dataclass(slots=True, frozen=True)
-class StateRepository:
-    project_root: Path
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "project_root", self.project_root.resolve())
-
-    @property
-    def state_dir(self) -> Path:
-        return self.project_root / STATE_DIR_NAME
-
-    @property
-    def manifest_file(self) -> Path:
-        return self.state_dir / STATE_MANIFEST_FILE_NAME
-
-    @property
-    def history_file(self) -> Path:
-        return self.resource_path("history")
-
-    @property
-    def executions_file(self) -> Path:
-        return self.resource_path("executions")
-
-    @property
-    def legacy_session_file(self) -> Path:
-        return self.resource_path("legacy_session")
-
-    @property
-    def session_preferences_file(self) -> Path:
-        return self.resource_path("session_preferences")
-
-    @property
-    def snapshots_dir(self) -> Path:
-        return self.resource_path("snapshots")
-
-    @property
-    def artifacts_dir(self) -> Path:
-        return self.resource_path("artifacts")
-
-    @property
-    def exports_dir(self) -> Path:
-        return self.resource_path("exports")
-
-    @property
-    def metadata_dir(self) -> Path:
-        return self.resource_path("metadata")
-
-    def session_file(self, session_id: str) -> Path:
-        return self.session_state(session_id).session_record
-
-    def connection_file(self, session_id: str) -> Path:
-        return self.session_state(session_id).connection_file
-
-    def log_file(self, session_id: str) -> Path:
-        return self.session_state(session_id).log_file
-
-    def command_lock_file(self, session_id: str) -> Path:
-        return self.session_state(session_id).command_lock_file
-
-    def prune_session_runtime_artifacts(self, session_id: str) -> None:
-        self.session_state(session_id).clear_runtime_files()
-
-    def prune_orphaned_runtime_artifacts(self, *, active_session_ids: Collection[str]) -> list[str]:
-        active = {str(session_id) for session_id in active_session_ids}
-        removed: list[str] = []
-        if not self.state_dir.exists():
-            return removed
-
-        for path in sorted(self.state_dir.iterdir()):
-            if not path.is_file():
-                continue
-            session_id = _runtime_artifact_session_id(path.name)
-            if session_id is None or session_id in active:
-                continue
-            _safe_unlink(path)
-            removed.append(path.name)
-        return removed
-
-    def session_files(self) -> list[Path]:
-        if not self.state_dir.exists():
-            return []
-        return sorted(
-            path
-            for path in self.state_dir.iterdir()
-            if path.is_file() and _SESSION_RECORD_FILE_PATTERN.fullmatch(path.name)
-        )
-
-    def ensure_state_dir(self) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-
-    def ensure_initialized(self) -> StateManifest:
-        self.ensure_state_dir()
-        if not self.manifest_file.exists():
-            manifest = StateManifest()
-            self.save_manifest(manifest)
-            return manifest
-        manifest = self.ensure_compatible()
-        return manifest
-
-    def ensure_gitignore_entry(self) -> bool:
-        self.ensure_state_dir()
-        gitignore = self.project_root / ".gitignore"
-        entry = f"{STATE_DIR_NAME}/"
-
-        if not gitignore.exists():
-            gitignore.write_text(f"{entry}\n", encoding="utf-8")
-            return True
-
-        existing = gitignore.read_text(encoding="utf-8")
-        lines = existing.splitlines()
-        if entry in lines:
-            return False
-
-        suffix = "" if existing.endswith("\n") else "\n"
-        with gitignore.open("a", encoding="utf-8") as handle:
-            handle.write(f"{suffix}{entry}\n")
-        return True
-
-    def manifest(self) -> StateManifest:
-        if not self.manifest_file.exists():
-            has_versioned_state = any(
-                self.resource_path(name).exists()
-                for name in (
-                    "history",
-                    "executions",
-                    "session_preferences",
-                    "snapshots",
-                    "artifacts",
-                    "exports",
-                    "metadata",
-                )
-            )
-            if has_versioned_state:
-                raise StateCompatibilityError(
-                    "State manifest is missing for existing state.",
-                    data={"state_dir": str(self.state_dir)},
-                )
-            return StateManifest()
-        try:
-            payload = json.loads(self.manifest_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise StateCompatibilityError(
-                "State manifest is unreadable.",
-                data={"manifest_file": str(self.manifest_file)},
-            ) from exc
-        if not isinstance(payload, dict):
-            raise StateCompatibilityError(
-                "State manifest has an invalid shape.",
-                data={"manifest_file": str(self.manifest_file)},
-            )
-        try:
-            manifest = StateManifest.from_dict(payload)
-        except ValueError as exc:
-            raise StateCompatibilityError(
-                "State manifest is missing required fields.",
-                data={"manifest_file": str(self.manifest_file)},
-            ) from exc
-        self.validate_manifest(manifest)
-        return manifest
-
-    def save_manifest(self, manifest: StateManifest) -> None:
-        self.ensure_state_dir()
-        self.manifest_file.write_text(
-            json.dumps(manifest.to_dict(), ensure_ascii=True),
-            encoding="utf-8",
-        )
-
-    def validate_manifest(self, manifest: StateManifest) -> None:
-        if manifest.schema_version != STATE_SCHEMA_VERSION:
-            raise StateCompatibilityError(
-                (
-                    f"State schema {manifest.schema_version} is incompatible with "
-                    f"agentnb schema {STATE_SCHEMA_VERSION}."
-                ),
-                data={
-                    "manifest_schema_version": manifest.schema_version,
-                    "supported_schema_version": STATE_SCHEMA_VERSION,
-                },
-            )
-
-        known_resources = set(self.resources())
-        unknown_resources = sorted(set(manifest.resource_versions) - known_resources)
-        if unknown_resources:
-            raise StateCompatibilityError(
-                "State manifest references unknown resources.",
-                data={"unknown_resources": unknown_resources},
-            )
-        unsupported_resource_versions = {
-            name: {
-                "manifest": manifest.resource_versions.get(name),
-                "supported": version,
-            }
-            for name, version in _SUPPORTED_RESOURCE_VERSIONS.items()
-            if manifest.resource_versions.get(name) != version
-        }
-        if unsupported_resource_versions:
-            raise StateCompatibilityError(
-                "State resource versions are incompatible.",
-                data={"resource_versions": unsupported_resource_versions},
-            )
-
-    def ensure_compatible(self) -> StateManifest:
-        return self.manifest()
-
-    def session_preferences(self) -> SessionPreferences:
-        self.ensure_compatible()
-        if not self.session_preferences_file.exists():
-            return SessionPreferences()
-        try:
-            payload = json.loads(self.session_preferences_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            _safe_unlink(self.session_preferences_file)
-            return SessionPreferences()
-        if not isinstance(payload, dict):
-            _safe_unlink(self.session_preferences_file)
-            return SessionPreferences()
-        try:
-            return SessionPreferences.from_dict(payload)
-        except ValueError:
-            _safe_unlink(self.session_preferences_file)
-            return SessionPreferences()
-
-    def save_session_preferences(self, preferences: SessionPreferences) -> None:
-        self.ensure_initialized()
-        self.session_preferences_file.write_text(
-            json.dumps(preferences.to_dict(), ensure_ascii=True),
-            encoding="utf-8",
-        )
-
-    def set_current_session_id(self, session_id: str) -> None:
-        self.save_session_preferences(SessionPreferences(current_session_id=session_id))
-
-    def clear_current_session_id(self, *, expected_session_id: str | None = None) -> None:
-        current = self.session_preferences().current_session_id
-        if expected_session_id is not None and current != expected_session_id:
-            return
-        _safe_unlink(self.session_preferences_file)
-
-    def session_runtime(self, session_id: str) -> SessionStateFiles:
-        state_dir = self.state_dir
-        return SessionStateFiles(
-            session_id=session_id,
-            state_dir=state_dir,
-            session_record=state_dir / session_file_name(session_id),
-            legacy_session_record=self.resource("legacy_session").resolve(state_dir),
-            connection_file=kernel_connection_file(state_dir, session_id),
-            log_file=kernel_log_file(state_dir, session_id),
-            command_lock_file=command_lock_file(state_dir, session_id),
-        )
-
-    def session_state(self, session_id: str) -> SessionStateFiles:
-        return self.session_runtime(session_id)
-
-    def resource(self, name: str) -> StateResource:
-        try:
-            return _STATE_RESOURCES[name]
-        except KeyError as exc:
-            raise KeyError(f"Unknown state resource: {name}") from exc
-
-    def resource_path(self, name: str) -> Path:
-        return self.resource(name).resolve(self.state_dir)
-
-    def snapshot_resources(self) -> tuple[StateResource, ...]:
-        return (
-            self.resource("snapshots"),
-            self.resource("artifacts"),
-            self.resource("exports"),
-            self.resource("metadata"),
-        )
-
-    def resources(self) -> dict[str, StateResource]:
-        return dict(_STATE_RESOURCES)
-
-    def allocate_snapshot(
-        self,
-        *,
-        label: str | None = None,
-        source_session_id: str | None = None,
-        source_execution_id: str | None = None,
-    ) -> SnapshotAllocation:
-        paths = self._allocate_resource_paths(kind="snapshot")
-        created_at = utc_now_iso()
-        descriptor = SnapshotDescriptor(
-            id=paths.id,
-            kind="snapshot",
-            schema_version=SNAPSHOT_DESCRIPTOR_SCHEMA_VERSION,
-            created_at=created_at,
-            updated_at=created_at,
-            lifecycle="allocating",
-            label=label,
-            source_session_id=source_session_id,
-            source_execution_id=source_execution_id,
-        )
-        self._write_descriptor(paths.descriptor_file, descriptor)
-        return SnapshotAllocation(descriptor=descriptor, paths=paths)
-
-    def commit_snapshot(
-        self,
-        resource_id: str,
-        *,
-        selected_resources: list[str],
-        source_manifest: StateManifest,
-        label: str | None = None,
-        source_session_id: str | None = None,
-        source_execution_id: str | None = None,
-    ) -> SnapshotDescriptor:
-        self.validate_manifest(source_manifest)
-        validated_resources = self._validate_selected_resources(selected_resources)
-        current, paths = self._load_snapshot(resource_id)
-        descriptor = replace(
-            current,
-            updated_at=utc_now_iso(),
-            lifecycle="ready",
-            label=current.label if label is None else label,
-            source_session_id=(
-                current.source_session_id if source_session_id is None else source_session_id
-            ),
-            source_execution_id=(
-                current.source_execution_id if source_execution_id is None else source_execution_id
-            ),
-            error=None,
-            selected_resources=validated_resources,
-            source_manifest_schema_version=source_manifest.schema_version,
-            source_resource_versions=dict(source_manifest.resource_versions),
-        )
-        self._write_descriptor(paths.descriptor_file, descriptor)
-        return descriptor
-
-    def fail_snapshot(self, resource_id: str, *, error: str) -> SnapshotDescriptor:
-        current, paths = self._load_snapshot(resource_id)
-        descriptor = replace(
-            current,
-            updated_at=utc_now_iso(),
-            lifecycle="failed",
-            error=error,
-        )
-        self._write_descriptor(paths.descriptor_file, descriptor)
-        return descriptor
-
-    def get_snapshot(self, resource_id: str) -> SnapshotDescriptor:
-        descriptor, _ = self._load_snapshot(resource_id)
-        return descriptor
-
-    def list_snapshots(self, *, include_deleted: bool = False) -> list[SnapshotDescriptor]:
-        descriptors = cast(list[SnapshotDescriptor], self._list_descriptors(kind="snapshot"))
-        if include_deleted:
-            return descriptors
-        return [descriptor for descriptor in descriptors if descriptor.lifecycle != "deleted"]
-
-    def allocate_export(
-        self,
-        *,
-        label: str | None = None,
-        source_session_id: str | None = None,
-        source_execution_id: str | None = None,
-    ) -> ExportAllocation:
-        paths = self._allocate_resource_paths(kind="export")
-        created_at = utc_now_iso()
-        descriptor = ExportDescriptor(
-            id=paths.id,
-            kind="export",
-            schema_version=EXPORT_DESCRIPTOR_SCHEMA_VERSION,
-            created_at=created_at,
-            updated_at=created_at,
-            lifecycle="allocating",
-            label=label,
-            source_session_id=source_session_id,
-            source_execution_id=source_execution_id,
-        )
-        self._write_descriptor(paths.descriptor_file, descriptor)
-        return ExportAllocation(descriptor=descriptor, paths=paths)
-
-    def commit_export(
-        self,
-        resource_id: str,
-        *,
-        export_format: str,
-        source_kind: str | None = None,
-        source_id: str | None = None,
-        output_files: list[str] | None = None,
-        label: str | None = None,
-        source_session_id: str | None = None,
-        source_execution_id: str | None = None,
-    ) -> ExportDescriptor:
-        current, paths = self._load_export(resource_id)
-        descriptor = replace(
-            current,
-            updated_at=utc_now_iso(),
-            lifecycle="ready",
-            label=current.label if label is None else label,
-            source_session_id=(
-                current.source_session_id if source_session_id is None else source_session_id
-            ),
-            source_execution_id=(
-                current.source_execution_id if source_execution_id is None else source_execution_id
-            ),
-            error=None,
-            export_format=export_format,
-            source_kind=source_kind,
-            source_id=source_id,
-            output_files=[] if output_files is None else list(output_files),
-        )
-        self._write_descriptor(paths.descriptor_file, descriptor)
-        return descriptor
-
-    def fail_export(self, resource_id: str, *, error: str) -> ExportDescriptor:
-        current, paths = self._load_export(resource_id)
-        descriptor = replace(
-            current,
-            updated_at=utc_now_iso(),
-            lifecycle="failed",
-            error=error,
-        )
-        self._write_descriptor(paths.descriptor_file, descriptor)
-        return descriptor
-
-    def get_export(self, resource_id: str) -> ExportDescriptor:
-        descriptor, _ = self._load_export(resource_id)
-        return descriptor
-
-    def list_exports(self, *, include_deleted: bool = False) -> list[ExportDescriptor]:
-        descriptors = cast(list[ExportDescriptor], self._list_descriptors(kind="export"))
-        if include_deleted:
-            return descriptors
-        return [descriptor for descriptor in descriptors if descriptor.lifecycle != "deleted"]
-
-    def _allocate_resource_paths(self, *, kind: PersistedResourceKind) -> PersistedResourcePaths:
-        self.ensure_initialized()
-        resource_id = _new_resource_id()
-        paths = self._persisted_resource_paths(kind=kind, resource_id=resource_id)
-        paths.root_dir.mkdir(parents=True, exist_ok=False)
-        paths.payload_dir.mkdir()
-        return paths
-
-    def _persisted_resource_paths(
-        self,
-        *,
-        kind: PersistedResourceKind,
-        resource_id: str,
-    ) -> PersistedResourcePaths:
-        validated_id = _validate_resource_id(resource_id)
-        root_parent = self.snapshots_dir if kind == "snapshot" else self.exports_dir
-        root_dir = root_parent / validated_id
-        return PersistedResourcePaths(
-            id=validated_id,
-            kind=kind,
-            root_dir=root_dir,
-            descriptor_file=root_dir / RESOURCE_DESCRIPTOR_FILE_NAME,
-            payload_dir=root_dir / RESOURCE_PAYLOAD_DIR_NAME,
-        )
-
-    def _load_snapshot(self, resource_id: str) -> tuple[SnapshotDescriptor, PersistedResourcePaths]:
-        paths = self._persisted_resource_paths(kind="snapshot", resource_id=resource_id)
-        descriptor = cast(SnapshotDescriptor, self._read_descriptor(paths, kind="snapshot"))
-        return descriptor, paths
-
-    def _load_export(self, resource_id: str) -> tuple[ExportDescriptor, PersistedResourcePaths]:
-        paths = self._persisted_resource_paths(kind="export", resource_id=resource_id)
-        descriptor = cast(ExportDescriptor, self._read_descriptor(paths, kind="export"))
-        return descriptor, paths
-
-    def _list_descriptors(
-        self,
-        *,
-        kind: PersistedResourceKind,
-    ) -> list[SnapshotDescriptor] | list[ExportDescriptor]:
-        self.ensure_compatible()
-        parent = self.snapshots_dir if kind == "snapshot" else self.exports_dir
-        if not parent.exists():
-            return []
-
-        descriptors: list[SnapshotDescriptor] | list[ExportDescriptor] = []
-        for child in sorted(parent.iterdir()):
-            if not child.is_dir():
-                continue
-            paths = PersistedResourcePaths(
-                id=child.name,
-                kind=kind,
-                root_dir=child,
-                descriptor_file=child / RESOURCE_DESCRIPTOR_FILE_NAME,
-                payload_dir=child / RESOURCE_PAYLOAD_DIR_NAME,
-            )
-            descriptors.append(self._read_descriptor(paths, kind=kind))
-        descriptors.sort(key=lambda descriptor: (descriptor.created_at, descriptor.id))
-        return descriptors
-
-    def _read_descriptor(
-        self,
-        paths: PersistedResourcePaths,
-        *,
-        kind: PersistedResourceKind,
-    ) -> SnapshotDescriptor | ExportDescriptor:
-        self.ensure_compatible()
-        if not paths.descriptor_file.exists():
-            raise StateCompatibilityError(
-                "Persisted resource descriptor is missing.",
-                data={
-                    "resource_id": paths.id,
-                    "resource_kind": kind,
-                    "descriptor_file": str(paths.descriptor_file),
-                },
-            )
-        try:
-            payload = json.loads(paths.descriptor_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise StateCompatibilityError(
-                "Persisted resource descriptor is unreadable.",
-                data={
-                    "resource_id": paths.id,
-                    "resource_kind": kind,
-                    "descriptor_file": str(paths.descriptor_file),
-                },
-            ) from exc
-        if not isinstance(payload, dict):
-            raise StateCompatibilityError(
-                "Persisted resource descriptor has an invalid shape.",
-                data={
-                    "resource_id": paths.id,
-                    "resource_kind": kind,
-                    "descriptor_file": str(paths.descriptor_file),
-                },
-            )
-        try:
-            if kind == "snapshot":
-                descriptor = SnapshotDescriptor.from_dict(payload)
-            else:
-                descriptor = ExportDescriptor.from_dict(payload)
-        except ValueError as exc:
-            raise StateCompatibilityError(
-                "Persisted resource descriptor is invalid.",
-                data={
-                    "resource_id": paths.id,
-                    "resource_kind": kind,
-                    "descriptor_file": str(paths.descriptor_file),
-                },
-            ) from exc
-        if descriptor.id != paths.id:
-            raise StateCompatibilityError(
-                "Persisted resource descriptor id does not match its directory.",
-                data={
-                    "resource_id": paths.id,
-                    "descriptor_id": descriptor.id,
-                    "resource_kind": kind,
-                },
-            )
-        self._validate_descriptor_schema(descriptor)
-        return descriptor
-
-    def _validate_descriptor_schema(
-        self,
-        descriptor: SnapshotDescriptor | ExportDescriptor,
-    ) -> None:
-        expected = (
-            SNAPSHOT_DESCRIPTOR_SCHEMA_VERSION
-            if descriptor.kind == "snapshot"
-            else EXPORT_DESCRIPTOR_SCHEMA_VERSION
-        )
-        if descriptor.schema_version != expected:
-            raise StateCompatibilityError(
-                "Persisted resource schema is incompatible.",
-                data={
-                    "resource_id": descriptor.id,
-                    "resource_kind": descriptor.kind,
-                    "resource_schema_version": descriptor.schema_version,
-                    "supported_schema_version": expected,
-                },
-            )
-
-    def _write_descriptor(
-        self,
-        descriptor_file: Path,
-        descriptor: SnapshotDescriptor | ExportDescriptor,
-    ) -> None:
-        descriptor_file.write_text(
-            json.dumps(descriptor.to_dict(), ensure_ascii=True),
-            encoding="utf-8",
-        )
-
-    def _validate_selected_resources(self, selected_resources: list[str]) -> list[str]:
-        known_resources = set(self.resources())
-        unknown_resources = sorted(set(selected_resources) - known_resources)
-        if unknown_resources:
-            raise StateCompatibilityError(
-                "Snapshot selection references unknown state resources.",
-                data={"unknown_resources": unknown_resources},
-            )
-
-        seen: set[str] = set()
-        duplicates: list[str] = []
-        validated: list[str] = []
-        for resource_name in selected_resources:
-            if resource_name in seen:
-                duplicates.append(resource_name)
-                continue
-            seen.add(resource_name)
-            validated.append(resource_name)
-        if duplicates:
-            raise StateCompatibilityError(
-                "Snapshot selection must not contain duplicate state resources.",
-                data={"duplicate_resources": sorted(set(duplicates))},
-            )
-        return validated
-
-
-@dataclass(slots=True, frozen=True)
-class StateLayout(StateRepository):
-    pass
-
-
 _STATE_RESOURCES: dict[str, StateResource] = {
     "history": StateResource(
         name="history",
@@ -1197,3 +589,242 @@ def _pid_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+@dataclass(slots=True, frozen=True)
+class StateRepository:
+    project_root: Path
+    _layout: StateLayout = field(init=False, repr=False)
+    _manifests: StateManifestRepository = field(init=False, repr=False)
+    _runtime: RuntimeStateRepository = field(init=False, repr=False)
+    _resources: PersistedResourceRepository = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        from .state_layout import StateLayout
+        from .state_manifest import StateManifestRepository
+        from .state_persisted_resources import PersistedResourceRepository
+        from .state_runtime import RuntimeStateRepository
+
+        layout = StateLayout(self.project_root)
+        object.__setattr__(self, "project_root", layout.project_root)
+        object.__setattr__(self, "_layout", layout)
+        manifests = StateManifestRepository(layout)
+        object.__setattr__(self, "_manifests", manifests)
+        object.__setattr__(self, "_runtime", RuntimeStateRepository(layout, manifests))
+        object.__setattr__(self, "_resources", PersistedResourceRepository(layout, manifests))
+
+    @property
+    def state_dir(self) -> Path:
+        return self._layout.state_dir
+
+    @property
+    def manifest_file(self) -> Path:
+        return self._layout.manifest_file
+
+    @property
+    def history_file(self) -> Path:
+        return self._layout.history_file
+
+    @property
+    def executions_file(self) -> Path:
+        return self._layout.executions_file
+
+    @property
+    def legacy_session_file(self) -> Path:
+        return self._layout.legacy_session_file
+
+    @property
+    def session_preferences_file(self) -> Path:
+        return self._layout.session_preferences_file
+
+    @property
+    def snapshots_dir(self) -> Path:
+        return self._layout.snapshots_dir
+
+    @property
+    def artifacts_dir(self) -> Path:
+        return self._layout.artifacts_dir
+
+    @property
+    def exports_dir(self) -> Path:
+        return self._layout.exports_dir
+
+    @property
+    def metadata_dir(self) -> Path:
+        return self._layout.metadata_dir
+
+    def session_file(self, session_id: str) -> Path:
+        return self._layout.session_file(session_id)
+
+    def connection_file(self, session_id: str) -> Path:
+        return self._layout.connection_file(session_id)
+
+    def log_file(self, session_id: str) -> Path:
+        return self._layout.log_file(session_id)
+
+    def command_lock_file(self, session_id: str) -> Path:
+        return self._layout.command_lock_file(session_id)
+
+    def session_runtime(self, session_id: str) -> SessionStateFiles:
+        return self._runtime.session_runtime(session_id)
+
+    def session_state(self, session_id: str) -> SessionStateFiles:
+        return self._runtime.session_state(session_id)
+
+    def session_files(self) -> list[Path]:
+        return self._runtime.session_files()
+
+    def ensure_state_dir(self) -> None:
+        self._layout.ensure_state_dir()
+
+    def ensure_gitignore_entry(self) -> bool:
+        return self._runtime.ensure_gitignore_entry()
+
+    def ensure_initialized(self) -> StateManifest:
+        return self._manifests.ensure_initialized()
+
+    def manifest(self) -> StateManifest:
+        return self._manifests.manifest()
+
+    def save_manifest(self, manifest: StateManifest) -> None:
+        self._manifests.save_manifest(manifest)
+
+    def validate_manifest(
+        self,
+        manifest: StateManifest,
+        *,
+        required_versions: Mapping[str, str] | None = None,
+    ) -> None:
+        self._manifests.validate_manifest(
+            manifest,
+            required_versions=dict(StateManifest().resource_versions)
+            if required_versions is None
+            else required_versions,
+        )
+
+    def ensure_compatible(
+        self,
+        *,
+        required_versions: Mapping[str, str] | None = None,
+    ) -> StateManifest:
+        return self._manifests.require_compatible(
+            required_versions=dict(StateManifest().resource_versions)
+            if required_versions is None
+            else required_versions
+        )
+
+    def session_preferences(self) -> SessionPreferences:
+        return self._runtime.session_preferences()
+
+    def save_session_preferences(self, preferences: SessionPreferences) -> None:
+        self._runtime.save_session_preferences(preferences)
+
+    def set_current_session_id(self, session_id: str) -> None:
+        self._runtime.set_current_session_id(session_id)
+
+    def clear_current_session_id(self, *, expected_session_id: str | None = None) -> None:
+        self._runtime.clear_current_session_id(expected_session_id=expected_session_id)
+
+    def prune_session_runtime_artifacts(self, session_id: str) -> None:
+        self._runtime.prune_session_runtime_artifacts(session_id)
+
+    def prune_orphaned_runtime_artifacts(self, *, active_session_ids: Collection[str]) -> list[str]:
+        return self._runtime.prune_orphaned_runtime_artifacts(active_session_ids=active_session_ids)
+
+    def resource(self, name: str) -> StateResource:
+        return self._layout.resource(name)
+
+    def resource_path(self, name: str) -> Path:
+        return self._layout.resource_path(name)
+
+    def resources(self) -> dict[str, StateResource]:
+        return self._layout.resources()
+
+    def snapshot_resources(self) -> tuple[StateResource, ...]:
+        return self._resources.snapshot_resources()
+
+    def allocate_snapshot(
+        self,
+        *,
+        label: str | None = None,
+        source_session_id: str | None = None,
+        source_execution_id: str | None = None,
+    ) -> SnapshotAllocation:
+        return self._resources.allocate_snapshot(
+            label=label,
+            source_session_id=source_session_id,
+            source_execution_id=source_execution_id,
+        )
+
+    def commit_snapshot(
+        self,
+        resource_id: str,
+        *,
+        selected_resources: list[str],
+        source_manifest: StateManifest,
+        label: str | None = None,
+        source_session_id: str | None = None,
+        source_execution_id: str | None = None,
+    ) -> SnapshotDescriptor:
+        return self._resources.commit_snapshot(
+            resource_id,
+            selected_resources=selected_resources,
+            source_manifest=source_manifest,
+            label=label,
+            source_session_id=source_session_id,
+            source_execution_id=source_execution_id,
+        )
+
+    def fail_snapshot(self, resource_id: str, *, error: str) -> SnapshotDescriptor:
+        return self._resources.fail_snapshot(resource_id, error=error)
+
+    def get_snapshot(self, resource_id: str) -> SnapshotDescriptor:
+        return self._resources.get_snapshot(resource_id)
+
+    def list_snapshots(self, *, include_deleted: bool = False) -> list[SnapshotDescriptor]:
+        return self._resources.list_snapshots(include_deleted=include_deleted)
+
+    def allocate_export(
+        self,
+        *,
+        label: str | None = None,
+        source_session_id: str | None = None,
+        source_execution_id: str | None = None,
+    ) -> ExportAllocation:
+        return self._resources.allocate_export(
+            label=label,
+            source_session_id=source_session_id,
+            source_execution_id=source_execution_id,
+        )
+
+    def commit_export(
+        self,
+        resource_id: str,
+        *,
+        export_format: str,
+        source_kind: str | None = None,
+        source_id: str | None = None,
+        output_files: list[str] | None = None,
+        label: str | None = None,
+        source_session_id: str | None = None,
+        source_execution_id: str | None = None,
+    ) -> ExportDescriptor:
+        return self._resources.commit_export(
+            resource_id,
+            export_format=export_format,
+            source_kind=source_kind,
+            source_id=source_id,
+            output_files=output_files,
+            label=label,
+            source_session_id=source_session_id,
+            source_execution_id=source_execution_id,
+        )
+
+    def fail_export(self, resource_id: str, *, error: str) -> ExportDescriptor:
+        return self._resources.fail_export(resource_id, error=error)
+
+    def get_export(self, resource_id: str) -> ExportDescriptor:
+        return self._resources.get_export(resource_id)
+
+    def list_exports(self, *, include_deleted: bool = False) -> list[ExportDescriptor]:
+        return self._resources.list_exports(include_deleted=include_deleted)

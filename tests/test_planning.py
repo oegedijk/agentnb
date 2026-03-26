@@ -6,7 +6,7 @@ import pytest
 
 from agentnb.journal import CommandJournal, JournalQuery
 from agentnb.planning import ReplayPlanner, SnapshotPlanner
-from agentnb.state import StateRepository
+from agentnb.state_layout import StateLayout
 
 
 @pytest.fixture
@@ -55,9 +55,9 @@ def test_replay_planner_builds_steps_only_for_replayable_entries(
 
 
 def test_snapshot_planner_builds_registered_future_state_resources(project_dir) -> None:
-    repository = StateRepository(project_dir)
+    layout = StateLayout(project_dir)
 
-    plan = SnapshotPlanner().build(repository)
+    plan = SnapshotPlanner().build(layout)
 
     assert {resource.name for resource in plan.resources} == {
         "snapshots",
@@ -65,7 +65,7 @@ def test_snapshot_planner_builds_registered_future_state_resources(project_dir) 
         "exports",
         "metadata",
     }
-    assert set(plan.resource_paths(repository)) == {
+    assert set(plan.resource_paths(layout)) == {
         project_dir / ".agentnb" / "snapshots",
         project_dir / ".agentnb" / "artifacts",
         project_dir / ".agentnb" / "exports",

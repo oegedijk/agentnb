@@ -5,6 +5,8 @@ from pathlib import Path
 
 from .journal import JournalEntry, JournalSelection
 from .state import StateManifest, StateRepository, StateResource
+from .state_layout import StateLayout
+from .state_persisted_resources import PersistedResourceRepository
 
 
 @dataclass(slots=True, frozen=True)
@@ -50,14 +52,21 @@ class SnapshotResourcePlan:
     manifest: StateManifest
     resources: list[StateResource]
 
-    def resource_paths(self, repository: StateRepository) -> list[Path]:
-        return [resource.resolve(repository.state_dir) for resource in self.resources]
+    def resource_paths(self, layout: StateLayout | StateRepository) -> list[Path]:
+        resolved_layout = (
+            layout if isinstance(layout, StateLayout) else StateLayout(layout.project_root)
+        )
+        return [resource.resolve(resolved_layout.state_dir) for resource in self.resources]
 
 
 class SnapshotPlanner:
-    def build(self, repository: StateRepository) -> SnapshotResourcePlan:
-        manifest = repository.ensure_compatible()
-        resources = list(repository.snapshot_resources())
+    def build(self, layout: StateLayout | StateRepository) -> SnapshotResourcePlan:
+        resolved_layout = (
+            layout if isinstance(layout, StateLayout) else StateLayout(layout.project_root)
+        )
+        resources_repository = PersistedResourceRepository(resolved_layout)
+        resources = resources_repository.snapshot_resources()
+        manifest = resources_repository.manifest_repository.require_compatible()
         return SnapshotResourcePlan(manifest=manifest, resources=resources)
 
 

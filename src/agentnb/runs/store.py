@@ -13,7 +13,9 @@ from ..execution_output import OutputItem
 from ..history import HistoryRecord
 from ..payloads import ExecutionEventPayload, JSONValue, RunSnapshot, StoredRunSnapshot
 from ..recording import CommandRecorder, CommandRecording
-from ..state import StateRepository
+from ..state import EXECUTIONS_RESOURCE_VERSION
+from ..state_layout import StateLayout
+from ..state_manifest import StateManifestRepository
 
 RunStatus = Literal["starting", "running", "ok", "error"]
 TerminalReason = Literal["completed", "failed", "cancelled", "worker_exited"]
@@ -30,6 +32,7 @@ _CANCELLATION_RAW_ERROR_TYPES = frozenset(
         "WorkerExitedError",
     }
 )
+_EXECUTION_REQUIRED_RESOURCE_VERSIONS = {"executions": EXECUTIONS_RESOURCE_VERSION}
 
 
 @dataclass(slots=True)
@@ -338,13 +341,14 @@ class ExecutionRecord:
 
 class ExecutionStore:
     def __init__(self, project_root: Path) -> None:
-        self.repository = StateRepository(project_root)
-        self.project_root = self.repository.project_root
-        self.state_dir = self.repository.state_dir
-        self.executions_file = self.repository.executions_file
+        self.layout = StateLayout(project_root)
+        self.manifests = StateManifestRepository(self.layout)
+        self.project_root = self.layout.project_root
+        self.state_dir = self.layout.state_dir
+        self.executions_file = self.layout.executions_file
 
     def append(self, record: ExecutionRecord) -> None:
-        self.repository.ensure_initialized()
+        self.manifests.ensure_initialized(required_versions=_EXECUTION_REQUIRED_RESOURCE_VERSIONS)
         with self.executions_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_storage_dict(), ensure_ascii=True))
             handle.write("\n")
@@ -356,7 +360,7 @@ class ExecutionStore:
         command_types: set[str] | None = None,
         errors_only: bool = False,
     ) -> list[ExecutionRecord]:
-        self.repository.ensure_compatible()
+        self.manifests.require_compatible(required_versions=_EXECUTION_REQUIRED_RESOURCE_VERSIONS)
         if not self.executions_file.exists():
             return []
 

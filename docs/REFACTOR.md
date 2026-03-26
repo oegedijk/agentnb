@@ -363,30 +363,94 @@ What is still incomplete:
   mapping-oriented output/projection fallbacks still remain at explicit
   compatibility edges.
 
+### Tranche 5: Split State Into Explicit Persistence Domains
+
+Status: done
+
+Completed in the current refactor:
+
+- the state boundary now has explicit owning modules instead of one monolithic
+  repository:
+  - `state_layout.py`
+  - `state_manifest.py`
+  - `state_runtime.py`
+  - `state_persisted_resources.py`
+- `StateLayout` now owns `.agentnb/` path layout, registered state resources,
+  and session-runtime file paths.
+- `StateManifestRepository` now owns manifest I/O and compatibility validation.
+- `RuntimeStateRepository` now owns:
+  - session preferences
+  - remembered current-session state
+  - runtime artifact cleanup
+  - session-runtime file access
+- `PersistedResourceRepository` now owns snapshot/export descriptor lifecycle
+  and persisted resource selection/validation.
+- `StateRepository` remains as an internal compatibility facade, but its role is
+  now composition and delegation rather than broad policy ownership.
+- `HistoryStore` and `ExecutionStore` now own their resource-version
+  requirements directly and reject stale manifests on both read and write
+  paths.
+- simple `.agentnb/` path consumers now use `StateLayout` directly instead of
+  reaching through the compatibility facade.
+- state-boundary tests were split to the owning modules instead of keeping one
+  monolithic `test_state.py`.
+
+What this tranche intentionally did not do:
+
+- it did not remove `StateRepository`
+- it did not deepen or remove the `execution.py` / `ops.py` facades
+- it did not remove the CLI dependency from background execution
+- it did not remove the remaining command-data compatibility adapters
+
+What is still incomplete:
+
+- `execution.py` still owns a mixed surface:
+  - app-facing session access policy
+  - run submission/query/cancel delegation
+  - active-run probing glue
+- `ops.py` is still largely a wrapper around `KernelIntrospection` rather than
+  a clearly deep semantic boundary.
+- background run bootstrapping still depends on the hidden CLI
+  `_background-run` command rather than a run-control-owned worker entrypoint.
+- `SerializedCommandData` / `compat_command_data(...)` and some
+  mapping-oriented output/projection fallbacks still remain at explicit
+  compatibility edges.
+
 ## Next Tranche
 
-The next highest-value work is now **splitting `state.py` into explicit
-persistence domains**. Provenance and compatibility cutover policy are now
-strong enough that the biggest remaining ownership problem is the state layer
-itself.
+The next highest-value work is now **deepening or removing the remaining
+shallow app-facing facades**, starting with `execution.py` and then `ops.py`.
+The state split is now strong enough that the biggest remaining ownership issue
+is app-facing policy that is still spread across wrapper layers.
 
 That tranche should include:
 
-- separating session/runtime state from durable command/run history state and
-  from artifact/export persistence, so each persisted domain has one owning
-  module.
-- moving manifest/resource-version policy for each persisted domain behind the
-  owning repository instead of leaving `StateRepository` as a broad catch-all.
-- making the state layer expose narrower repositories or layouts for:
-  - runtime/session files
-  - history/execution journals
-  - snapshots/exports/artifacts
-- keeping `.agentnb/` path layout ownership centralized while avoiding one
-  repository class that understands every resource lifecycle and compatibility
-  rule.
-- adding boundary tests at the new owning modules rather than routing all state
-  assertions through the monolithic repository.
+- deciding whether `execution.py` is the true app-facing execution boundary or
+  whether part of its surface should move down into run-control/runtime owners.
+- removing mixed responsibility inside `ExecutionService` so one owner is
+  clearly responsible for:
+  - session-access policy
+  - run submission/observation/cancellation semantics
+  - active-run detection for helper/idle access
+- either deepening `ops.py` into a genuine semantic module for
+  vars/inspect/reload behavior or inlining it away in favor of a clearer
+  `KernelIntrospection` boundary.
+- reducing monkeypatch-oriented fallback logic in `NotebookOps` where it exists
+  only to preserve older test seams rather than current abstraction needs.
+- rebalancing tests so `execution.py` / `ops.py` behavior is asserted at the
+  owning boundary instead of through `app.py` or wrapper compatibility tests.
 
-After that, the likely tranche is to revisit the remaining shallow facades
-(`execution.py`, `ops.py`) and then remove the CLI dependency from background
-run-control.
+Advice for that tranche:
+
+- start with `execution.py`, not `ops.py`; it has the bigger ownership problem
+  and its outcome will constrain how helper access should be modeled.
+- keep `app.py` thin: command handlers should resolve intent and render the
+  stable envelope, not regain wait/poll/run-selection policy.
+- avoid bundling background-worker CLI inversion into the same tranche unless
+  the new execution boundary makes the worker entrypoint shape obvious.
+- prefer moving policy downward over adding another facade; this codebase has
+  enough nouns already.
+
+After that, the likely tranche is to remove the CLI dependency from background
+run-control, and then decide how aggressively to prune the remaining explicit
+compatibility adapters.

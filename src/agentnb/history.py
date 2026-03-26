@@ -9,7 +9,9 @@ from typing import Literal, TypedDict, cast
 from .contracts import ExecutionResult, utc_now_iso
 from .execution_models import ExecutionOutcome
 from .session import DEFAULT_SESSION_ID
-from .state import StateRepository
+from .state import HISTORY_RESOURCE_VERSION
+from .state_layout import StateLayout
+from .state_manifest import StateManifestRepository
 
 HistoryKind = Literal["user_command", "kernel_execution"]
 HistoryClassification = Literal["replayable", "inspection", "control", "internal"]
@@ -17,6 +19,7 @@ HistoryProvenanceDetail = Literal["user_command", "kernel_execution"]
 FailureOrigin = Literal["kernel", "control"]
 
 _PREVIEW_LIMIT = 160
+_HISTORY_REQUIRED_RESOURCE_VERSIONS = {"history": HISTORY_RESOURCE_VERSION}
 
 
 class HistoryRecordPayload(TypedDict, total=False):
@@ -133,14 +136,15 @@ class HistoryRecord:
 
 class HistoryStore:
     def __init__(self, project_root: Path, session_id: str | None = DEFAULT_SESSION_ID) -> None:
-        self.repository = StateRepository(project_root)
-        self.project_root = self.repository.project_root
+        self.layout = StateLayout(project_root)
+        self.manifests = StateManifestRepository(self.layout)
+        self.project_root = self.layout.project_root
         self.session_id = session_id
-        self.state_dir = self.repository.state_dir
-        self.history_file = self.repository.history_file
+        self.state_dir = self.layout.state_dir
+        self.history_file = self.layout.history_file
 
     def append(self, record: HistoryRecord) -> None:
-        self.repository.ensure_initialized()
+        self.manifests.ensure_initialized(required_versions=_HISTORY_REQUIRED_RESOURCE_VERSIONS)
         with self.history_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=True))
             handle.write("\n")
@@ -151,7 +155,7 @@ class HistoryStore:
         include_internal: bool = False,
         errors_only: bool = False,
     ) -> list[HistoryRecord]:
-        self.repository.ensure_compatible()
+        self.manifests.require_compatible(required_versions=_HISTORY_REQUIRED_RESOURCE_VERSIONS)
         if not self.history_file.exists():
             return []
 

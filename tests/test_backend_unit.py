@@ -14,7 +14,7 @@ from agentnb.errors import BackendOperationError, KernelDiedError
 from agentnb.kernel.backend import LocalIPythonBackend, _tail_log, _uptime_seconds
 from agentnb.kernel.provisioner import _python_supports_module
 from agentnb.session import SessionInfo
-from agentnb.state import StateRepository
+from agentnb.state_layout import StateLayout
 
 
 def test_python_supports_module_uses_subprocess_probe(mocker: MockerFixture) -> None:
@@ -71,7 +71,7 @@ def test_start_configures_detached_project_kernel_process(
 
     session = backend.start(
         project_root=tmp_path,
-        session_state=StateRepository(tmp_path).session_state("default"),
+        session_state=StateLayout(tmp_path).session_state("default"),
         python_executable="/usr/bin/python3",
     )
 

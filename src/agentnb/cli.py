@@ -1149,16 +1149,6 @@ def runs_cancel(run_reference: RunReference | None, project: Path | None, as_jso
     _emit(application.runs_cancel(request), as_json=as_json)
 
 
-@main.command("_background-run", hidden=True)
-@click.argument("execution_id")
-@project_option
-def background_run(execution_id: str, project: Path | None) -> None:
-    """Internal helper to execute one persisted background run."""
-
-    project_root = resolve_project_root(cwd=Path.cwd(), override=project)
-    executions.complete_background_run(project_root=project_root, execution_id=execution_id)
-
-
 def _strip_json_suffix(suggestions: list[str]) -> list[str]:
     return [s.replace(" --json", "").replace("--json ", "") for s in suggestions]
 

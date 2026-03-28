@@ -73,22 +73,26 @@ class LocalRunExecutor:
         plan: RunPlan,
         run: ExecutionRun,
     ) -> ExecutionRecord:
+        from .worker import BackgroundWorkerRequest
+
         if not plan.supports_background:
             raise ValueError(f"Unsupported run mode for {plan.command_type}: {plan.mode}")
+        request = BackgroundWorkerRequest(
+            project_root=plan.project_root,
+            execution_id=run.record.execution_id,
+        )
         process = subprocess.Popen(
             [
                 sys.executable,
                 "-m",
-                "agentnb.cli",
-                "_background-run",
-                "--project",
-                str(plan.project_root),
-                run.record.execution_id,
+                "agentnb.runs.worker",
+                *request.to_argv(),
             ],
-            cwd=str(plan.project_root),
+            cwd=str(request.project_root),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=os.environ.copy(),
             start_new_session=True,
         )
         return replace(

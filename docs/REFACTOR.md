@@ -487,37 +487,88 @@ What is still incomplete:
   mapping-oriented output/projection fallbacks still remain at explicit
   compatibility edges.
 
+### Tranche 7: Run-Control-Owned Background Worker Cutover
+
+Status: done
+
+Completed in the current refactor:
+
+- `runs/worker.py` now owns the internal background worker entrypoint through:
+  - `BackgroundWorkerRequest`
+  - `BackgroundWorkerArgumentError`
+  - `parse_argv(...)`
+  - `run_background_worker(...)`
+  - `main(...)`
+- `LocalRunExecutor.start_background(...)` now launches
+  `python -m agentnb.runs.worker` instead of routing through the CLI hidden
+  `_background-run` command.
+- the run-control boundary now owns the worker launch contract explicitly:
+  - worker module path and argv shape
+  - environment handoff
+  - execution-id/project routing
+  - completion handoff back into `LocalRunManager.complete_background_run(...)`
+- the hidden CLI `_background-run` command was removed.
+- `ExecutionService.complete_background_run(...)` was removed so the execution
+  boundary no longer exposes a wrapper path for background worker completion.
+- internal worker argv validation no longer exits through CLI-style parser
+  behavior:
+  - worker bootstrap now validates argv explicitly instead of relying on
+    `argparse`/`SystemExit`
+  - malformed worker requests now degrade into typed run error state when the
+    run can be identified instead of silently dying as a detached subprocess
+- tests were rebalanced so worker launch and worker-entrypoint behavior are now
+  asserted directly at the `runs` boundary rather than through CLI internals.
+
+What this tranche intentionally did not do:
+
+- it did not remove the remaining command-data compatibility adapters
+- it did not eliminate all mapping-based output/projection fallbacks
+- it did not reshape persisted run state or resource-version policy
+
+What is still incomplete:
+
+- `SerializedCommandData` / `compat_command_data(...)` and some
+  mapping-oriented output/projection fallbacks still remain at explicit
+  compatibility edges.
+
 ## Next Tranche
 
-The next highest-value work is now **removing the CLI dependency from
-background run-control**. The execution/introspection ownership cut is now
-strong enough that the biggest remaining abstraction leak is background worker
-bootstrapping through the hidden CLI entrypoint.
+The next highest-value work is now **removing the remaining explicit
+command-data compatibility adapters from internal call paths**. With the worker
+boot path now fully under `runs`, the largest remaining abstraction leak is the
+mixed typed-vs-mapping response seam around command data, projection, and
+output.
 
 That tranche should include:
 
-- moving background worker startup behind a run-control-owned entrypoint rather
-  than invoking the CLI’s hidden `_background-run` command as an
-  implementation detail.
-- making `runs` own the worker launch contract explicitly:
-  - worker argv/entrypoint shape
-  - environment handoff
-  - execution-id/project/session routing
-  - completion handoff back into durable run state
-- keeping the CLI as a caller of run-control rather than a participant in the
-  background-run implementation.
-- rebalancing tests so background execution behavior is asserted at the
-  `runs` boundary first, with smaller CLI tests for delegation and user-visible
-  behavior.
+- making typed command data the only internal currency for app/output/projection
+  paths that are already owned by the typed command-data layer.
+- removing `SerializedCommandData` / `compat_command_data(...)` from normal
+  internal call paths once remaining compatibility callers are retired or
+  isolated.
+- eliminating mapping-based fallbacks in:
+  - `output.py`
+  - `projection.py`
+  once all app-facing responses are guaranteed to originate from typed command
+  data.
+- keeping payload `TypedDict`s only at deliberate external/package or serializer
+  wire edges rather than as mixed internal currency inside app-facing logic.
+- rebalancing tests so typed command-data seams are asserted directly, while any
+  remaining compatibility behavior is covered only at explicit external edges.
 
 Advice for that tranche:
 
-- keep `app.py` and `cli.py` thin: they should submit work to run-control, not
-  define the worker boot path.
-- make it another clean cut: once the worker entrypoint moves under `runs`, do
-  not leave the CLI path as a second implementation route.
-- avoid mixing this tranche with unrelated adapter cleanup; the worker
-  entrypoint inversion is already a deep enough cut.
+- make it another clean cut: once a compatibility adapter stops serving a real
+  external edge, remove it rather than preserving it for internal convenience.
+- keep the serializer/output boundary explicit: pruning adapters should not
+  collapse wire shaping back into `app.py` or other upstream services.
+- prefer rebalancing tests toward:
+  - `command_data.py`
+  - `response_serialization.py`
+  - the direct `output.py` / `projection.py` typed seams
+  rather than preserving mapping-based fixtures that only restate prior
+  implementation structure.
 
-After that, the likely tranche is to decide how aggressively to prune the
-remaining explicit compatibility adapters at the execution/command-data edge.
+After that, the likely tranche is to revisit whether any remaining mixed
+mapping-oriented response helpers still deserve to exist as explicit public
+compatibility edges.

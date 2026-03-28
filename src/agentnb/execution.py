@@ -286,12 +286,6 @@ class ExecutionService:
             blocking_execution_id=access.blocking_execution_id,
         )
 
-    def complete_background_run(self, *, project_root: Path, execution_id: str) -> None:
-        self._run_manager.complete_background_run(
-            project_root=project_root,
-            execution_id=execution_id,
-        )
-
     def _wait_for_idle_access(self, request: SessionAccessRequest) -> SessionAccessOutcome:
         started_at = time.monotonic()
         deadline = started_at + request.timeout_s

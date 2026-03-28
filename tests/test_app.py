@@ -39,7 +39,7 @@ from agentnb.execution import (
 from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.introspection import KernelHelperResult, KernelIntrospection
 from agentnb.journal import JournalEntry
-from agentnb.runtime import KernelRuntime, RuntimeState
+from agentnb.runtime import DeleteSessionOutcome, KernelRuntime, RuntimeState, SessionListEntry
 from agentnb.selectors import parse_history_reference, parse_run_reference
 from agentnb.state import CommandLockInfo
 from tests.helpers import build_execution_record, build_run_snapshot
@@ -1029,7 +1029,7 @@ def test_app_runs_follow_reports_elapsed_window(project_dir) -> None:
 def test_app_sessions_list_routes_through_handle_command(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "default"
-    runtime.list_sessions.return_value = [{"session_id": "default"}]
+    runtime.list_sessions.return_value = [SessionListEntry(session_id="default", alive=False)]
     runtime.hidden_non_live_session_count.return_value = 2
     app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
 
@@ -1057,11 +1057,11 @@ def test_app_sessions_list_routes_through_handle_command(project_dir) -> None:
 def test_app_sessions_delete_routes_named_session_through_handle_command(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
-    runtime.delete_session.return_value = {
-        "deleted": True,
-        "session_id": "analysis",
-        "stopped_running_kernel": False,
-    }
+    runtime.delete_session.return_value = DeleteSessionOutcome(
+        deleted=True,
+        session_id="analysis",
+        stopped_running_kernel=False,
+    )
     app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService))
 
     response = app.sessions_delete(

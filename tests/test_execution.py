@@ -16,17 +16,19 @@ from agentnb.contracts import (
 )
 from agentnb.errors import AgentNBException, RunWaitTimedOutError, StateCompatibilityError
 from agentnb.execution import (
+    ExecutionCommandRequest,
     ExecutionRecord,
     ExecutionRun,
     ExecutionService,
     ExecutionStore,
+    RunRetrievalRequest,
     SessionAccessOutcome,
     _ExecutionProgressSink,
 )
 from agentnb.execution_output import OutputItem
 from agentnb.history import HistoryRecord
 from agentnb.recording import CommandRecorder
-from agentnb.runs import ManagedExecution, RunSpec
+from agentnb.runs import ManagedExecution, RunHandle, RunSpec
 from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelRuntime, KernelWaitResult, RuntimeState
 
@@ -394,11 +396,14 @@ def test_execution_service_persists_exec_runs(project_dir: Path) -> None:
     )
     service = ExecutionService(runtime)
 
-    managed = service.execute_code(
-        project_root=project_dir,
-        session_id="default",
-        code="1 + 1",
-        timeout_s=5,
+    managed = service.execute(
+        ExecutionCommandRequest(
+            project_root=project_dir,
+            session_id="default",
+            command_type="exec",
+            code="1 + 1",
+            timeout_s=5,
+        )
     )
 
     stored = ExecutionStore(project_dir).read(session_id="default")
@@ -442,12 +447,15 @@ def test_execution_service_stream_sink_reuses_execution_id(project_dir: Path) ->
     service = ExecutionService(runtime)
     sink = Sink()
 
-    managed = service.execute_code(
-        project_root=project_dir,
-        session_id="default",
-        code="print('hello')",
-        timeout_s=5,
-        event_sink=sink,
+    managed = service.execute(
+        ExecutionCommandRequest(
+            project_root=project_dir,
+            session_id="default",
+            command_type="exec",
+            code="print('hello')",
+            timeout_s=5,
+            event_sink=sink,
+        )
     )
 
     stored = ExecutionStore(project_dir).get(managed.record.execution_id)
@@ -461,10 +469,12 @@ def test_execution_service_stream_sink_reuses_execution_id(project_dir: Path) ->
 
 def test_execution_service_get_run_raises_when_missing(project_dir: Path) -> None:
     with pytest.raises(AgentNBException, match="Execution not found: missing"):
-        ExecutionService(KernelRuntime()).get_run(project_root=project_dir, execution_id="missing")
+        ExecutionService(KernelRuntime()).get_run(
+            RunRetrievalRequest(project_root=project_dir, execution_id="missing")
+        )
 
 
-def test_execution_service_start_background_code_delegates_to_run_manager(
+def test_execution_service_execute_background_delegates_to_run_manager(
     project_dir: Path,
 ) -> None:
     runtime = KernelRuntime(backend=Mock())
@@ -482,11 +492,15 @@ def test_execution_service_start_background_code_delegates_to_run_manager(
     run_manager.submit.return_value = managed
 
     service = ExecutionService(runtime, run_manager=run_manager)
-    result = service.start_background_code(
-        project_root=project_dir,
-        session_id="default",
-        code="1 + 1",
-        ensure_started=True,
+    result = service.execute(
+        ExecutionCommandRequest(
+            project_root=project_dir,
+            session_id="default",
+            command_type="exec",
+            mode="background",
+            code="1 + 1",
+            ensure_started=True,
+        )
     )
 
     assert result is managed
@@ -501,7 +515,7 @@ def test_execution_service_start_background_code_delegates_to_run_manager(
     assert spec.ensure_started is True
 
 
-def test_execution_service_reset_session_delegates_to_run_manager(project_dir: Path) -> None:
+def test_execution_service_execute_reset_delegates_to_run_manager(project_dir: Path) -> None:
     runtime = KernelRuntime(backend=Mock())
     run_manager = Mock()
     managed = ManagedExecution(
@@ -517,10 +531,13 @@ def test_execution_service_reset_session_delegates_to_run_manager(project_dir: P
     run_manager.submit.return_value = managed
 
     service = ExecutionService(runtime, run_manager=run_manager)
-    result = service.reset_session(
-        project_root=project_dir,
-        session_id="default",
-        timeout_s=9.0,
+    result = service.execute(
+        ExecutionCommandRequest(
+            project_root=project_dir,
+            session_id="default",
+            command_type="reset",
+            timeout_s=9.0,
+        )
     )
 
     assert result is managed
@@ -597,9 +614,9 @@ def test_execution_service_wait_for_session_access_waits_for_active_run_when_idl
     )
     runtime.wait_until_idle = wait_until_idle  # type: ignore[method-assign]
     run_manager = Mock()
-    run_manager.list_runs.side_effect = [
-        [{"execution_id": "run-1", "status": "running"}],
-        [],
+    run_manager.active_run_for_session.side_effect = [
+        RunHandle(execution_id="run-1", session_id="default", command_type="exec"),
+        None,
     ]
     run_manager.wait_for_run.return_value = {
         "execution_id": "run-1",
@@ -682,10 +699,75 @@ def test_execution_service_follow_run_raises_timeout_when_window_elapses(
 
     with pytest.raises(RunWaitTimedOutError):
         service.follow_run(
+            RunRetrievalRequest(
+                project_root=project_dir,
+                execution_id="run-1",
+                mode="follow",
+                timeout_s=3.0,
+            )
+        )
+
+
+def test_execution_service_get_run_preserves_execution_record_contract(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    run_manager = Mock()
+    record = ExecutionRecord(
+        execution_id="run-1",
+        ts="2026-03-10T00:00:00+00:00",
+        session_id="default",
+        command_type="exec",
+        status="ok",
+        duration_ms=5,
+        result="2",
+    )
+    run_manager.get_run.return_value = record
+    service = ExecutionService(runtime, run_manager=run_manager)
+
+    loaded = service.get_run(project_root=project_dir, execution_id="run-1")
+
+    assert loaded is record
+    run_manager.get_run.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        execution_id="run-1",
+    )
+
+
+def test_execution_service_follow_run_forces_follow_mode(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    run_manager = Mock()
+    run_manager.follow_run.return_value = RunObservationResult(
+        run=ExecutionRecord(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="ok",
+            duration_ms=5,
+            result="2",
+        ),
+        completion_reason="terminal",
+    )
+    service = ExecutionService(runtime, run_manager=run_manager)
+
+    loaded = service.follow_run(
+        RunRetrievalRequest(
             project_root=project_dir,
             execution_id="run-1",
+            mode="get",
             timeout_s=3.0,
         )
+    )
+
+    assert loaded.result == "2"
+    run_manager.follow_run.assert_called_once_with(
+        project_root=project_dir.resolve(),
+        execution_id="run-1",
+        timeout_s=3.0,
+        poll_interval_s=0.1,
+        observer=None,
+        skip_history=False,
+    )
+    run_manager.get_run.assert_not_called()
 
 
 def test_execution_progress_sink_keeps_nonterminal_background_snapshot_running(

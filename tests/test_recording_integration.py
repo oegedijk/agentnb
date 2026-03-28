@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 from agentnb.errors import AgentNBException
-from agentnb.execution import ExecutionService
+from agentnb.execution import ExecutionCommandRequest, ExecutionService
+from agentnb.introspection import KernelIntrospection
 from agentnb.journal import JournalEntry, JournalQuery
-from agentnb.ops import NotebookOps
 from agentnb.planning import ReplayPlanner
 from agentnb.runtime import KernelRuntime
 
@@ -38,17 +38,23 @@ def test_recording_contract_is_canonical_for_exec_inspect_and_reset(
 ) -> None:
     runtime, project_dir = started_runtime
     executions = ExecutionService(runtime)
-    ops = NotebookOps(runtime)
+    introspection = KernelIntrospection(runtime)
 
-    exec_run = executions.execute_code(
-        project_root=project_dir,
-        code="alpha = 41\nalpha + 1",
-        timeout_s=5,
+    exec_run = executions.execute(
+        ExecutionCommandRequest(
+            project_root=project_dir,
+            command_type="exec",
+            code="alpha = 41\nalpha + 1",
+            timeout_s=5,
+        )
     )
-    inspect_payload = ops.inspect_var(project_root=project_dir, name="alpha")
-    reset_run = executions.reset_session(
-        project_root=project_dir,
-        timeout_s=5,
+    inspect_payload = introspection.inspect_var(project_root=project_dir, name="alpha").payload
+    reset_run = executions.execute(
+        ExecutionCommandRequest(
+            project_root=project_dir,
+            command_type="reset",
+            timeout_s=5,
+        )
     )
 
     assert inspect_payload["name"] == "alpha"
@@ -114,16 +120,19 @@ def test_recording_contract_preserves_semantic_error_history_across_write_paths(
 ) -> None:
     runtime, project_dir = started_runtime
     executions = ExecutionService(runtime)
-    ops = NotebookOps(runtime)
+    introspection = KernelIntrospection(runtime)
 
-    exec_run = executions.execute_code(
-        project_root=project_dir,
-        code="1 / 0",
-        timeout_s=5,
+    exec_run = executions.execute(
+        ExecutionCommandRequest(
+            project_root=project_dir,
+            command_type="exec",
+            code="1 / 0",
+            timeout_s=5,
+        )
     )
 
     with pytest.raises(AgentNBException):
-        ops.inspect_var(project_root=project_dir, name="missing_value")
+        introspection.inspect_var(project_root=project_dir, name="missing_value")
 
     assert exec_run.record.status == "error"
     assert exec_run.record.ename == "ZeroDivisionError"

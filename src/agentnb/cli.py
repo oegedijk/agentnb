@@ -42,8 +42,8 @@ from .contracts import (
 from .errors import AgentNBException, ErrorContext
 from .execution import ExecutionService
 from .execution_invocation import ExecInvocationPolicy, OutputSelector, StartupPolicy
+from .introspection import KernelIntrospection
 from .invocation import ROOT_OPTION_SPECS, InvocationResolver
-from .ops import NotebookOps
 from .output import RenderOptions, projector, render_response, render_stream_completion
 from .runtime import KernelRuntime
 from .selectors import (
@@ -56,8 +56,12 @@ from .session import DEFAULT_SESSION_ID, resolve_project_root, validate_session_
 
 runtime = KernelRuntime()
 executions = ExecutionService(runtime)
-ops = NotebookOps(runtime, executions=executions)
-application = AgentNBApp(runtime=runtime, executions=executions, ops=ops)
+introspection = KernelIntrospection(runtime, session_access=executions)
+application = AgentNBApp(
+    runtime=runtime,
+    executions=executions,
+    introspection=introspection,
+)
 invocations = InvocationResolver()
 
 HELP_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from .errors import AgentNBException, ErrorContext
-from .execution import ExecutionService
+from .execution import ExecutionService, RunListRequest
 from .journal import JournalQuery
 
 RunReferenceKind = Literal["execution_id", "latest", "active", "last_error", "last_success"]
@@ -198,7 +198,12 @@ class RunSelectorResolver:
     ) -> list[Mapping[str, object]]:
         runs = cast(
             list[Mapping[str, object]],
-            self._executions.list_runs(project_root=project_root, session_id=session_id),
+            self._executions.list_runs(
+                request=RunListRequest(
+                    project_root=project_root,
+                    session_id=session_id,
+                )
+            ),
         )
         return [run for run in runs if predicate(run)]
 

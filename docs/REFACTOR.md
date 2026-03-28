@@ -416,41 +416,107 @@ What is still incomplete:
   mapping-oriented output/projection fallbacks still remain at explicit
   compatibility edges.
 
+### Tranche 6: Deepen Execution Boundary And Remove `ops.py`
+
+Status: done
+
+Completed in the current refactor:
+
+- `execution.py` is now the real app-facing execution boundary rather than a
+  thin wrapper layer.
+- `ExecutionService` now owns typed internal execution/run request models:
+  - `ExecutionCommandRequest`
+  - `RunListRequest`
+  - `RunRetrievalRequest`
+  - `RunRetrievalOutcome`
+  - `RunCancelRequest`
+- app-facing exec/reset/run-lookup paths now use those typed execution-side
+  requests instead of scattering wrapper semantics across `app.py`.
+- `ExecutionService` compatibility wrappers were restored at the public edge so
+  existing direct callers still keep stable method contracts for:
+  - `execute_code(...)`
+  - `start_background_code(...)`
+  - `reset_session(...)`
+  - `list_runs(...)`
+  - `get_run(...)`
+  - `wait_for_run(...)`
+  - `observe_run(...)`
+  - `cancel_run(...)`
+- the richer typed run-retrieval path now lives behind
+  `ExecutionService.retrieve_run(...)` so app-facing internal callers can use
+  `RunRetrievalOutcome` without changing the older edge contract of
+  `get_run(...)`.
+- `follow_run(...)` now forces follow semantics through the observation path so
+  request-shape mistakes cannot silently degrade into snapshot reads.
+- active-run lookup for idle/helper coordination is now owned by run-control
+  through `RunManager.active_run_for_session(...)` instead of being rebuilt in
+  `execution.py` by scanning generic run listings.
+- `ops.py` and `NotebookOps` were removed entirely.
+- `KernelIntrospection` is now the sole semantic boundary for:
+  - `vars`
+  - `inspect`
+  - `reload`
+- `KernelIntrospection` now depends only on a narrow session-access seam rather
+  than the whole execution service surface.
+- CLI and app wiring now construct and use `KernelIntrospection` directly
+  instead of routing helper behavior through `NotebookOps`.
+- tests were rebalanced accordingly:
+  - the `NotebookOps` unit seam was removed
+  - app/CLI tests now target `KernelIntrospection` or typed execution requests
+  - execution tests now cover both the compatibility wrappers and the typed
+    retrieval path
+
+What this tranche intentionally did not do:
+
+- it did not remove the CLI dependency from background execution
+- it did not remove `ExecutionService` compatibility wrappers at the public
+  edge
+- it did not remove the remaining command-data compatibility adapters
+- it did not eliminate all mapping-based output/projection fallbacks
+
+What is still incomplete:
+
+- background run bootstrapping still depends on the hidden CLI
+  `_background-run` command rather than a run-control-owned worker entrypoint.
+- `ExecutionService` still carries both:
+  - the new typed internal request/retrieval surface
+  - the preserved compatibility wrapper surface for older callers
+- `SerializedCommandData` / `compat_command_data(...)` and some
+  mapping-oriented output/projection fallbacks still remain at explicit
+  compatibility edges.
+
 ## Next Tranche
 
-The next highest-value work is now **deepening or removing the remaining
-shallow app-facing facades**, starting with `execution.py` and then `ops.py`.
-The state split is now strong enough that the biggest remaining ownership issue
-is app-facing policy that is still spread across wrapper layers.
+The next highest-value work is now **removing the CLI dependency from
+background run-control**. The execution/introspection ownership cut is now
+strong enough that the biggest remaining abstraction leak is background worker
+bootstrapping through the hidden CLI entrypoint.
 
 That tranche should include:
 
-- deciding whether `execution.py` is the true app-facing execution boundary or
-  whether part of its surface should move down into run-control/runtime owners.
-- removing mixed responsibility inside `ExecutionService` so one owner is
-  clearly responsible for:
-  - session-access policy
-  - run submission/observation/cancellation semantics
-  - active-run detection for helper/idle access
-- either deepening `ops.py` into a genuine semantic module for
-  vars/inspect/reload behavior or inlining it away in favor of a clearer
-  `KernelIntrospection` boundary.
-- reducing monkeypatch-oriented fallback logic in `NotebookOps` where it exists
-  only to preserve older test seams rather than current abstraction needs.
-- rebalancing tests so `execution.py` / `ops.py` behavior is asserted at the
-  owning boundary instead of through `app.py` or wrapper compatibility tests.
+- moving background worker startup behind a run-control-owned entrypoint rather
+  than invoking the CLI’s hidden `_background-run` command as an
+  implementation detail.
+- making `runs` own the worker launch contract explicitly:
+  - worker argv/entrypoint shape
+  - environment handoff
+  - execution-id/project/session routing
+  - completion handoff back into durable run state
+- keeping the CLI as a caller of run-control rather than a participant in the
+  background-run implementation.
+- rebalancing tests so background execution behavior is asserted at the
+  `runs` boundary first, with smaller CLI tests for delegation and user-visible
+  behavior.
 
 Advice for that tranche:
 
-- start with `execution.py`, not `ops.py`; it has the bigger ownership problem
-  and its outcome will constrain how helper access should be modeled.
-- keep `app.py` thin: command handlers should resolve intent and render the
-  stable envelope, not regain wait/poll/run-selection policy.
-- avoid bundling background-worker CLI inversion into the same tranche unless
-  the new execution boundary makes the worker entrypoint shape obvious.
-- prefer moving policy downward over adding another facade; this codebase has
-  enough nouns already.
+- keep `app.py` and `cli.py` thin: they should submit work to run-control, not
+  define the worker boot path.
+- avoid mixing this tranche with aggressive public-edge compatibility pruning;
+  the worker entrypoint inversion is already a deep enough cut.
+- let the worker-entrypoint redesign inform the later decision about how long
+  to keep `ExecutionService` compatibility wrappers and remaining explicit
+  command-data adapters.
 
-After that, the likely tranche is to remove the CLI dependency from background
-run-control, and then decide how aggressively to prune the remaining explicit
-compatibility adapters.
+After that, the likely tranche is to decide how aggressively to prune the
+remaining explicit compatibility adapters at the execution/command-data edge.

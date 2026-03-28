@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agentnb.errors import AgentNBException
-from agentnb.ops import NotebookOps
+from agentnb.introspection import KernelIntrospection
 from agentnb.runtime import KernelRuntime
 from tests.conftest import TestLocalIPythonBackend
 from tests.helpers import create_project_dir, reset_integration_kernel
@@ -72,8 +72,8 @@ import localmod
         timeout_s=5,
     )
 
-    ops = NotebookOps(runtime)
-    vars_payload = ops.list_vars(project_root=project_dir)
+    introspection = KernelIntrospection(runtime)
+    vars_payload = introspection.list_vars(project_root=project_dir).payload
     assert any(item["name"] == "my_value" for item in vars_payload)
     names = {item["name"] for item in vars_payload}
     assert "In" not in names
@@ -81,7 +81,7 @@ import localmod
     assert "get_ipython" not in names
     assert "open" not in names
 
-    inspect_payload = ops.inspect_var(project_root=project_dir, name="my_value")
+    inspect_payload = introspection.inspect_var(project_root=project_dir, name="my_value").payload
     assert inspect_payload["name"] == "my_value"
     assert inspect_payload["type"] == "list"
     assert inspect_payload["preview"] == {
@@ -111,7 +111,10 @@ def greet() -> str:
     )
     assert before_reload.result == "('v1', 'v1')"
 
-    reload_payload = ops.reload_module(project_root=project_dir, module_name="localmod")
+    reload_payload = introspection.reload_module(
+        project_root=project_dir,
+        module_name="localmod",
+    ).payload
     assert reload_payload["requested_module"] == "localmod"
     assert reload_payload["reloaded_modules"] == ["localmod"]
     assert "greet" in reload_payload["rebound_names"]
@@ -201,8 +204,8 @@ frame = DataFrameLike()
 """,
     )
 
-    ops = NotebookOps(runtime)
-    inspect_payload = ops.inspect_var(project_root=project_dir, name="frame")
+    introspection = KernelIntrospection(runtime)
+    inspect_payload = introspection.inspect_var(project_root=project_dir, name="frame").payload
 
     assert inspect_payload["name"] == "frame"
     assert inspect_payload["preview"] is not None
@@ -234,10 +237,13 @@ payload = holder.value
 """,
     )
 
-    ops = NotebookOps(runtime)
+    introspection = KernelIntrospection(runtime)
 
-    attr_payload = ops.inspect_var(project_root=project_dir, name="holder.value")
-    subscript_payload = ops.inspect_var(project_root=project_dir, name="payload['items'][0]")
+    attr_payload = introspection.inspect_var(project_root=project_dir, name="holder.value").payload
+    subscript_payload = introspection.inspect_var(
+        project_root=project_dir,
+        name="payload['items'][0]",
+    ).payload
 
     assert attr_payload["name"] == "holder.value"
     assert attr_payload["preview"] == {
@@ -279,7 +285,14 @@ payload = {
 """,
     )
 
-    inspect_payload = NotebookOps(runtime).inspect_var(project_root=project_dir, name="payload")
+    inspect_payload = (
+        KernelIntrospection(runtime)
+        .inspect_var(
+            project_root=project_dir,
+            name="payload",
+        )
+        .payload
+    )
 
     assert inspect_payload["preview"] == {
         "kind": "mapping-like",
@@ -346,7 +359,7 @@ def value() -> str:
 """.lstrip(),
     )
 
-    reload_payload = NotebookOps(runtime).reload_module(project_root=project_dir)
+    reload_payload = KernelIntrospection(runtime).reload_module(project_root=project_dir).payload
 
     assert reload_payload["requested_module"] is None
     assert reload_payload["mode"] == "project"
@@ -368,10 +381,10 @@ def test_ops_history_records_errors_as_semantic_commands(
     started_runtime_module: tuple[KernelRuntime, Path],
 ) -> None:
     runtime, project_dir = started_runtime_module
-    ops = NotebookOps(runtime)
+    introspection = KernelIntrospection(runtime)
 
     with pytest.raises(AgentNBException):
-        ops.inspect_var(project_root=project_dir, name="missing_value")
+        introspection.inspect_var(project_root=project_dir, name="missing_value")
 
     visible_history = runtime.history(project_root=project_dir, errors_only=True)
     assert len(visible_history) == 1
@@ -405,7 +418,7 @@ frame = FakeFrame()
 """,
     )
 
-    vars_payload = NotebookOps(runtime).list_vars(project_root=project_dir)
+    vars_payload = KernelIntrospection(runtime).list_vars(project_root=project_dir).payload
     frame_entry = next(item for item in vars_payload if item["name"] == "frame")
     assert frame_entry["repr"] == "DataFrame shape=(10, 3) columns=a, b, c"
 
@@ -432,12 +445,12 @@ rows = conn.execute("select * from items order by id").fetchall()
 """,
     )
 
-    ops = NotebookOps(runtime)
-    vars_payload = ops.list_vars(project_root=project_dir)
+    introspection = KernelIntrospection(runtime)
+    vars_payload = introspection.list_vars(project_root=project_dir).payload
     row_entry = next(item for item in vars_payload if item["name"] == "rows")
     assert row_entry["repr"] == "list len=2 item_keys=id, title"
 
-    inspect_payload = ops.inspect_var(project_root=project_dir, name="rows")
+    inspect_payload = introspection.inspect_var(project_root=project_dir, name="rows").payload
     preview = inspect_payload["preview"]
     assert preview["kind"] == "sequence-like"
     assert preview["sample_keys"] == ["id", "title"]
@@ -460,7 +473,14 @@ posts = [
 """,
     )
 
-    inspect_payload = NotebookOps(runtime).inspect_var(project_root=project_dir, name="posts")
+    inspect_payload = (
+        KernelIntrospection(runtime)
+        .inspect_var(
+            project_root=project_dir,
+            name="posts",
+        )
+        .payload
+    )
     assert inspect_payload["preview"]["kind"] == "sequence-like"
     assert inspect_payload["preview"]["length"] == 3
     assert inspect_payload["preview"]["item_type"] == "dict"

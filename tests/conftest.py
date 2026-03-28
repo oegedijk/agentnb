@@ -14,8 +14,8 @@ from click.testing import CliRunner
 from agentnb.contracts import KernelStatus
 from agentnb.execution import ExecutionRecord, ExecutionService, ExecutionStore
 from agentnb.history import HistoryRecord, HistoryStore, user_command_record
+from agentnb.introspection import KernelIntrospection
 from agentnb.kernel.backend import LocalIPythonBackend, _close_client, _hard_kill_signal
-from agentnb.ops import NotebookOps
 from agentnb.recording import CommandRecorder
 from agentnb.runtime import KernelRuntime
 from agentnb.session import SessionInfo, pid_exists
@@ -81,19 +81,19 @@ def patch_cli_runtime(runtime: KernelRuntime, monkeypatch: pytest.MonkeyPatch) -
     import agentnb.cli as cli
 
     executions = ExecutionService(runtime)
-    ops = NotebookOps(runtime, executions=executions)
+    introspection = KernelIntrospection(runtime, session_access=executions)
     monkeypatch.setattr(
         runtime,
         "ensure_started",
         lambda **_: (KernelStatus(alive=True, pid=123), False),
     )
     monkeypatch.setattr(cli, "runtime", runtime)
-    monkeypatch.setattr(cli, "ops", ops)
+    monkeypatch.setattr(cli, "introspection", introspection)
     monkeypatch.setattr(cli, "executions", executions)
     monkeypatch.setattr(
         cli,
         "application",
-        cli.AgentNBApp(runtime=runtime, executions=executions, ops=ops),
+        cli.AgentNBApp(runtime=runtime, executions=executions, introspection=introspection),
     )
 
 

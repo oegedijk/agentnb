@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -25,17 +26,19 @@ from agentnb.command_data import RunLookupCommandData, RunsListCommandData
 from agentnb.contracts import HelperAccessMetadata, KernelStatus
 from agentnb.errors import AmbiguousSessionError
 from agentnb.execution import (
+    ExecutionCommandRequest,
     ExecutionRecord,
     ExecutionService,
     ManagedExecution,
+    RunListRequest,
+    RunRetrievalOutcome,
+    RunRetrievalRequest,
     SessionAccessOutcome,
     StartOutcome,
 )
 from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
-from agentnb.introspection import KernelHelperResult
+from agentnb.introspection import KernelHelperResult, KernelIntrospection
 from agentnb.journal import JournalEntry
-from agentnb.ops import NotebookOps
-from agentnb.runs.models import RunObservationResult
 from agentnb.runtime import KernelRuntime, RuntimeState
 from agentnb.selectors import parse_history_reference, parse_run_reference
 from agentnb.state import CommandLockInfo
@@ -52,8 +55,21 @@ class DummySink:
 
 def _assert_called_with_subset(mock_obj, **expected: object) -> None:
     kwargs = mock_obj.call_args.kwargs
+    request = kwargs.get("request")
     for key, value in expected.items():
-        assert kwargs[key] == value
+        if key in kwargs:
+            assert kwargs[key] == value
+            continue
+        assert getattr(request, key) == value
+
+
+def _single_request(mock_obj):
+    assert mock_obj.call_count == 1
+    if mock_obj.call_args.args:
+        return mock_obj.call_args.args[0]
+    if "request" in mock_obj.call_args.kwargs:
+        return mock_obj.call_args.kwargs["request"]
+    return next(iter(mock_obj.call_args.kwargs.values()))
 
 
 @pytest.mark.parametrize(
@@ -113,7 +129,7 @@ def test_app_exec_success_routes_through_resolved_session(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
     executions = Mock(spec=ExecutionService)
-    executions.execute_code.return_value = ManagedExecution(
+    executions.execute.return_value = ManagedExecution(
         record=ExecutionRecord(
             execution_id="run-123",
             ts="2026-03-12T00:00:00+00:00",
@@ -143,15 +159,15 @@ def test_app_exec_success_routes_through_resolved_session(project_dir) -> None:
     assert response.data["result"] == "2"
     assert response.data["ensured_started"] is True
     assert response.data["started_new_session"] is True
-    executions.execute_code.assert_called_once()
-    _assert_called_with_subset(
-        executions.execute_code,
-        project_root=project_dir.resolve(),
-        session_id="analysis",
-        code="1 + 1",
-        timeout_s=7,
-        ensure_started=True,
-    )
+    request = _single_request(executions.execute)
+    assert isinstance(request, ExecutionCommandRequest)
+    assert request.project_root == project_dir.resolve()
+    assert request.session_id == "analysis"
+    assert request.command_type == "exec"
+    assert request.code == "1 + 1"
+    assert request.timeout_s == 7
+    assert request.ensure_started is True
+    assert request.mode == "foreground"
 
 
 def test_app_exec_streaming_failure_returns_top_level_execution_error(project_dir) -> None:
@@ -159,7 +175,7 @@ def test_app_exec_streaming_failure_returns_top_level_execution_error(project_di
     runtime.resolve_session_id.return_value = "default"
     executions = Mock(spec=ExecutionService)
     sink = DummySink()
-    executions.execute_code.return_value = ManagedExecution(
+    executions.execute.return_value = ManagedExecution(
         record=ExecutionRecord(
             execution_id="run-456",
             ts="2026-03-12T00:00:00+00:00",
@@ -189,23 +205,21 @@ def test_app_exec_streaming_failure_returns_top_level_execution_error(project_di
     assert response.error.code == "EXECUTION_ERROR"
     assert response.data["status"] == "error"
     assert response.data["ename"] == "ZeroDivisionError"
-    executions.execute_code.assert_called_once()
-    _assert_called_with_subset(
-        executions.execute_code,
-        project_root=project_dir.resolve(),
-        session_id="default",
-        code="1 / 0",
-        timeout_s=30.0,
-        ensure_started=True,
-        event_sink=sink,
-    )
+    request = _single_request(executions.execute)
+    assert isinstance(request, ExecutionCommandRequest)
+    assert request.project_root == project_dir.resolve()
+    assert request.session_id == "default"
+    assert request.code == "1 / 0"
+    assert request.timeout_s == 30.0
+    assert request.ensure_started is True
+    assert request.event_sink is sink
 
 
 def test_app_exec_background_success_uses_background_service(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
     executions = Mock(spec=ExecutionService)
-    executions.start_background_code.return_value = ManagedExecution(
+    executions.execute.return_value = ManagedExecution(
         record=ExecutionRecord(
             execution_id="run-bg",
             ts="2026-03-12T00:00:00+00:00",
@@ -235,21 +249,20 @@ def test_app_exec_background_success_uses_background_service(project_dir) -> Non
     assert response.data["background"] is True
     assert response.data["ensured_started"] is True
     assert response.data["started_new_session"] is True
-    executions.start_background_code.assert_called_once()
-    _assert_called_with_subset(
-        executions.start_background_code,
-        project_root=project_dir.resolve(),
-        session_id="analysis",
-        code="long_running()",
-        ensure_started=True,
-    )
+    request = _single_request(executions.execute)
+    assert isinstance(request, ExecutionCommandRequest)
+    assert request.project_root == project_dir.resolve()
+    assert request.session_id == "analysis"
+    assert request.code == "long_running()"
+    assert request.ensure_started is True
+    assert request.mode == "background"
 
 
 def test_app_exec_output_selector_adds_selected_text(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "default"
     executions = Mock(spec=ExecutionService)
-    executions.execute_code.return_value = ManagedExecution(
+    executions.execute.return_value = ManagedExecution(
         record=ExecutionRecord(
             execution_id="run-select",
             ts="2026-03-12T00:00:00+00:00",
@@ -297,7 +310,7 @@ def test_app_exec_uses_strict_implicit_session_resolution(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
     executions = Mock(spec=ExecutionService)
-    executions.execute_code.return_value = ManagedExecution(
+    executions.execute.return_value = ManagedExecution(
         record=ExecutionRecord(
             execution_id="run-123",
             ts="2026-03-12T00:00:00+00:00",
@@ -468,15 +481,15 @@ def test_app_status_projects_busy_lock_metadata(project_dir) -> None:
 @pytest.mark.parametrize(
     ("method_name", "result_method_name", "request_factory"),
     [
-        ("vars", "list_vars_result", lambda project_dir: VarsRequest(project_root=project_dir)),
+        ("vars", "list_vars", lambda project_dir: VarsRequest(project_root=project_dir)),
         (
             "inspect",
-            "inspect_var_result",
+            "inspect_var",
             lambda project_dir: InspectRequest(project_root=project_dir, name="value"),
         ),
         (
             "reload",
-            "reload_module_result",
+            "reload_module",
             lambda project_dir: ReloadRequest(project_root=project_dir),
         ),
     ],
@@ -495,8 +508,12 @@ def test_app_read_commands_project_starting_state_without_running_helpers(
         kernel_status=KernelStatus(alive=False),
         has_connection_file=True,
     )
-    ops = Mock(spec=NotebookOps)
-    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService), ops=ops)
+    introspection = Mock(spec=KernelIntrospection)
+    app = AgentNBApp(
+        runtime=runtime,
+        executions=Mock(spec=ExecutionService),
+        introspection=introspection,
+    )
 
     response = getattr(app, method_name)(request_factory(project_dir))
 
@@ -511,7 +528,7 @@ def test_app_read_commands_project_starting_state_without_running_helpers(
         project_root=project_dir.resolve(),
         session_id="analysis",
     )
-    getattr(ops, result_method_name).assert_not_called()
+    getattr(introspection, result_method_name).assert_not_called()
 
 
 def test_app_wait_uses_execution_service_wait_for_usable(project_dir) -> None:
@@ -647,7 +664,7 @@ def test_app_reset_failure_returns_top_level_execution_error(project_dir) -> Non
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
     executions = Mock(spec=ExecutionService)
-    executions.reset_session.return_value = ManagedExecution(
+    executions.execute.return_value = ManagedExecution(
         record=ExecutionRecord(
             execution_id="run-reset",
             ts="2026-03-12T00:00:00+00:00",
@@ -675,12 +692,12 @@ def test_app_reset_failure_returns_top_level_execution_error(project_dir) -> Non
     assert response.error.code == "EXECUTION_ERROR"
     assert response.data["status"] == "error"
     assert response.data["execution_id"] == "run-reset"
-    _assert_called_with_subset(
-        executions.reset_session,
-        project_root=project_dir.resolve(),
-        session_id="analysis",
-        timeout_s=9.0,
-    )
+    request = _single_request(executions.execute)
+    assert isinstance(request, ExecutionCommandRequest)
+    assert request.project_root == project_dir.resolve()
+    assert request.session_id == "analysis"
+    assert request.command_type == "reset"
+    assert request.timeout_s == 9.0
 
 
 def test_app_runs_list_compacts_runs_and_applies_last_selection(project_dir) -> None:
@@ -751,7 +768,7 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     executions = Mock(spec=ExecutionService)
     sink = DummySink()
-    executions.observe_run.return_value = RunObservationResult(
+    executions.retrieve_run.return_value = RunRetrievalOutcome(
         run=build_execution_record(
             execution_id="run-1",
             session_id="analysis",
@@ -775,13 +792,13 @@ def test_app_runs_follow_uses_run_session_id_in_response(project_dir) -> None:
     assert response.session_id == "analysis"
     assert response.data["run"]["execution_id"] == "run-1"
     assert "result" not in response.data["run"]
-    _assert_called_with_subset(
-        executions.observe_run,
-        project_root=project_dir.resolve(),
-        execution_id="run-1",
-        timeout_s=4.0,
-        event_sink=sink,
-    )
+    request = _single_request(executions.retrieve_run)
+    assert isinstance(request, RunRetrievalRequest)
+    assert request.project_root == project_dir.resolve()
+    assert request.execution_id == "run-1"
+    assert request.mode == "follow"
+    assert request.timeout_s == 4.0
+    assert request.event_sink is sink
 
 
 def test_app_run_lookup_sanitizes_tracebacks_and_hides_follow_output_fields(project_dir) -> None:
@@ -808,11 +825,13 @@ def test_app_run_lookup_sanitizes_tracebacks_and_hides_follow_output_fields(proj
     record_run = build_execution_record(
         **{key: value for key, value in dict(raw_run).items() if key != "outputs"}
     )
-    executions.get_run.return_value = dict(raw_run)
-    executions.observe_run.return_value = RunObservationResult(
-        run=record_run,
-        completion_reason="window_elapsed",
-    )
+    executions.retrieve_run.side_effect = [
+        RunRetrievalOutcome(run=cast(ExecutionRecord, dict(raw_run))),
+        RunRetrievalOutcome(
+            run=record_run,
+            completion_reason="window_elapsed",
+        ),
+    ]
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     show_response = app.runs_show(
@@ -849,12 +868,14 @@ def test_app_runs_show_resolves_latest_selector_before_lookup(project_dir) -> No
         {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
         {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
     ]
-    executions.get_run.return_value = {
-        "execution_id": "run-2",
-        "session_id": "default",
-        "status": "ok",
-        "result": "2",
-    }
+    executions.retrieve_run.return_value = RunRetrievalOutcome(
+        run=build_execution_record(
+            execution_id="run-2",
+            session_id="default",
+            status="ok",
+            result="2",
+        )
+    )
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     response = app.runs_show(
@@ -866,16 +887,15 @@ def test_app_runs_show_resolves_latest_selector_before_lookup(project_dir) -> No
 
     assert response.status == "ok"
     assert response.data["run"]["execution_id"] == "run-2"
-    _assert_called_with_subset(
-        executions.list_runs,
-        project_root=project_dir.resolve(),
-        session_id=None,
-    )
-    _assert_called_with_subset(
-        executions.get_run,
-        project_root=project_dir.resolve(),
-        execution_id="run-2",
-    )
+    list_request = _single_request(executions.list_runs)
+    assert isinstance(list_request, RunListRequest)
+    assert list_request.project_root == project_dir.resolve()
+    assert list_request.session_id is None
+    lookup_request = _single_request(executions.retrieve_run)
+    assert isinstance(lookup_request, RunRetrievalRequest)
+    assert lookup_request.project_root == project_dir.resolve()
+    assert lookup_request.execution_id == "run-2"
+    assert lookup_request.mode == "get"
 
 
 @pytest.mark.parametrize(
@@ -934,39 +954,38 @@ def test_app_run_lookup_commands_hide_internal_outputs_from_response(
         cancel_requested=True,
         recorded_ename="KeyboardInterrupt",
     )
-    executions.get_run.return_value = build_execution_record(**dict(run_payload))
-    executions.wait_for_run.return_value = build_execution_record(**dict(run_payload))
-    executions.observe_run.return_value = RunObservationResult(
-        run=observed_run,
-        completion_reason="terminal",
-    )
+    executions.retrieve_run.side_effect = [
+        RunRetrievalOutcome(run=build_execution_record(**dict(run_payload))),
+        RunRetrievalOutcome(run=build_execution_record(**dict(run_payload))),
+        RunRetrievalOutcome(run=observed_run, completion_reason="terminal"),
+    ]
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     if command_name == "show":
         response = app.runs_show(request_factory(project_dir))
-        _assert_called_with_subset(
-            executions.get_run,
-            project_root=project_dir.resolve(),
-            execution_id="run-1",
-        )
+        request = _single_request(executions.retrieve_run)
+        assert isinstance(request, RunRetrievalRequest)
+        assert request.project_root == project_dir.resolve()
+        assert request.execution_id == "run-1"
+        assert request.mode == "get"
     elif command_name == "wait":
         response = app.runs_wait(request_factory(project_dir))
-        _assert_called_with_subset(
-            executions.wait_for_run,
-            project_root=project_dir.resolve(),
-            execution_id="run-1",
-            timeout_s=4.0,
-        )
+        request = _single_request(executions.retrieve_run)
+        assert isinstance(request, RunRetrievalRequest)
+        assert request.project_root == project_dir.resolve()
+        assert request.execution_id == "run-1"
+        assert request.mode == "wait"
+        assert request.timeout_s == 4.0
     else:
         response = app.runs_follow(request_factory(project_dir), event_sink=sink)
-        _assert_called_with_subset(
-            executions.observe_run,
-            project_root=project_dir.resolve(),
-            execution_id="run-1",
-            timeout_s=4.0,
-            event_sink=sink,
-            skip_history=True,
-        )
+        request = _single_request(executions.retrieve_run)
+        assert isinstance(request, RunRetrievalRequest)
+        assert request.project_root == project_dir.resolve()
+        assert request.execution_id == "run-1"
+        assert request.mode == "follow"
+        assert request.timeout_s == 4.0
+        assert request.event_sink is sink
+        assert request.skip_history is True
 
     assert response.status == "ok"
     expected_session_id = "analysis" if command_name == "follow" else "default"
@@ -982,7 +1001,7 @@ def test_app_runs_follow_reports_elapsed_window(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     executions = Mock(spec=ExecutionService)
     sink = DummySink()
-    executions.observe_run.return_value = RunObservationResult(
+    executions.retrieve_run.return_value = RunRetrievalOutcome(
         run=build_execution_record(
             execution_id="run-1",
             session_id="analysis",
@@ -1100,8 +1119,8 @@ def test_app_vars_surfaces_helper_access_metadata(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     runtime.resolve_session_id.return_value = "analysis"
     runtime.current_session_id.return_value = "analysis"
-    ops = Mock(spec=NotebookOps)
-    ops.list_vars_result.return_value = KernelHelperResult(
+    introspection = Mock(spec=KernelIntrospection)
+    introspection.list_vars.return_value = KernelHelperResult(
         execution=Mock(),
         payload=[{"name": "value", "type": "int", "repr": "1"}],
         access_metadata=HelperAccessMetadata(
@@ -1112,7 +1131,11 @@ def test_app_vars_surfaces_helper_access_metadata(project_dir) -> None:
             initial_runtime_state="busy",
         ),
     )
-    app = AgentNBApp(runtime=runtime, executions=Mock(spec=ExecutionService), ops=ops)
+    app = AgentNBApp(
+        runtime=runtime,
+        executions=Mock(spec=ExecutionService),
+        introspection=introspection,
+    )
 
     response = app.vars(VarsRequest(project_root=project_dir))
 
@@ -1148,11 +1171,13 @@ def test_app_runs_show_does_not_remember_session_preference(project_dir) -> None
     runtime.resolve_session_id.return_value = "default"
     runtime.current_session_id.return_value = "analysis"
     executions = Mock(spec=ExecutionService)
-    executions.get_run.return_value = {
-        "execution_id": "run-1",
-        "session_id": "other",
-        "status": "ok",
-    }
+    executions.retrieve_run.return_value = RunRetrievalOutcome(
+        run=build_execution_record(
+            execution_id="run-1",
+            session_id="other",
+            status="ok",
+        )
+    )
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     response = app.runs_show(
@@ -1169,11 +1194,13 @@ def test_app_runs_show_exposes_top_level_status_alias(project_dir) -> None:
     runtime.resolve_session_id.return_value = "default"
     runtime.current_session_id.return_value = "analysis"
     executions = Mock(spec=ExecutionService)
-    executions.get_run.return_value = {
-        "execution_id": "run-1",
-        "session_id": "other",
-        "status": "running",
-    }
+    executions.retrieve_run.return_value = RunRetrievalOutcome(
+        run=build_execution_record(
+            execution_id="run-1",
+            session_id="other",
+            status="running",
+        )
+    )
     app = AgentNBApp(runtime=runtime, executions=executions)
 
     response = app.runs_show(
@@ -1202,7 +1229,7 @@ def test_app_file_exec_without_visible_output_surfaces_namespace_delta(project_d
         ),
     ]
     executions = Mock(spec=ExecutionService)
-    executions.execute_code.return_value = ManagedExecution(
+    executions.execute.return_value = ManagedExecution(
         record=ExecutionRecord(
             execution_id="run-1",
             ts="2026-03-10T00:00:00+00:00",
@@ -1214,8 +1241,8 @@ def test_app_file_exec_without_visible_output_surfaces_namespace_delta(project_d
         ),
         start_outcome=StartOutcome(),
     )
-    ops = Mock(spec=NotebookOps)
-    ops.list_vars_result.side_effect = [
+    introspection = Mock(spec=KernelIntrospection)
+    introspection.list_vars.side_effect = [
         KernelHelperResult(
             execution=Mock(),
             payload=[{"name": "value", "type": "int", "repr": "1"}],
@@ -1228,7 +1255,11 @@ def test_app_file_exec_without_visible_output_surfaces_namespace_delta(project_d
             ],
         ),
     ]
-    app = AgentNBApp(runtime=runtime, executions=executions, ops=ops)
+    app = AgentNBApp(
+        runtime=runtime,
+        executions=executions,
+        introspection=introspection,
+    )
 
     response = app.exec(
         ExecRequest(

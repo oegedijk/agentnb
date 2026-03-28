@@ -136,19 +136,6 @@ class ExecutionRecord:
             prefer_explicit_error=True,
         )
 
-    def get(self, key: str, default: object | None = None) -> object:
-        if key == "snapshot_stale":
-            return self.status in _ACTIVE_RUN_STATUSES
-        return self.to_dict().get(key, default)
-
-    def __getitem__(self, key: str) -> object:
-        if key == "snapshot_stale":
-            return self.status in _ACTIVE_RUN_STATUSES
-        payload = dict(self.to_dict())
-        if key not in payload:
-            raise KeyError(key)
-        return payload[key]
-
     def to_dict(self) -> RunSnapshot:
         payload: RunSnapshot = {
             "execution_id": self.execution_id,
@@ -339,6 +326,14 @@ class ExecutionRecord:
         )
 
 
+@dataclass(slots=True, frozen=True)
+class RunSelectorCandidate:
+    execution_id: str
+    ts: str
+    session_id: str
+    status: RunStatus
+
+
 class ExecutionStore:
     def __init__(self, project_root: Path) -> None:
         self.layout = StateLayout(project_root)
@@ -393,6 +388,33 @@ class ExecutionStore:
             if record.execution_id == execution_id:
                 return record
         return None
+
+    def read_selector_candidates(
+        self,
+        *,
+        session_id: str | None = None,
+        command_types: set[str] | None = None,
+    ) -> list[RunSelectorCandidate]:
+        self.manifests.require_compatible(required_versions=_EXECUTION_REQUIRED_RESOURCE_VERSIONS)
+        if not self.executions_file.exists():
+            return []
+
+        entries_by_id: dict[str, RunSelectorCandidate] = {}
+        for line in self.executions_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+                candidate = _selector_candidate_from_payload(payload)
+                command_type = _require_str(cast(dict[str, Any], payload), "command_type")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if session_id is not None and candidate.session_id != session_id:
+                continue
+            if command_types is not None and command_type not in command_types:
+                continue
+            entries_by_id[candidate.execution_id] = candidate
+        return list(entries_by_id.values())
 
     def _require_terminal_journal_entries(self, record: ExecutionRecord) -> ExecutionRecord:
         if record.command_type not in {"exec", "reset"}:
@@ -789,6 +811,18 @@ def _json_value(value: object) -> JSONValue:
             normalized[key] = _json_value(item)
         return normalized
     return str(value)
+
+
+def _selector_candidate_from_payload(payload: object) -> RunSelectorCandidate:
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid execution payload")
+    data = cast(dict[str, Any], payload)
+    return RunSelectorCandidate(
+        execution_id=_require_str(data, "execution_id"),
+        ts=_require_str(data, "ts"),
+        session_id=_require_str(data, "session_id"),
+        status=_require_run_status(data, "status"),
+    )
 
 
 def execution_record_payload(record: ExecutionRecord) -> dict[str, object]:

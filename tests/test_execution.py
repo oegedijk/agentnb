@@ -23,6 +23,8 @@ from agentnb.execution import (
     ExecutionStore,
     RunRetrievalOutcome,
     RunRetrievalRequest,
+    RunSelectionRequest,
+    RunSelectorCandidate,
     SessionAccessOutcome,
     _ExecutionProgressSink,
 )
@@ -551,6 +553,77 @@ def test_execution_service_execute_reset_delegates_to_run_manager(project_dir: P
     assert spec.code is None
     assert spec.mode == "foreground"
     assert spec.timeout_s == 9.0
+
+
+def test_execution_service_lists_typed_run_selector_candidates(project_dir: Path) -> None:
+    runtime = KernelRuntime(backend=Mock())
+    run_manager = Mock()
+    run_manager.list_run_selector_candidates.return_value = [
+        RunSelectorCandidate(
+            execution_id="run-starting",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="analysis",
+            status="starting",
+        ),
+        RunSelectorCandidate(
+            execution_id="run-running",
+            ts="2026-03-10T00:00:01+00:00",
+            session_id="analysis",
+            status="running",
+        ),
+        RunSelectorCandidate(
+            execution_id="run-ok",
+            ts="2026-03-10T00:00:02+00:00",
+            session_id="analysis",
+            status="ok",
+        ),
+        RunSelectorCandidate(
+            execution_id="run-error",
+            ts="2026-03-10T00:00:03+00:00",
+            session_id="analysis",
+            status="error",
+        ),
+    ]
+    service = ExecutionService(runtime, run_manager=run_manager)
+
+    candidates = service.list_run_selector_candidates(
+        request=RunSelectionRequest(
+            project_root=project_dir,
+            session_id="analysis",
+        )
+    )
+
+    assert candidates == [
+        RunSelectorCandidate(
+            execution_id="run-starting",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="analysis",
+            status="starting",
+        ),
+        RunSelectorCandidate(
+            execution_id="run-running",
+            ts="2026-03-10T00:00:01+00:00",
+            session_id="analysis",
+            status="running",
+        ),
+        RunSelectorCandidate(
+            execution_id="run-ok",
+            ts="2026-03-10T00:00:02+00:00",
+            session_id="analysis",
+            status="ok",
+        ),
+        RunSelectorCandidate(
+            execution_id="run-error",
+            ts="2026-03-10T00:00:03+00:00",
+            session_id="analysis",
+            status="error",
+        ),
+    ]
+    assert all(not hasattr(candidate, "result") for candidate in candidates)
+    run_manager.list_run_selector_candidates.assert_called_once_with(
+        project_root=project_dir,
+        session_id="analysis",
+    )
 
 
 def test_execution_service_wait_for_session_access_uses_runtime_ready(project_dir: Path) -> None:

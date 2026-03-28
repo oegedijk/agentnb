@@ -109,7 +109,7 @@ def serialize_command_data(command_name: str, data: CommandData) -> dict[str, An
         )
         return _with_switched_session(payload, data)
     if isinstance(data, InspectCommandData):
-        payload = data.access_metadata.merge_data({"inspect": compact_inspect_value(data.value)})
+        payload = data.access_metadata.merge_data({"inspect": _compact_inspect_value(data.value)})
         return _with_switched_session(payload, data)
     if isinstance(data, ReloadCommandData):
         payload = data.access_metadata.merge_data(_serialize_reload_result(data.result))
@@ -214,7 +214,7 @@ def selected_exec_output(payload: Mapping[str, object], selector: str) -> str:
     return "" if value is None else str(value)
 
 
-def compact_execution_payload(
+def _compact_execution_payload(
     data: ExecCommandData,
 ) -> ExecPayload:
     outcome = data.record.outcome()
@@ -292,7 +292,7 @@ def compact_result_preview(
     return None
 
 
-def compact_inspect_value(value: InspectValue) -> InspectPayload:
+def _compact_inspect_value(value: InspectValue) -> InspectPayload:
     compacted: InspectPayload = {
         "name": value.name,
         "type": value.type_name,
@@ -416,7 +416,7 @@ def _serialize_kernel_session_data(data: KernelSessionData) -> dict[str, Any]:
 
 
 def _serialize_exec_data(data: ExecCommandData) -> dict[str, Any]:
-    payload = dict(compact_execution_payload(data))
+    payload = dict(_compact_execution_payload(data))
     if data.source_kind is not None:
         payload["source_kind"] = data.source_kind
     if data.source_path is not None:
@@ -887,9 +887,7 @@ def _mapping_to_dict(payload: Mapping[str, object]) -> dict[str, object]:
 
 
 __all__ = [
-    "compact_execution_payload",
     "compact_history_entry",
-    "compact_inspect_value",
     "compact_result_preview",
     "full_history_entry",
     "project_agent_data",

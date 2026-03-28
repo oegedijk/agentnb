@@ -678,30 +678,103 @@ What is still incomplete:
   be reviewed only as deliberate external edges, not as internal convenience
   seams.
 
+### Tranche 10: Typed Run Selection Cutover
+
+Status: done
+
+Completed in the current refactor:
+
+- run selection now has an owning typed seam below selector resolution:
+  - `RunSelectionRequest`
+  - `RunSelectorCandidate`
+  - `ExecutionService.list_run_selector_candidates(...)`
+- the actual selector-candidate projection now lives below the execution
+  boundary instead of being rebuilt from generic run mappings:
+  - `ExecutionStore.read_selector_candidates(...)`
+  - `LocalRunManager.list_run_selector_candidates(...)`
+- `selectors.py` now resolves `@latest`, `@active`, `@last-error`, and
+  `@last-success` against typed `RunSelectorCandidate` values only.
+- selector resolution no longer depends on `Mapping`/`cast`/`.get(...)`
+  patterns for run snapshots.
+- `ExecutionRecord` is no longer a mapping-like compatibility object:
+  - `ExecutionRecord.get(...)` removed
+  - `ExecutionRecord.__getitem__(...)` removed
+- direct `LocalRunManager` tests, app tests, selector tests, and CLI selector
+  tests were rebalanced onto the typed selector seam instead of the old
+  subscriptable snapshot contract.
+- serializer cleanup for this tranche stayed narrow:
+  - `_compact_execution_payload(...)` is now private
+  - `_compact_inspect_value(...)` is now private
+  - tests now assert exec serialization through `serialize_command_data(...)`
+    instead of importing private compaction helpers
+
+What this tranche intentionally did not do:
+
+- it did not introduce a narrower exec/reset view DTO
+- it did not change persisted run schemas or manifest/resource-version policy
+- it did not introduce a generic typed model for serialized error metadata
+- it did not collapse the remaining response/projection helper surface into one
+  module yet
+
+New invariants after this tranche:
+
+- run selector resolution above the run-control boundary is typed-only
+- run-control/storage, not selectors, now own the selector-candidate data seam
+- `ExecutionRecord` no longer pretends to be a generic mapping for internal
+  convenience
+- mapping assertions remain only for deliberate wire/serialized-edge behavior
+
+What is still incomplete:
+
+- `ExecCommandData` still carries `ExecutionRecord` directly, so:
+  - `app.py`
+  - `output.py`
+  - `advice.py`
+  - `response_serialization.py`
+  still read exec/reset outcome facts from the storage-owned execution model
+- selected-output and exec preview derivation are still split across app and
+  serializer helpers instead of having one typed owning exec view
+- `response_serialization.py` still exports several product-used helpers that
+  are legitimate today, but the remaining ownership split between app/output
+  and response shaping deserves another clean cut
+
 ## Next Tranche
 
-The next highest-value work is now **tightening run selection and remaining
-public serialized helpers around real owning boundaries**.
+The next highest-value work is now **cutting exec/reset over to an app-owned
+exec view and tightening presentation ownership around that view**.
 
 That tranche should include:
 
-- introducing a typed run-summary view at the execution/selector seam so
-  `selectors.py` stops interpreting generic run mappings directly
-- deciding whether `ExecCommandData.record` should remain `ExecutionRecord` as
-  the canonical exec outcome owner or whether a narrower exec-view DTO is now
-  justified
-- auditing the remaining public/package helpers that still expose serialized
-  payload dicts and deleting any that are not real external edges
+- introducing a typed exec/reset view owned above the canonical execution
+  outcome model so `ExecCommandData` no longer carries raw `ExecutionRecord`
+  into app/output/advice/serializer layers
+- projecting from `ExecutionRecord` once at the owning boundary and giving
+  higher layers only the facts they actually need:
+  - execution identity/status
+  - stdout/stderr/result views
+  - selected-output text
+  - preview data
+  - session restart/start metadata
+  - namespace delta
+- moving selected-output/preview derivation behind one owner instead of
+  splitting it between `_ExecPayloadBuilder`, `response_serialization.py`, and
+  output/advice helpers
+- reviewing the remaining exported response-serialization helpers and keeping
+  only the ones that are true edge helpers rather than shared internal
+  convenience seams
 - keeping tests focused on owning boundaries:
-  - typed internal seams for product code
-  - mapping assertions only for deliberate wire/package contracts
+  - direct DTO/projection tests for the new exec view seam
+  - app/output/advice tests consuming the typed exec view
+  - mapping assertions only for full response serialization and public wire
+    contracts
 
 Advice for that tranche:
 
-- keep the clean-cut rule: do not reintroduce compatibility shims between
-  internal layers just because they are convenient.
-- prefer one deep typed owner per seam over broad reusable “data bags”.
-- if a higher layer only needs a subset view, project it once at the owning
-  boundary instead of passing the lower-layer domain model through unchanged.
-- preserve the stable full JSON envelope only at the serializer edge; do not
-  let wire contracts become internal currency again.
+- keep the clean-cut rule: do not add a dual `record` plus `view` path inside
+  `ExecCommandData`
+- preserve `ExecutionRecord` as the canonical execution/run-control model, but
+  stop leaking it upward where callers only need an app-facing exec view
+- prefer one owner for exec preview/selection policy over helper reuse spread
+  across layers
+- do not widen the tranche into persistence or generic error-model work unless
+  a concrete exec-view cutover forces it

@@ -5,7 +5,7 @@ from typing import Protocol
 
 from ..contracts import HelperAccessMetadata
 from .models import RunCancelOutcome, RunHandle, RunObservationResult, RunObserver, RunSpec
-from .store import ExecutionRecord, ManagedExecution
+from .store import ExecutionRecord, ManagedExecution, RunSelectorCandidate
 
 
 class RunManager(Protocol):
@@ -18,6 +18,13 @@ class RunManager(Protocol):
         session_id: str | None = None,
         errors_only: bool = False,
     ) -> list[ExecutionRecord]: ...
+
+    def list_run_selector_candidates(
+        self,
+        *,
+        project_root: Path,
+        session_id: str | None = None,
+    ) -> list[RunSelectorCandidate]: ...
 
     def get_run(self, *, project_root: Path, execution_id: str) -> ExecutionRecord: ...
 

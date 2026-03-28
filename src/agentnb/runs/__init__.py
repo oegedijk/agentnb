@@ -12,7 +12,14 @@ from .models import (
     RunPlan,
     RunSpec,
 )
-from .store import ExecutionRecord, ExecutionRun, ExecutionStore, ManagedExecution, StartOutcome
+from .store import (
+    ExecutionRecord,
+    ExecutionRun,
+    ExecutionStore,
+    ManagedExecution,
+    RunSelectorCandidate,
+    StartOutcome,
+)
 
 __all__ = [
     "ExecutionRecord",
@@ -30,6 +37,7 @@ __all__ = [
     "RunObservationResult",
     "RunObserver",
     "RunPlan",
+    "RunSelectorCandidate",
     "RunSpec",
     "StartOutcome",
     "_ExecutionProgressSink",

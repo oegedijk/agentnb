@@ -27,6 +27,7 @@ from agentnb.execution import (
     ExecutionRecord,
     ManagedExecution,
     RunRetrievalOutcome,
+    RunSelectorCandidate,
     SessionAccessOutcome,
     StartOutcome,
 )
@@ -2226,9 +2227,19 @@ def test_cli_runs_show_json_strips_ansi_tracebacks(
 def test_cli_runs_show_accepts_latest_selector(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.executions.list_runs = lambda **_: [  # type: ignore[method-assign]
-        {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
-        {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
+    cli.executions.list_run_selector_candidates = lambda **_: [  # type: ignore[method-assign]
+        RunSelectorCandidate(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            status="ok",
+        ),
+        RunSelectorCandidate(
+            execution_id="run-2",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            status="ok",
+        ),
     ]
     cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
         run=build_execution_record(
@@ -2259,10 +2270,24 @@ def test_cli_runs_show_defaults_to_latest_relevant_run(
     import agentnb.cli as cli
 
     cli.runtime.current_session_id = lambda **_: "analysis"  # type: ignore[method-assign]
-    cli.executions.list_runs = lambda **kwargs: (  # type: ignore[method-assign]
-        [{"execution_id": "run-analysis", "ts": "2026-03-11T00:00:00+00:00"}]
+    cli.executions.list_run_selector_candidates = lambda **kwargs: (  # type: ignore[method-assign]
+        [
+            RunSelectorCandidate(
+                execution_id="run-analysis",
+                ts="2026-03-11T00:00:00+00:00",
+                session_id="analysis",
+                status="ok",
+            )
+        ]
         if kwargs["request"].session_id == "analysis"
-        else [{"execution_id": "run-other", "ts": "2026-03-12T00:00:00+00:00"}]
+        else [
+            RunSelectorCandidate(
+                execution_id="run-other",
+                ts="2026-03-12T00:00:00+00:00",
+                session_id="default",
+                status="ok",
+            )
+        ]
     )
     cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
         run=build_execution_record(
@@ -2282,8 +2307,13 @@ def test_cli_runs_show_defaults_to_latest_relevant_run(
 def test_cli_runs_wait_defaults_to_active_run(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.executions.list_runs = lambda **_: [  # type: ignore[method-assign]
-        {"execution_id": "run-1", "ts": "2026-03-11T00:00:00+00:00", "status": "running"},
+    cli.executions.list_run_selector_candidates = lambda **_: [  # type: ignore[method-assign]
+        RunSelectorCandidate(
+            execution_id="run-1",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            status="running",
+        ),
     ]
     cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
         run=build_execution_record(

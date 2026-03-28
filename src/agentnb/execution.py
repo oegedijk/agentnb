@@ -22,6 +22,7 @@ from .runs import (
     RunCancelOutcome,
     RunManager,
     RunObservationCompletion,
+    RunSelectorCandidate,
     RunSpec,
     StartOutcome,
     _ExecutionProgressSink,
@@ -92,6 +93,12 @@ class RunListRequest:
     project_root: Path
     session_id: str | None = None
     errors_only: bool = False
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RunSelectionRequest:
+    project_root: Path
+    session_id: str | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -167,6 +174,16 @@ class ExecutionService:
             project_root=request.project_root,
             session_id=request.session_id,
             errors_only=request.errors_only,
+        )
+
+    def list_run_selector_candidates(
+        self,
+        *,
+        request: RunSelectionRequest,
+    ) -> list[RunSelectorCandidate]:
+        return self._run_manager.list_run_selector_candidates(
+            project_root=request.project_root,
+            session_id=request.session_id,
         )
 
     def retrieve_run(self, request: RunRetrievalRequest) -> RunRetrievalOutcome:
@@ -350,6 +367,8 @@ __all__ = [
     "RunListRequest",
     "RunRetrievalOutcome",
     "RunRetrievalRequest",
+    "RunSelectionRequest",
+    "RunSelectorCandidate",
     "SessionAccessOutcome",
     "SessionAccessProvider",
     "SessionAccessRequest",

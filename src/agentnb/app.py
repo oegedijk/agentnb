@@ -7,7 +7,7 @@ from typing import Literal, cast
 
 from .advice import AdviceContext, AdvicePolicy
 from .command_data import (
-    CommandDataLike,
+    CommandData,
     DoctorCommandData,
     ExecCommandData,
     HistoryCommandData,
@@ -26,7 +26,6 @@ from .command_data import (
     SessionsListCommandData,
     StopCommandData,
     VarsCommandData,
-    ensure_command_data,
     normalize_run_payload,
     run_lookup_session_id,
     with_switched_session,
@@ -719,7 +718,7 @@ class AgentNBApp:
 
     def _doctor_payload(self, *, request: DoctorRequest, session_id: str) -> DoctorCommandData:
         return DoctorCommandData.from_status(
-            self.runtime.doctor(
+            self.runtime.doctor_status(
                 project_root=request.project_root,
                 session_id=session_id,
                 python_executable=request.python_executable,
@@ -869,8 +868,8 @@ class AgentNBApp:
         project_override: Path | None,
         requested_session_id: str | None,
         semantics: CommandSemantics,
-        handler: Callable[[str], CommandDataLike],
-        response_session_id_resolver: Callable[[str, CommandDataLike], str] | None = None,
+        handler: Callable[[str], CommandData],
+        response_session_id_resolver: Callable[[str, CommandData], str] | None = None,
     ) -> CommandResponse:
         response_session_id = requested_session_id or DEFAULT_SESSION_ID
 
@@ -882,17 +881,18 @@ class AgentNBApp:
             )
             resolved_session_id = context.session_id
             response_session_id = resolved_session_id
-            data = handler(resolved_session_id)
+            command_data = handler(resolved_session_id)
             if context.switched_session is not None:
-                data = with_switched_session(data, context.switched_session)
-            command_data = ensure_command_data(data)
+                command_data = with_switched_session(command_data, context.switched_session)
             if response_session_id_resolver is not None:
-                response_session_id = response_session_id_resolver(response_session_id, data)
+                response_session_id = response_session_id_resolver(
+                    response_session_id, command_data
+                )
             return success_response(
                 command=command_name,
                 project=str(project_root),
                 session_id=response_session_id,
-                data=data,
+                command_data=command_data,
                 suggestions=self.advisor.suggestions(
                     self._advice_context(
                         command_name=command_name,
@@ -925,7 +925,6 @@ class AgentNBApp:
                 session_source_hint = exc.error_context.session_source
                 if session_source_hint in {"explicit", "remembered", "sole_live", "default"}:
                     error_session_source = cast(ResolutionSource, session_source_hint)
-            error_payload = exc.command_data if exc.command_data is not None else exc.data
             return error_response(
                 command=command_name,
                 project=str(project_root),
@@ -935,12 +934,13 @@ class AgentNBApp:
                 ename=exc.ename,
                 evalue=exc.evalue,
                 traceback=exc.traceback,
-                data=error_payload,
+                command_data=cast(CommandData | None, exc.command_data),
+                error_data=None if exc.command_data is not None else exc.data,
                 suggestions=self.advisor.suggestions(
                     self._advice_context(
                         command_name=command_name,
                         response_status="error",
-                        command_data=cast(CommandDataLike | None, exc.command_data),
+                        command_data=cast(CommandData | None, exc.command_data),
                         data=None,
                         project_override=project_override,
                         session_id=error_session_id,
@@ -955,7 +955,7 @@ class AgentNBApp:
                     self._advice_context(
                         command_name=command_name,
                         response_status="error",
-                        command_data=cast(CommandDataLike | None, exc.command_data),
+                        command_data=cast(CommandData | None, exc.command_data),
                         data=None,
                         project_override=project_override,
                         session_id=error_session_id,
@@ -976,6 +976,7 @@ class AgentNBApp:
                 message=str(exc),
                 ename=type(exc).__name__,
                 evalue=str(exc),
+                error_data={},
                 suggestions=self.advisor.suggestions(
                     self._advice_context(
                         command_name=command_name,
@@ -1015,7 +1016,7 @@ class AgentNBApp:
         project_override: Path | None,
         session_id: str | None,
         session_source: ResolutionSource | None,
-        command_data: CommandDataLike | None = None,
+        command_data: CommandData | None = None,
         error_code: str | None = None,
         error_context: ErrorContext | None = None,
         error_name: str | None = None,
@@ -1036,18 +1037,11 @@ class AgentNBApp:
         )
 
 
-def _run_response_session_id(current_session_id: str, data: CommandDataLike) -> str:
+def _run_response_session_id(current_session_id: str, data: CommandData) -> str:
     if isinstance(data, RunLookupCommandData):
         session_id = run_lookup_session_id(data)
         if isinstance(session_id, str) and session_id:
             return session_id
-    if isinstance(data, Mapping):
-        run = cast(Mapping[str, object], data).get("run")
-        if isinstance(run, dict):
-            run_payload = cast(Mapping[str, object], run)
-            session_id = run_payload.get("session_id")
-            if isinstance(session_id, str) and session_id:
-                return session_id
     return current_session_id
 
 

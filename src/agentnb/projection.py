@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
-from .command_data import SerializedCommandData
 from .contracts import CommandResponse
 from .response_serialization import project_agent_data
 
@@ -26,10 +25,9 @@ class ResponseProjector:
             "session_id": response.session_id,
         }
         if response.command_data is not None:
-            command_data = cast(Any, response.command_data)
+            data = project_agent_data(response.command, response.command_data)
         else:
-            command_data = SerializedCommandData(payload=dict(response.data))
-        data = project_agent_data(response.command, command_data)
+            data = dict(response.data)
         if data:
             payload["data"] = data
         if response.status == "error" and response.error is not None:

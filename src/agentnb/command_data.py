@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias, cast
+from typing import Literal, cast
 
 from .contracts import (
     HelperAccessMetadata,
@@ -31,17 +31,10 @@ from .runtime import (
 )
 from .state import CommandLockInfo
 
-SerializedPayload: TypeAlias = Mapping[str, object]
-
 
 @dataclass(slots=True, kw_only=True)
 class CommandData:
     switched_session: str | None = None
-
-
-@dataclass(slots=True)
-class SerializedCommandData(CommandData):
-    payload: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -152,15 +145,6 @@ class DoctorCheckData:
             fix_hint=check.fix_hint,
         )
 
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> DoctorCheckData:
-        return cls(
-            name=str(payload.get("name") or ""),
-            status=str(payload.get("status") or ""),
-            message=str(payload.get("message") or ""),
-            fix_hint=cast(str | None, payload.get("fix_hint")),
-        )
-
 
 @dataclass(slots=True)
 class DoctorCommandData(CommandData):
@@ -174,9 +158,7 @@ class DoctorCommandData(CommandData):
     kernel_pid: int | None = None
 
     @classmethod
-    def from_status(cls, status: DoctorStatus | Mapping[str, object]) -> DoctorCommandData:
-        if isinstance(status, Mapping):
-            return cls.from_mapping(cast(Mapping[str, object], status))
+    def from_status(cls, status: DoctorStatus) -> DoctorCommandData:
         return cls(
             ready=status.ready,
             selected_python=status.selected_python,
@@ -186,26 +168,6 @@ class DoctorCommandData(CommandData):
             session_exists=status.session_exists,
             kernel_alive=status.kernel_alive,
             kernel_pid=status.kernel_pid,
-        )
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> DoctorCommandData:
-        checks = payload.get("checks")
-        return cls(
-            ready=bool(payload.get("ready")),
-            selected_python=cast(str | None, payload.get("selected_python")),
-            python_source=cast(str | None, payload.get("python_source")),
-            checks=[
-                DoctorCheckData.from_mapping(cast(Mapping[str, object], check))
-                for check in checks
-                if isinstance(check, Mapping)
-            ]
-            if isinstance(checks, list)
-            else [],
-            stale_session_cleaned=bool(payload.get("stale_session_cleaned")),
-            session_exists=bool(payload.get("session_exists")),
-            kernel_alive=bool(payload.get("kernel_alive")),
-            kernel_pid=cast(int | None, payload.get("kernel_pid")),
         )
 
 
@@ -224,11 +186,7 @@ class SessionListEntryData:
     is_preferred: bool = False
 
     @classmethod
-    def from_runtime_entry(
-        cls, entry: SessionListEntry | Mapping[str, object]
-    ) -> SessionListEntryData:
-        if isinstance(entry, Mapping):
-            return cls.from_mapping(cast(Mapping[str, object], entry))
+    def from_runtime_entry(cls, entry: SessionListEntry) -> SessionListEntryData:
         return cls(
             session_id=entry.session_id,
             alive=entry.alive,
@@ -241,22 +199,6 @@ class SessionListEntryData:
             is_default=entry.is_default,
             is_current=entry.is_current,
             is_preferred=entry.is_preferred,
-        )
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> SessionListEntryData:
-        return cls(
-            session_id=str(payload.get("session_id") or ""),
-            alive=bool(payload.get("alive")),
-            pid=cast(int | None, payload.get("pid")),
-            connection_file=cast(str | None, payload.get("connection_file")),
-            started_at=cast(str | None, payload.get("started_at")),
-            uptime_s=cast(float | None, payload.get("uptime_s")),
-            python=cast(str | None, payload.get("python")),
-            last_activity=cast(str | None, payload.get("last_activity")),
-            is_default=bool(payload.get("is_default")),
-            is_current=bool(payload.get("is_current")),
-            is_preferred=bool(payload.get("is_preferred")),
         )
 
 
@@ -273,23 +215,11 @@ class SessionDeleteCommandData(CommandData):
     stopped_running_kernel: bool = False
 
     @classmethod
-    def from_outcome(
-        cls, outcome: DeleteSessionOutcome | Mapping[str, object]
-    ) -> SessionDeleteCommandData:
-        if isinstance(outcome, Mapping):
-            return cls.from_mapping(cast(Mapping[str, object], outcome))
+    def from_outcome(cls, outcome: DeleteSessionOutcome) -> SessionDeleteCommandData:
         return cls(
             deleted=outcome.deleted,
             session_id=outcome.session_id,
             stopped_running_kernel=outcome.stopped_running_kernel,
-        )
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> SessionDeleteCommandData:
-        return cls(
-            deleted=bool(payload.get("deleted", True)),
-            session_id=str(payload.get("session_id") or ""),
-            stopped_running_kernel=bool(payload.get("stopped_running_kernel")),
         )
 
 
@@ -335,9 +265,7 @@ class RunCancelCommandData(CommandData):
     session_outcome: Literal["unchanged", "preserved", "stopped"] = "unchanged"
 
     @classmethod
-    def from_outcome(cls, outcome: RunCancelOutcome | Mapping[str, object]) -> RunCancelCommandData:
-        if isinstance(outcome, Mapping):
-            return cls.from_mapping(cast(Mapping[str, object], outcome))
+    def from_outcome(cls, outcome: RunCancelOutcome) -> RunCancelCommandData:
         return cls(
             execution_id=outcome.execution_id,
             session_id=outcome.session_id,
@@ -345,20 +273,6 @@ class RunCancelCommandData(CommandData):
             status=outcome.status,
             run_status=outcome.run_status,
             session_outcome=outcome.session_outcome,
-        )
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> RunCancelCommandData:
-        return cls(
-            execution_id=str(payload.get("execution_id") or ""),
-            session_id=str(payload.get("session_id") or "default"),
-            cancel_requested=bool(payload.get("cancel_requested")),
-            status=str(payload.get("status") or ""),
-            run_status=str(payload.get("run_status") or payload.get("status") or ""),
-            session_outcome=cast(
-                Literal["unchanged", "preserved", "stopped"],
-                payload.get("session_outcome") or "unchanged",
-            ),
         )
 
 
@@ -386,55 +300,9 @@ class HistoryCommandData(CommandData):
     full: bool = False
 
 
-CommandDataLike: TypeAlias = CommandData | SerializedPayload
-
-
-def ensure_command_data(data: CommandDataLike) -> CommandData:
-    if isinstance(data, CommandData):
-        return data
-    return SerializedCommandData(payload=_mapping_to_dict(data))
-
-
-def compat_command_data(command: str, data: Mapping[str, object] | None) -> CommandData | None:
-    payload = data or {}
-    if command == "interrupt":
-        return InterruptCommandData(interrupted=bool(payload.get("interrupted", True)))
-    if command == "stop":
-        return StopCommandData(stopped=bool(payload.get("stopped", True)))
-    if command == "doctor":
-        return DoctorCommandData.from_mapping(payload)
-    if command == "sessions-list":
-        sessions = payload.get("sessions")
-        return SessionsListCommandData(
-            sessions=[
-                SessionListEntryData.from_mapping(cast(Mapping[str, object], session))
-                for session in sessions
-                if isinstance(session, Mapping)
-            ]
-            if isinstance(sessions, list)
-            else [],
-            hidden_non_live_count=cast(int, payload.get("hidden_non_live_count") or 0),
-        )
-    if command == "sessions-delete":
-        return SessionDeleteCommandData.from_mapping(payload)
-    if command == "sessions-delete-bulk":
-        deleted = payload.get("deleted")
-        return SessionsDeleteBulkCommandData(
-            deleted=[str(item) for item in deleted] if isinstance(deleted, list) else [],
-            count=cast(int, payload.get("count") or 0),
-        )
-    if command == "runs-cancel":
-        return RunCancelCommandData.from_mapping(payload)
-    return None
-
-
-def with_switched_session(data: CommandDataLike, switched_session: str) -> CommandDataLike:
-    if isinstance(data, CommandData):
-        data.switched_session = switched_session
-        return data
-    payload = _mapping_to_dict(data)
-    payload["switched_session"] = switched_session
-    return payload
+def with_switched_session(data: CommandData, switched_session: str) -> CommandData:
+    data.switched_session = switched_session
+    return data
 
 
 def run_lookup_session_id(data: RunLookupCommandData) -> str | None:

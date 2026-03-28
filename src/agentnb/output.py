@@ -24,7 +24,6 @@ from .command_data import (
     SessionsListCommandData,
     StopCommandData,
     VarsCommandData,
-    compat_command_data,
 )
 from .compact import preview_text
 from .contracts import CommandResponse
@@ -32,19 +31,13 @@ from .payloads import (
     DataframePreview,
     ExecPayload,
     HistoryEntryPayload,
-    HistoryPayload,
-    InspectResponsePayload,
     MappingPreview,
     NamespaceDeltaPayload,
     ReloadReport,
     RunLookupPayload,
-    RunsListPayload,
     RunSnapshot,
     SequencePreview,
-    StartPayload,
-    StatusPayload,
     VarDisplayEntry,
-    VarsPayload,
 )
 from .projection import ResponseProjector
 from .response_serialization import (
@@ -157,8 +150,6 @@ def render_stream_completion(
 
 def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
     command_data = response.command_data
-    if command_data is None and response.status == "ok":
-        command_data = compat_command_data(response.command, response.data)
     if response.status == "error":
         body = _render_error(response)
     else:
@@ -168,187 +159,28 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
         quiet_commands = {"start", "status", "wait", "stop", "interrupt", "reload", "doctor"}
         if options.quiet and command in quiet_commands:
             body = ""
-        elif command == "start" and isinstance(command_data, KernelSessionData):
-            body = _render_kernel_session(command_data, response.session_id, mode="start")
-        elif command == "start":
-            start_data = cast(StartPayload, data)
-            if start_data.get("alive"):
-                python = start_data.get("python")
-                if start_data.get("started_new"):
-                    if python:
-                        body = f"Kernel started (pid {start_data.get('pid')}) using {python}."
-                    else:
-                        body = f"Kernel started (pid {start_data.get('pid')})."
-                elif python:
-                    body = f"Kernel already running (pid {start_data.get('pid')}) using {python}."
-                else:
-                    body = f"Kernel already running (pid {start_data.get('pid')})."
-            else:
-                body = "Kernel is not running."
-
-        elif command == "status" and isinstance(command_data, KernelSessionData):
-            body = _render_kernel_session(command_data, response.session_id, mode="status")
-        elif command == "status":
-            status_data = cast(StatusPayload, data)
-            session_label = f"session: {response.session_id}, " if response.session_id else ""
-            session_name = f"session: {response.session_id}" if response.session_id else None
-            wait_note = _wait_note(status_data)
-            if status_data.get("alive"):
-                if status_data.get("busy"):
-                    busy_for_ms = status_data.get("busy_for_ms")
-                    if isinstance(busy_for_ms, int):
-                        busy_detail = (
-                            f"busy for {_format_duration_ms(busy_for_ms)}"
-                            f"{_detail_suffix(wait_note)}"
-                        )
-                        body = (
-                            "Kernel is running "
-                            f"({session_label}pid {status_data.get('pid')}, {busy_detail})."
-                        )
-                    else:
-                        busy_detail = f"busy{_detail_suffix(wait_note)}"
-                        body = (
-                            "Kernel is running "
-                            f"({session_label}pid {status_data.get('pid')}, {busy_detail})."
-                        )
-                else:
-                    waited_for = status_data.get("waited_for")
-                    state_label = "idle" if waited_for == "idle" else "running"
-                    body = (
-                        f"Kernel is {state_label} ({session_label}pid {status_data.get('pid')}"
-                        f"{_detail_suffix(wait_note)})."
-                    )
-            elif status_data.get("runtime_state") == "starting":
-                body = (
-                    f"Kernel is starting ({session_name})."
-                    if session_name is not None
-                    else "Kernel is starting."
-                )
-            elif status_data.get("runtime_state") == "dead":
-                body = (
-                    f"Kernel is dead ({session_name})."
-                    if session_name is not None
-                    else "Kernel is dead."
-                )
-            else:
-                body = "Kernel is not running."
-        elif command == "wait" and isinstance(command_data, KernelSessionData):
-            body = _render_kernel_session(command_data, response.session_id, mode="wait")
-        elif command == "wait":
-            status_data = cast(StatusPayload, data)
-            session_label = f"session: {response.session_id}, " if response.session_id else ""
-            session_name = f"session: {response.session_id}" if response.session_id else None
-            wait_note = _wait_note(status_data)
-            if status_data.get("alive"):
-                waited_for = status_data.get("waited_for")
-                if waited_for == "ready":
-                    body = (
-                        f"Kernel is ready ({session_label}pid {status_data.get('pid')}"
-                        f"{_detail_suffix(wait_note)})."
-                    )
-                else:
-                    body = (
-                        f"Kernel is idle ({session_label}pid {status_data.get('pid')}"
-                        f"{_detail_suffix(wait_note)})."
-                    )
-            elif status_data.get("runtime_state") == "starting":
-                body = (
-                    f"Kernel is starting ({session_name})."
-                    if session_name is not None
-                    else "Kernel is starting."
-                )
-            elif status_data.get("runtime_state") == "dead":
-                body = (
-                    f"Kernel is dead ({session_name})."
-                    if session_name is not None
-                    else "Kernel is dead."
-                )
-            else:
-                body = "Kernel is not running."
-
+        elif command in {"start", "status", "wait"} and isinstance(command_data, KernelSessionData):
+            body = _render_kernel_session(command_data, response.session_id, mode=command)
         elif command == "stop" and isinstance(command_data, StopCommandData):
             body = _render_stop_command_data(command_data)
-
         elif command == "interrupt" and isinstance(command_data, InterruptCommandData):
             body = _render_interrupt_command_data(command_data)
-
         elif command == "exec" and isinstance(command_data, ExecCommandData):
             body = _render_exec_command_data(command_data)
-        elif command == "exec":
-            body = _render_exec_like(cast(ExecPayload, data))
-
         elif command == "reset":
             body = "Namespace cleared."
-
         elif command == "vars" and isinstance(command_data, VarsCommandData):
             body = _render_vars_command_data(command_data, response.session_id)
-        elif command == "vars":
-            vars_data = cast(VarsPayload, data).get("vars", [])
-            if not vars_data:
-                body = "No user variables found."
-            else:
-                lines = [_render_var_entry(item) for item in vars_data]
-                body = "\n".join(lines)
-            body = _prepend_session_identity(body, response.session_id)
-            if not options.quiet:
-                body = _append_helper_access_note(body, cast(Mapping[str, object], data))
-
         elif command == "inspect" and isinstance(command_data, InspectCommandData):
             body = _render_inspect_command_data(command_data, response.session_id)
-        elif command == "inspect":
-            inspect_response = cast(InspectResponsePayload, data)
-            inspect_data = inspect_response.get("inspect", {})
-            members = inspect_data.get("members", [])
-            members_text = ", ".join(members[:30]) if members else "(none)"
-            preview = inspect_data.get("preview")
-            if isinstance(preview, dict) and preview.get("kind") == "dataframe-like":
-                lines = [
-                    f"name: {inspect_data.get('name')}",
-                    f"type: {inspect_data.get('type')}",
-                ]
-                lines.extend(_render_dataframe_preview(cast(DataframePreview, preview)))
-            elif isinstance(preview, dict) and preview.get("kind") in {
-                "sequence-like",
-                "mapping-like",
-            }:
-                lines = [
-                    f"name: {inspect_data.get('name')}",
-                    f"type: {inspect_data.get('type')}",
-                ]
-                lines.extend(
-                    _render_collection_preview(cast(MappingPreview | SequencePreview, preview))
-                )
-            else:
-                lines = [
-                    f"name: {inspect_data.get('name')}",
-                    f"type: {inspect_data.get('type')}",
-                    f"repr: {inspect_data.get('repr')}",
-                ]
-                lines.append(f"members: {members_text}")
-            body = "\n".join(lines)
-            body = _prepend_session_identity(body, response.session_id)
-            body = _append_helper_access_note(body, cast(Mapping[str, object], data))
-
         elif command == "reload" and isinstance(command_data, ReloadCommandData):
             body = _render_reload_command_data(command_data)
             body = _append_helper_access_note(
                 body,
                 command_data.access_metadata.merge_data(),
             )
-        elif command == "reload":
-            body = _render_reload(cast(ReloadReport, data))
-            body = _append_helper_access_note(body, cast(Mapping[str, object], data))
-
         elif command == "history" and isinstance(command_data, HistoryCommandData):
             body = _render_history_command_data(command_data)
-        elif command == "history":
-            entries = cast(HistoryPayload, data).get("entries", [])
-            if not entries:
-                body = "No history entries."
-            else:
-                lines = [_render_history_entry(entry) for entry in entries]
-                body = "\n".join(lines)
-
         elif command == "doctor" and isinstance(command_data, DoctorCommandData):
             body = _render_doctor_command_data(command_data)
         elif command == "sessions-list" and isinstance(command_data, SessionsListCommandData):
@@ -361,23 +193,6 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             body = _render_sessions_delete_bulk_command_data(command_data)
         elif command == "runs-list" and isinstance(command_data, RunsListCommandData):
             body = _render_runs_list_command_data(command_data)
-        elif command == "runs-list":
-            runs = cast(RunsListPayload, data).get("runs", [])
-            if not runs:
-                body = "No runs found."
-            else:
-                lines = []
-                for run in runs:
-                    display_status = (
-                        "cancelled"
-                        if run.get("terminal_reason") == "cancelled"
-                        else run.get("status")
-                    )
-                    lines.append(
-                        f"{run.get('ts')} [{display_status}] {run.get('execution_id')} "
-                        f"{run.get('command_type')} {run.get('duration_ms')}ms"
-                    )
-                body = "\n".join(lines)
         elif command in {"runs-show", "runs-wait", "runs-follow"} and isinstance(
             command_data, RunLookupCommandData
         ):
@@ -387,19 +202,6 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
             )
             if command == "runs-follow":
                 follow_note = _render_follow_completion_note_data(command_data)
-                if follow_note is not None:
-                    body = f"{body}\n{follow_note}" if body else follow_note
-        elif command in {"runs-show", "runs-wait", "runs-follow"}:
-            run_lookup = cast(RunLookupPayload, data)
-            run_data = run_lookup.get("run")
-            if not isinstance(run_data, dict):
-                run_data = {}
-            body = _render_run_snapshot(
-                cast(RunSnapshot, run_data),
-                snapshot_only=(command == "runs-show"),
-            )
-            if command == "runs-follow":
-                follow_note = _render_follow_completion_note(run_lookup)
                 if follow_note is not None:
                     body = f"{body}\n{follow_note}" if body else follow_note
         elif command == "runs-cancel" and isinstance(command_data, RunCancelCommandData):

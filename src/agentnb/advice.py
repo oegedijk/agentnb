@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from .command_data import (
-    CommandDataLike,
+    CommandData,
     DoctorCommandData,
     ExecCommandData,
     HistoryCommandData,
@@ -34,7 +34,7 @@ _RESULT_LIMIT = 240
 class AdviceContext:
     command_name: str
     response_status: str
-    command_data: CommandDataLike | None = None
+    command_data: CommandData | None = None
     data: Mapping[str, object] = field(default_factory=dict)
     error_code: str | None = None
     error_context: ErrorContext = field(default_factory=ErrorContext)
@@ -185,16 +185,10 @@ class AdvicePolicy:
                         with_action=False,
                     )
                 ]
-            alive = (
-                command_data.alive
-                if isinstance(command_data, KernelSessionData)
-                else data.get("alive")
-            )
-            busy = (
-                command_data.busy
-                if isinstance(command_data, KernelSessionData)
-                else data.get("busy")
-            )
+            if not isinstance(command_data, KernelSessionData):
+                return []
+            alive = command_data.alive
+            busy = command_data.busy
             if alive:
                 if busy:
                     return [
@@ -251,39 +245,12 @@ class AdvicePolicy:
 
         if command_name == "exec":
             if context.response_status == "ok":
-                if _file_exec_truncated(command_data, data):
+                if not isinstance(command_data, ExecCommandData):
+                    return []
+                if _file_exec_truncated(command_data):
                     return _file_exec_truncation_steps(scope, data, command_data)
-                if isinstance(command_data, ExecCommandData):
-                    if command_data.background:
-                        execution_id = command_data.record.execution_id or "EXECUTION_ID"
-                        return [
-                            _run_step(
-                                scope,
-                                "Wait for run",
-                                "to wait for the final result.",
-                                "runs",
-                                "wait",
-                                execution_id,
-                            ),
-                            _run_step(
-                                scope,
-                                "Show run",
-                                "to inspect the current run record.",
-                                "runs",
-                                "show",
-                                execution_id,
-                            ),
-                            _run_step(
-                                scope,
-                                "Cancel run",
-                                "to stop the background run.",
-                                "runs",
-                                "cancel",
-                                execution_id,
-                            ),
-                        ]
-                elif data.get("background"):
-                    execution_id = _execution_id(data)
+                if command_data.background:
+                    execution_id = command_data.record.execution_id or "EXECUTION_ID"
                     return [
                         _run_step(
                             scope,
@@ -311,11 +278,7 @@ class AdvicePolicy:
                         ),
                     ]
                 if _exec_output_is_empty(command_data, data):
-                    execution_id = (
-                        command_data.record.execution_id
-                        if isinstance(command_data, ExecCommandData)
-                        else _execution_id(data)
-                    )
+                    execution_id = command_data.record.execution_id or "EXECUTION_ID"
                     return [
                         _run_step(
                             scope,
@@ -554,10 +517,9 @@ class AdvicePolicy:
             ]
 
         if command_name == "vars":
-            if isinstance(command_data, VarsCommandData):
-                has_vars = bool(command_data.values)
-            else:
-                has_vars = bool(data.get("vars"))
+            if not isinstance(command_data, VarsCommandData):
+                return []
+            has_vars = bool(command_data.values)
             if not has_vars:
                 return [
                     _run_step(
@@ -574,11 +536,9 @@ class AdvicePolicy:
             return []
 
         if command_name == "reload":
-            stale_names = (
-                command_data.payload.get("stale_names")
-                if isinstance(command_data, ReloadCommandData)
-                else data.get("stale_names")
-            )
+            if not isinstance(command_data, ReloadCommandData):
+                return []
+            stale_names = command_data.payload.get("stale_names")
             if stale_names:
                 return [
                     _run_step(
@@ -590,11 +550,7 @@ class AdvicePolicy:
                         with_action=False,
                     )
                 ]
-            reloaded = (
-                command_data.payload.get("reloaded_modules")
-                if isinstance(command_data, ReloadCommandData)
-                else data.get("reloaded_modules")
-            )
+            reloaded = command_data.payload.get("reloaded_modules")
             if isinstance(reloaded, list) and not reloaded:
                 return [
                     _text_step("No project-local modules were found to reload."),
@@ -606,11 +562,9 @@ class AdvicePolicy:
             return []
 
         if command_name == "history":
-            entries = (
-                command_data.entries
-                if isinstance(command_data, HistoryCommandData)
-                else data.get("entries")
-            )
+            if not isinstance(command_data, HistoryCommandData):
+                return []
+            entries = command_data.entries
             if not entries:
                 return [
                     _run_step(
@@ -659,14 +613,11 @@ class AdvicePolicy:
             return []
 
         if command_name == "doctor":
-            if isinstance(command_data, DoctorCommandData):
-                ready = command_data.ready
-                kernel_alive = command_data.kernel_alive
-                session_exists = command_data.session_exists
-            else:
-                ready = bool(data.get("ready"))
-                kernel_alive = bool(data.get("kernel_alive"))
-                session_exists = bool(data.get("session_exists"))
+            if not isinstance(command_data, DoctorCommandData):
+                return []
+            ready = command_data.ready
+            kernel_alive = command_data.kernel_alive
+            session_exists = command_data.session_exists
             if ready:
                 if kernel_alive:
                     return [_text_step("Kernel is already running.")]
@@ -713,11 +664,9 @@ class AdvicePolicy:
             ]
 
         if command_name == "sessions-list":
-            has_sessions = (
-                bool(command_data.sessions)
-                if isinstance(command_data, SessionsListCommandData)
-                else bool(data.get("sessions"))
-            )
+            if not isinstance(command_data, SessionsListCommandData):
+                return []
+            has_sessions = bool(command_data.sessions)
             if not has_sessions:
                 return [
                     _run_step(
@@ -742,11 +691,9 @@ class AdvicePolicy:
             return []
 
         if command_name == "runs-list":
-            has_runs = (
-                bool(command_data.runs)
-                if isinstance(command_data, RunsListCommandData)
-                else bool(data.get("runs"))
-            )
+            if not isinstance(command_data, RunsListCommandData):
+                return []
+            has_runs = bool(command_data.runs)
             if not has_runs:
                 return [
                     _run_step(
@@ -761,13 +708,10 @@ class AdvicePolicy:
             return []
 
         if command_name == "runs-show":
-            if isinstance(command_data, RunLookupCommandData):
-                run_payload = command_data.run.payload
-                run_status = run_payload.get("status")
-            else:
-                run = data.get("run")
-                run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
-                run_status = run_payload.get("status") if run_payload is not None else None
+            if not isinstance(command_data, RunLookupCommandData):
+                return []
+            run_payload = command_data.run.payload
+            run_status = run_payload.get("status")
             if _run_is_active(run_status):
                 execution_id = _execution_id(run_payload)
                 return [
@@ -802,13 +746,10 @@ class AdvicePolicy:
             return []
 
         if command_name == "runs-follow":
-            if isinstance(command_data, RunLookupCommandData):
-                run_payload = command_data.run.payload
-                run_status = run_payload.get("status")
-            else:
-                run = data.get("run")
-                run_payload = cast(Mapping[str, object], run) if isinstance(run, dict) else None
-                run_status = run_payload.get("status") if run_payload is not None else None
+            if not isinstance(command_data, RunLookupCommandData):
+                return []
+            run_payload = command_data.run.payload
+            run_status = run_payload.get("status")
             if _run_is_active(run_status):
                 execution_id = _execution_id(run_payload)
                 return [
@@ -843,31 +784,13 @@ class AdvicePolicy:
             return []
 
         if command_name == "runs-cancel":
-            execution_id = (
-                command_data.execution_id
-                if isinstance(command_data, RunCancelCommandData)
-                else _execution_id(data)
-            )
-            cancel_requested = (
-                command_data.cancel_requested
-                if isinstance(command_data, RunCancelCommandData)
-                else bool(data.get("cancel_requested"))
-            )
-            status = (
-                command_data.status
-                if isinstance(command_data, RunCancelCommandData)
-                else data.get("status")
-            )
-            session_outcome = (
-                command_data.session_outcome
-                if isinstance(command_data, RunCancelCommandData)
-                else data.get("session_outcome")
-            )
-            session_id = (
-                command_data.session_id
-                if isinstance(command_data, RunCancelCommandData)
-                else str(data.get("session_id") or "default")
-            )
+            if not isinstance(command_data, RunCancelCommandData):
+                return []
+            execution_id = command_data.execution_id
+            cancel_requested = command_data.cancel_requested
+            status = command_data.status
+            session_outcome = command_data.session_outcome
+            session_id = command_data.session_id
             if cancel_requested:
                 if status == "ok":
                     return [
@@ -1006,7 +929,7 @@ def _missing_pip_in_called_process(context: AdviceContext) -> bool:
 
 def _session_python(
     data: Mapping[str, object],
-    command_data: CommandDataLike | None = None,
+    command_data: CommandData | None = None,
 ) -> str | None:
     if isinstance(command_data, ExecCommandData):
         return command_data.session_python
@@ -1017,60 +940,40 @@ def _session_python(
 
 
 def _exec_output_is_empty(
-    command_data: CommandDataLike | None,
+    command_data: ExecCommandData,
     data: Mapping[str, object],
 ) -> bool:
-    if isinstance(command_data, ExecCommandData):
-        for value in (
-            command_data.record.result,
-            command_data.record.stdout,
-            command_data.record.stderr,
-            command_data.selected_text,
-        ):
-            if isinstance(value, str) and value:
-                return False
-        return not (command_data.namespace_delta and command_data.namespace_delta.get("entries"))
-    for key in ("result", "stdout", "stderr", "selected_text"):
-        value = data.get(key)
+    for value in (
+        command_data.record.result,
+        command_data.record.stdout,
+        command_data.record.stderr,
+        command_data.selected_text,
+    ):
         if isinstance(value, str) and value:
             return False
-    namespace_delta = data.get("namespace_delta")
-    entries = (
-        cast(Mapping[str, object], namespace_delta).get("entries")
-        if isinstance(namespace_delta, dict)
-        else None
-    )
-    return not entries
+    return not (command_data.namespace_delta and command_data.namespace_delta.get("entries"))
 
 
-def _file_exec_truncated(command_data: CommandDataLike | None, data: Mapping[str, object]) -> bool:
-    if isinstance(command_data, ExecCommandData):
-        if command_data.source_kind != "file" or command_data.no_truncate:
-            return False
-        outcome = command_data.record.outcome()
-        return any(
-            isinstance(value, str) and len(value) > limit
-            for value, limit in (
-                (outcome.stdout, _STDOUT_LIMIT),
-                (outcome.stderr, _STDOUT_LIMIT),
-                (outcome.result, _RESULT_LIMIT),
-            )
-        )
-    if data.get("source_kind") != "file":
+def _file_exec_truncated(command_data: ExecCommandData) -> bool:
+    if command_data.source_kind != "file" or command_data.no_truncate:
         return False
-    truncation_keys = ("stdout_truncated", "stderr_truncated", "result_truncated")
-    return any(data.get(key) is True for key in truncation_keys)
+    outcome = command_data.record.outcome()
+    return any(
+        isinstance(value, str) and len(value) > limit
+        for value, limit in (
+            (outcome.stdout, _STDOUT_LIMIT),
+            (outcome.stderr, _STDOUT_LIMIT),
+            (outcome.result, _RESULT_LIMIT),
+        )
+    )
 
 
 def _file_exec_truncation_steps(
     scope: SuggestionScope,
     data: Mapping[str, object],
-    command_data: CommandDataLike | None = None,
+    command_data: ExecCommandData,
 ) -> list[_AdviceStep]:
-    if isinstance(command_data, ExecCommandData) and command_data.source_path:
-        source_path = command_data.source_path
-    else:
-        source_path = str(data.get("source_path") or "PATH")
+    source_path = command_data.source_path or str(data.get("source_path") or "PATH")
     return [
         _run_step(
             scope,

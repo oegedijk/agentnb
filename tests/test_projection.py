@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from agentnb.contracts import success_response
 from agentnb.projection import ResponseProjector
 from tests.helpers import build_error_response, build_success_response
 
@@ -35,7 +34,7 @@ def test_response_projector_agent_uses_compact_success_envelope() -> None:
 
 
 def test_response_projector_agent_compacts_wait_like_status() -> None:
-    response = success_response(
+    response = build_success_response(
         command="wait",
         project="/tmp/project",
         session_id="default",
@@ -194,7 +193,7 @@ def test_response_projector_agent_keeps_busy_metadata_for_exec_errors() -> None:
 
 
 def test_response_projector_agent_compacts_exec_success_to_next_step_fields() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -230,7 +229,7 @@ def test_response_projector_agent_compacts_exec_success_to_next_step_fields() ->
 
 
 def test_response_projector_agent_includes_run_status_alias() -> None:
-    response = success_response(
+    response = build_success_response(
         command="runs-show",
         project="/tmp/project",
         session_id="default",
@@ -253,7 +252,7 @@ def test_response_projector_agent_includes_run_status_alias() -> None:
 
 
 def test_response_projector_agent_keeps_structured_exec_result_preview() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -285,6 +284,8 @@ def test_response_projector_agent_keeps_structured_exec_result_preview() -> None
                 "kind": "dataframe-like",
                 "shape": [200, 1],
                 "columns": ["i"],
+                "column_count": 1,
+                "head": [{"i": 0}],
             },
         },
     }
@@ -320,7 +321,7 @@ def test_response_projector_agent_preserves_precomputed_exec_result_preview() ->
 
 
 def test_response_projector_agent_keeps_exec_truncation_flags() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -336,12 +337,12 @@ def test_response_projector_agent_keeps_exec_truncation_flags() -> None:
     projected = ResponseProjector().project(response, profile="agent")
 
     assert projected["data"]["stdout_truncated"] is True
-    assert projected["data"]["stderr_truncated"] is False
+    assert "stderr_truncated" not in projected["data"]
     assert projected["data"]["result_truncated"] is True
 
 
 def test_response_projector_agent_keeps_runs_follow_observation_metadata() -> None:
-    response = success_response(
+    response = build_success_response(
         command="runs-follow",
         project="/tmp/project",
         session_id="default",
@@ -379,7 +380,7 @@ def test_response_projector_agent_keeps_runs_follow_observation_metadata() -> No
 
 
 def test_response_projector_agent_compacts_runs_cancel_response() -> None:
-    response = success_response(
+    response = build_success_response(
         command="runs-cancel",
         project="/tmp/project",
         session_id="default",

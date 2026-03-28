@@ -34,7 +34,9 @@ from agentnb.execution_output import OutputItem
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
-from tests.helpers import build_execution_record
+from agentnb.runs import RunCancelOutcome
+from agentnb.runtime import DeleteSessionOutcome, DoctorStatus, SessionListEntry
+from tests.helpers import build_command_data, build_execution_record
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
@@ -555,18 +557,21 @@ def test_cli_exec_stream_human_reports_file_namespace_summary_without_duplicate_
             command="exec",
             project=str(project_dir),
             session_id="default",
-            data={
-                "source_kind": request.source_kind,
-                "source_path": str(request.source_path),
-                "namespace_delta": {
-                    "entries": [
-                        {"change": "new", "name": "value", "type": "int", "repr": "2"},
-                    ],
-                    "new_count": 1,
-                    "updated_count": 0,
-                    "truncated": False,
+            command_data=build_command_data(
+                "exec",
+                {
+                    "source_kind": request.source_kind,
+                    "source_path": str(request.source_path),
+                    "namespace_delta": {
+                        "entries": [
+                            {"change": "new", "name": "value", "type": "int", "repr": "2"},
+                        ],
+                        "new_count": 1,
+                        "updated_count": 0,
+                        "truncated": False,
+                    },
                 },
-            },
+            ),
         )
 
     monkeypatch.setattr(cli.application, "exec", exec_stub)
@@ -993,14 +998,16 @@ def test_cli_quiet_suppresses_status_body_and_suggestions(
 def test_cli_doctor_returns_diagnostics(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.runtime.doctor = lambda **_: {  # type: ignore[method-assign]
-        "ready": True,
-        "checks": [{"name": "python", "status": "ok", "message": "ok"}],
-        "selected_python": "python",
-        "python_source": "current",
-        "session_exists": False,
-        "stale_session_cleaned": False,
-    }
+    cli.runtime.doctor_status = lambda **_: DoctorStatus(  # type: ignore[method-assign]
+        ready=True,
+        checks=[DoctorCheck(name="python", status="ok", message="ok")],
+        selected_python="python",
+        python_source="current",
+        session_exists=False,
+        stale_session_cleaned=False,
+        kernel_alive=False,
+        kernel_pid=None,
+    )
 
     result = cli_runner.invoke(main, ["doctor", "--project", str(project_dir), "--json"])
     assert result.exit_code == 0
@@ -1417,18 +1424,21 @@ def test_cli_exec_file_request_preserves_source_metadata(
             command="exec",
             project=str(project_dir),
             session_id="default",
-            data={
-                "source_kind": request.source_kind,
-                "source_path": str(request.source_path),
-                "namespace_delta": {
-                    "entries": [
-                        {"change": "new", "name": "value", "type": "int", "repr": "2"},
-                    ],
-                    "new_count": 1,
-                    "updated_count": 0,
-                    "truncated": False,
+            command_data=build_command_data(
+                "exec",
+                {
+                    "source_kind": request.source_kind,
+                    "source_path": str(request.source_path),
+                    "namespace_delta": {
+                        "entries": [
+                            {"change": "new", "name": "value", "type": "int", "repr": "2"},
+                        ],
+                        "new_count": 1,
+                        "updated_count": 0,
+                        "truncated": False,
+                    },
                 },
-            },
+            ),
         )
 
     monkeypatch.setattr(cli.application, "exec", exec_stub)
@@ -1992,22 +2002,22 @@ def test_cli_sessions_list_returns_runtime_entries(
     import agentnb.cli as cli
 
     cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
-        {
-            "session_id": "default",
-            "alive": True,
-            "pid": 111,
-            "python": "python",
-            "is_default": True,
-            "last_activity": "2026-03-09T00:00:00+00:00",
-        },
-        {
-            "session_id": "analysis",
-            "alive": True,
-            "pid": 222,
-            "python": "python",
-            "is_default": False,
-            "last_activity": None,
-        },
+        SessionListEntry(
+            session_id="default",
+            alive=True,
+            pid=111,
+            python="python",
+            is_default=True,
+            last_activity="2026-03-09T00:00:00+00:00",
+        ),
+        SessionListEntry(
+            session_id="analysis",
+            alive=True,
+            pid=222,
+            python="python",
+            is_default=False,
+            last_activity=None,
+        ),
     ]
 
     result = cli_runner.invoke(main, ["sessions", "list", "--project", str(project_dir), "--json"])
@@ -2026,7 +2036,9 @@ def test_cli_bare_sessions_shortcut_accepts_group_options(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.runtime.list_sessions = lambda **_: [{"session_id": "default"}]  # type: ignore[method-assign]
+    cli.runtime.list_sessions = lambda **_: [  # type: ignore[method-assign]
+        SessionListEntry(session_id="default", alive=False)
+    ]
 
     result = cli_runner.invoke(main, ["sessions", "--project", str(project_dir), "--json"])
 
@@ -2058,13 +2070,13 @@ def test_cli_sessions_delete_calls_runtime_delete(cli_runner: CliRunner, project
 
     delete_calls: list[dict[str, object]] = []
 
-    def delete_stub(**kwargs: object) -> dict[str, object]:
+    def delete_stub(**kwargs: object) -> DeleteSessionOutcome:
         delete_calls.append(dict(kwargs))
-        return {
-            "deleted": True,
-            "session_id": "analysis",
-            "stopped_running_kernel": True,
-        }
+        return DeleteSessionOutcome(
+            deleted=True,
+            session_id="analysis",
+            stopped_running_kernel=True,
+        )
 
     cli.runtime.delete_session = delete_stub  # type: ignore[method-assign]
 
@@ -2574,14 +2586,14 @@ def test_cli_runs_follow_human_window_elapsed_reuses_snapshot_renderer(
 def test_cli_runs_cancel_requests_interrupt(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.executions.cancel_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-1",
-        "session_id": "analysis",
-        "cancel_requested": True,
-        "status": "error",
-        "run_status": "error",
-        "session_outcome": "preserved",
-    }
+    cli.executions.cancel_run = lambda **_: RunCancelOutcome(  # type: ignore[method-assign]
+        execution_id="run-1",
+        session_id="analysis",
+        cancel_requested=True,
+        status="error",
+        run_status="error",
+        session_outcome="preserved",
+    )
 
     result = cli_runner.invoke(
         main,

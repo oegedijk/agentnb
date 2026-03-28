@@ -14,7 +14,12 @@ from agentnb.output import (
     render_stream_completion,
 )
 from agentnb.projection import ResponseProjector
-from tests.helpers import build_execution_record, build_run_snapshot, build_success_response
+from tests.helpers import (
+    build_error_response,
+    build_execution_record,
+    build_run_snapshot,
+    build_success_response,
+)
 
 
 @pytest.mark.parametrize("profile", [OutputProfile.FULL_JSON, OutputProfile.AGENT])
@@ -43,7 +48,7 @@ def test_render_response_json_profiles_smoke(profile: OutputProfile) -> None:
 
 
 def test_render_human_doctor_includes_fix_hint() -> None:
-    response = success_response(
+    response = build_success_response(
         command="doctor",
         project="/tmp/project",
         session_id="default",
@@ -106,7 +111,7 @@ def test_render_human_error_appends_traceback_and_suggestions() -> None:
 
 
 def test_render_human_runs_show_mentions_snapshot_for_running_run() -> None:
-    response = success_response(
+    response = build_success_response(
         command="runs-show",
         project="/tmp/project",
         session_id="default",
@@ -137,7 +142,7 @@ def test_render_human_runs_show_mentions_snapshot_for_running_run() -> None:
 
 
 def test_render_human_quiet_suppresses_status_body() -> None:
-    response = success_response(
+    response = build_success_response(
         command="status",
         project="/tmp/project",
         session_id="default",
@@ -171,7 +176,7 @@ def test_render_human_quiet_suppresses_status_body() -> None:
     ],
 )
 def test_render_human_start_variants(data: dict[str, object], expected: str) -> None:
-    response = success_response(
+    response = build_success_response(
         command="start",
         project="/tmp/project",
         session_id="default",
@@ -182,18 +187,18 @@ def test_render_human_start_variants(data: dict[str, object], expected: str) -> 
 
 
 def test_render_human_status_busy_and_interrupt_stop() -> None:
-    status_response = success_response(
+    status_response = build_success_response(
         command="status",
         project="/tmp/project",
         session_id="default",
         data={"alive": True, "pid": 321, "busy": True},
     )
-    stop_response = success_response(
+    stop_response = build_success_response(
         command="stop",
         project="/tmp/project",
         session_id="default",
     )
-    interrupt_response = success_response(
+    interrupt_response = build_success_response(
         command="interrupt",
         project="/tmp/project",
         session_id="default",
@@ -211,7 +216,7 @@ def test_render_human_status_busy_and_interrupt_stop() -> None:
 
 
 def test_render_human_status_busy_includes_busy_duration() -> None:
-    response = success_response(
+    response = build_success_response(
         command="status",
         project="/tmp/project",
         session_id="default",
@@ -249,7 +254,7 @@ def test_render_human_projects_runtime_state(
     data: dict[str, object],
     expected: str,
 ) -> None:
-    response = success_response(
+    response = build_success_response(
         command=command,
         project="/tmp/project",
         session_id="default",
@@ -260,13 +265,13 @@ def test_render_human_projects_runtime_state(
 
 
 def test_render_human_wait_variants() -> None:
-    idle_response = success_response(
+    idle_response = build_success_response(
         command="wait",
         project="/tmp/project",
         session_id="default",
         data={"alive": True, "pid": 321, "busy": False, "waited": False},
     )
-    ready_response = success_response(
+    ready_response = build_success_response(
         command="wait",
         project="/tmp/project",
         session_id="default",
@@ -284,7 +289,7 @@ def test_render_human_wait_variants() -> None:
 
 
 def test_render_human_status_wait_includes_wait_detail() -> None:
-    response = success_response(
+    response = build_success_response(
         command="status",
         project="/tmp/project",
         session_id="default",
@@ -306,7 +311,7 @@ def test_render_human_status_wait_includes_wait_detail() -> None:
 
 
 def test_render_human_exec_renders_stdout_stderr_and_result() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -317,7 +322,7 @@ def test_render_human_exec_renders_stdout_stderr_and_result() -> None:
 
 
 def test_render_human_exec_selected_output_returns_selected_text_only() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -331,7 +336,7 @@ def test_render_human_exec_selected_output_returns_selected_text_only() -> None:
 
 
 def test_render_human_exec_prefers_bounded_preview_for_large_structured_result() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -353,13 +358,13 @@ def test_render_human_exec_prefers_bounded_preview_for_large_structured_result()
 
 
 def test_render_human_exec_without_output_reports_completion() -> None:
-    exec_response = success_response(
+    exec_response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
         data={},
     )
-    reset_response = success_response(
+    reset_response = build_success_response(
         command="reset",
         project="/tmp/project",
         session_id="default",
@@ -371,7 +376,7 @@ def test_render_human_exec_without_output_reports_completion() -> None:
 
 
 def test_render_human_file_exec_without_output_reports_namespace_changes() -> None:
-    exec_response = success_response(
+    exec_response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -407,7 +412,7 @@ def test_render_human_file_exec_without_output_reports_namespace_changes() -> No
 
 
 def test_render_stream_completion_reuses_file_exec_hint_when_no_output_was_streamed() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -437,7 +442,7 @@ def test_render_stream_completion_reuses_file_exec_hint_when_no_output_was_strea
 def test_render_stream_completion_appends_restart_notice_without_repeating_streamed_result() -> (
     None
 ):
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -459,7 +464,7 @@ def test_render_stream_completion_appends_restart_notice_without_repeating_strea
 
 
 def test_render_human_status_includes_session_name() -> None:
-    response = success_response(
+    response = build_success_response(
         command="status",
         project="/tmp/project",
         session_id="analysis",
@@ -473,7 +478,7 @@ def test_render_human_status_includes_session_name() -> None:
 
 
 def test_render_human_wait_includes_session_name() -> None:
-    response = success_response(
+    response = build_success_response(
         command="wait",
         project="/tmp/project",
         session_id="analysis",
@@ -487,13 +492,13 @@ def test_render_human_wait_includes_session_name() -> None:
 
 
 def test_render_human_vars_and_empty_history() -> None:
-    vars_response = success_response(
+    vars_response = build_success_response(
         command="vars",
         project="/tmp/project",
         session_id="default",
         data={"vars": [{"name": "value", "repr": "42", "type": "int"}]},
     )
-    history_response = success_response(
+    history_response = build_success_response(
         command="history",
         project="/tmp/project",
         session_id="default",
@@ -507,7 +512,7 @@ def test_render_human_vars_and_empty_history() -> None:
 
 
 def test_render_human_vars_appends_helper_access_note() -> None:
-    response = success_response(
+    response = build_success_response(
         command="vars",
         project="/tmp/project",
         session_id="default",
@@ -528,7 +533,7 @@ def test_render_human_vars_appends_helper_access_note() -> None:
 
 
 def test_render_human_inspect_generic_shape() -> None:
-    response = success_response(
+    response = build_success_response(
         command="inspect",
         project="/tmp/project",
         session_id="default",
@@ -548,7 +553,7 @@ def test_render_human_inspect_generic_shape() -> None:
 
 
 def test_render_human_inspect_mapping_preview() -> None:
-    response = success_response(
+    response = build_success_response(
         command="inspect",
         project="/tmp/project",
         session_id="default",
@@ -573,7 +578,7 @@ def test_render_human_inspect_mapping_preview() -> None:
 
 
 def test_render_human_inspect_preview_surfaces_omission_metadata() -> None:
-    response = success_response(
+    response = build_success_response(
         command="inspect",
         project="/tmp/project",
         session_id="default",
@@ -602,7 +607,7 @@ def test_render_human_inspect_preview_surfaces_omission_metadata() -> None:
 
 
 def test_render_human_history_formats_internal_and_exec_fallback_labels() -> None:
-    response = success_response(
+    response = build_success_response(
         command="history",
         project="/tmp/project",
         session_id="default",
@@ -630,12 +635,12 @@ def test_render_human_history_formats_internal_and_exec_fallback_labels() -> Non
 
     assert render_human(response, options=RenderOptions()) == (
         "2026-03-11T00:00:00+00:00 [ok] 5ms [internal] import localmod\n"
-        "2026-03-11T00:00:01+00:00 [ok] 6ms exec value = 1 value"
+        "2026-03-11T00:00:01+00:00 [ok] 6ms exec value = 1 | value"
     )
 
 
 def test_render_human_sessions_views() -> None:
-    list_response = success_response(
+    list_response = build_success_response(
         command="sessions-list",
         project="/tmp/project",
         session_id="default",
@@ -660,13 +665,13 @@ def test_render_human_sessions_views() -> None:
             ]
         },
     )
-    empty_response = success_response(
+    empty_response = build_success_response(
         command="sessions-list",
         project="/tmp/project",
         session_id="default",
         data={"sessions": []},
     )
-    delete_response = success_response(
+    delete_response = build_success_response(
         command="sessions-delete",
         project="/tmp/project",
         session_id="analysis",
@@ -684,7 +689,7 @@ def test_render_human_sessions_views() -> None:
 
 
 def test_render_human_sessions_list_reports_hidden_non_live_records() -> None:
-    response = success_response(
+    response = build_success_response(
         command="sessions-list",
         project="/tmp/project",
         session_id="default",
@@ -710,7 +715,7 @@ def test_render_human_sessions_list_reports_hidden_non_live_records() -> None:
 
 
 def test_render_human_sessions_list_empty_mentions_hidden_non_live_records() -> None:
-    response = success_response(
+    response = build_success_response(
         command="sessions-list",
         project="/tmp/project",
         session_id="default",
@@ -727,7 +732,7 @@ def test_render_human_sessions_list_empty_mentions_hidden_non_live_records() -> 
 
 
 def test_render_human_runs_list_and_wait_error_shape() -> None:
-    list_response = success_response(
+    list_response = build_success_response(
         command="runs-list",
         project="/tmp/project",
         session_id="default",
@@ -743,7 +748,7 @@ def test_render_human_runs_list_and_wait_error_shape() -> None:
             ]
         },
     )
-    wait_response = success_response(
+    wait_response = build_success_response(
         command="runs-wait",
         project="/tmp/project",
         session_id="default",
@@ -777,7 +782,7 @@ def test_render_human_runs_list_and_wait_error_shape() -> None:
 
 
 def test_render_human_runs_follow_reuses_snapshot_renderer_and_window_note() -> None:
-    response = success_response(
+    response = build_success_response(
         command="runs-follow",
         project="/tmp/project",
         session_id="default",
@@ -841,7 +846,7 @@ def test_render_human_runs_cancel_variants(
     data: dict[str, object],
     expected: str,
 ) -> None:
-    response = success_response(
+    response = build_success_response(
         command="runs-cancel",
         project="/tmp/project",
         session_id="default",
@@ -852,7 +857,7 @@ def test_render_human_runs_cancel_variants(
 
 
 def test_render_human_reload_variants_and_unknown_command() -> None:
-    reload_response = success_response(
+    reload_response = build_success_response(
         command="reload",
         project="/tmp/project",
         session_id="default",
@@ -865,7 +870,7 @@ def test_render_human_reload_variants_and_unknown_command() -> None:
             "notes": ["Reload note"],
         },
     )
-    unknown_response = success_response(
+    unknown_response = build_success_response(
         command="custom",
         project="/tmp/project",
         session_id="default",
@@ -902,7 +907,7 @@ def test_render_options_resolve_agent_profile() -> None:
 
 
 def test_render_human_exec_background_dispatch_message() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -915,7 +920,7 @@ def test_render_human_exec_background_dispatch_message() -> None:
 
 
 def test_render_human_session_switch_note() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="analysis",
@@ -926,7 +931,7 @@ def test_render_human_session_switch_note() -> None:
 
 
 def test_render_human_quiet_hides_success_chatter_but_keeps_primary_output() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="analysis",
@@ -938,7 +943,7 @@ def test_render_human_quiet_hides_success_chatter_but_keeps_primary_output() -> 
 
 
 def test_render_human_no_suggestions_keeps_switch_note() -> None:
-    response = success_response(
+    response = build_success_response(
         command="exec",
         project="/tmp/project",
         session_id="analysis",
@@ -988,7 +993,7 @@ def test_render_human_no_suggestions_suppresses_error_next_block() -> None:
 
 
 def test_render_human_exec_restart_notice_is_explicit() -> None:
-    response = error_response(
+    response = build_error_response(
         command="exec",
         project="/tmp/project",
         session_id="default",
@@ -1013,7 +1018,7 @@ def test_typed_exec_response_keeps_full_agent_and_human_contracts() -> None:
         command="exec",
         project="/tmp/project",
         session_id="default",
-        data=ExecCommandData(
+        command_data=ExecCommandData(
             record=build_execution_record(result="42"),
             source_kind="argument",
             ensured_started=True,
@@ -1048,7 +1053,7 @@ def test_typed_run_lookup_response_keeps_agent_and_human_contracts() -> None:
         command="runs-show",
         project="/tmp/project",
         session_id="default",
-        data=RunLookupCommandData(
+        command_data=RunLookupCommandData(
             run=RunSnapshotData(
                 payload={
                     key: value

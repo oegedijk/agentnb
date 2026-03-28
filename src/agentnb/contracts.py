@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, cast
 
 if TYPE_CHECKING:
+    from .command_data import CommandData
     from .execution_models import ExecutionOutcome
     from .execution_output import OutputItem
 
@@ -174,7 +175,7 @@ class CommandResponse:
     project: str
     session_id: str
     data: dict[str, Any] = field(default_factory=dict)
-    command_data: object | None = field(default=None, repr=False)
+    command_data: CommandData | None = field(default=None, repr=False)
     suggestions: list[str] = field(default_factory=list)
     suggestion_actions: list[SuggestionAction] = field(default_factory=list)
     error: AgentNBError | None = None
@@ -211,17 +212,16 @@ def success_response(
     command: str,
     project: str,
     session_id: str,
-    data: Mapping[str, object] | object | None = None,
+    command_data: CommandData | None = None,
     suggestions: list[str] | None = None,
     suggestion_actions: list[SuggestionAction] | None = None,
 ) -> CommandResponse:
-    serialized_data, command_data = _normalize_response_data(command=command, data=data)
     return CommandResponse(
         status="ok",
         command=command,
         project=project,
         session_id=session_id,
-        data=serialized_data,
+        data=_serialize_response_command_data(command=command, command_data=command_data),
         command_data=command_data,
         suggestions=suggestions or [],
         suggestion_actions=suggestion_actions or [],
@@ -238,17 +238,23 @@ def error_response(
     ename: str | None = None,
     evalue: str | None = None,
     traceback: list[str] | None = None,
-    data: Mapping[str, object] | object | None = None,
+    command_data: CommandData | None = None,
+    error_data: Mapping[str, object] | None = None,
     suggestions: list[str] | None = None,
     suggestion_actions: list[SuggestionAction] | None = None,
 ) -> CommandResponse:
-    serialized_data, command_data = _normalize_response_data(command=command, data=data)
+    if command_data is not None and error_data is not None:
+        raise ValueError("error_response accepts either command_data or error_data, not both")
     return CommandResponse(
         status="error",
         command=command,
         project=project,
         session_id=session_id,
-        data=serialized_data,
+        data=_serialize_response_command_data(
+            command=command,
+            command_data=command_data,
+            error_data=error_data,
+        ),
         command_data=command_data,
         suggestions=suggestions or [],
         suggestion_actions=suggestion_actions or [],
@@ -262,19 +268,21 @@ def error_response(
     )
 
 
-def _normalize_response_data(
+def _serialize_response_command_data(
     *,
     command: str,
-    data: Mapping[str, object] | object | None,
-) -> tuple[dict[str, Any], object | None]:
+    command_data: CommandData | None = None,
+    error_data: Mapping[str, object] | None = None,
+) -> dict[str, Any]:
     from .command_data import CommandData
     from .response_serialization import serialize_command_data
 
-    if data is None:
-        return {}, None
-    if isinstance(data, CommandData):
-        return serialize_command_data(command, data), data
-    if isinstance(data, Mapping):
-        mapping_data = cast(Mapping[str, object], data)
-        return {key: value for key, value in mapping_data.items()}, None
-    raise TypeError(f"Unsupported response data type for {command}: {type(data).__name__}")
+    if command_data is not None:
+        if not isinstance(command_data, CommandData):
+            raise TypeError(
+                f"Unsupported command data type for {command}: {type(command_data).__name__}"
+            )
+        return serialize_command_data(command, command_data)
+    if error_data is None:
+        return {}
+    return {key: value for key, value in error_data.items()}

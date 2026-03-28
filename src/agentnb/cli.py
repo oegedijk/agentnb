@@ -573,7 +573,8 @@ def exec_cmd(
             ename=exc.ename,
             evalue=exc.evalue,
             traceback=exc.traceback,
-            data=exc.command_data if exc.command_data is not None else exc.data,
+            command_data=cast(Any, exc.command_data),
+            error_data=None if exc.command_data is not None else exc.data,
             suggestions=application.advisor.suggestions(
                 AdviceContext(
                     command_name="exec",

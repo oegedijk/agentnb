@@ -6,7 +6,6 @@ from typing import Any, cast
 
 from .command_data import (
     CommandData,
-    CommandDataLike,
     DoctorCommandData,
     ExecCommandData,
     HistoryCommandData,
@@ -19,7 +18,6 @@ from .command_data import (
     RunLookupCommandData,
     RunsListCommandData,
     RunSnapshotData,
-    SerializedCommandData,
     SessionDeleteCommandData,
     SessionsDeleteBulkCommandData,
     SessionsListCommandData,
@@ -53,11 +51,7 @@ _PREVIEW_LIST_LIMIT = 3
 _PREVIEW_DICT_LIMIT = 5
 
 
-def serialize_command_data(command_name: str, data: CommandDataLike) -> dict[str, Any]:
-    if isinstance(data, SerializedCommandData):
-        return _mapping_to_dict(data.payload)
-    if not isinstance(data, CommandData):
-        return _mapping_to_dict(data)
+def serialize_command_data(command_name: str, data: CommandData) -> dict[str, Any]:
     if isinstance(data, KernelSessionData):
         return _serialize_kernel_session_data(data)
     if isinstance(data, InterruptCommandData):
@@ -110,7 +104,7 @@ def serialize_command_data(command_name: str, data: CommandDataLike) -> dict[str
     raise ValueError(f"Unsupported command data type for {command_name}: {type(data).__name__}")
 
 
-def project_agent_data(command_name: str, data: CommandDataLike) -> dict[str, Any]:
+def project_agent_data(command_name: str, data: CommandData) -> dict[str, Any]:
     serialized = serialize_command_data(command_name, data)
     if command_name in {"start", "status", "wait"}:
         return _subset(
@@ -378,15 +372,19 @@ def serialize_run_lookup_payload(data: RunLookupCommandData) -> RunLookupPayload
 
 
 def _serialize_kernel_session_data(data: KernelSessionData) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "alive": data.alive,
-        "pid": data.pid,
-        "connection_file": data.connection_file,
-        "started_at": data.started_at,
-        "uptime_s": data.uptime_s,
-        "python": data.python,
-        "busy": data.busy,
-    }
+    payload: dict[str, Any] = {"alive": data.alive}
+    if data.pid is not None:
+        payload["pid"] = data.pid
+    if data.connection_file is not None:
+        payload["connection_file"] = data.connection_file
+    if data.started_at is not None:
+        payload["started_at"] = data.started_at
+    if data.uptime_s is not None:
+        payload["uptime_s"] = data.uptime_s
+    if data.python is not None:
+        payload["python"] = data.python
+    if data.busy is not None:
+        payload["busy"] = data.busy
     if data.runtime_state is not None:
         payload["runtime_state"] = data.runtime_state
     if data.session_exists is not None:

@@ -5,40 +5,49 @@ from pathlib import Path
 import pytest
 
 from agentnb.advice import AdviceContext, AdvicePolicy, _extract_module_name
+from agentnb.suggestions import SessionScopeSource
+from tests.helpers import build_command_data
+
+
+def _success_context(
+    command_name: str,
+    data: dict[str, object],
+    *,
+    session_id: str | None = None,
+    project_override: Path | None = None,
+    session_source: SessionScopeSource | None = None,
+) -> AdviceContext:
+    return AdviceContext(
+        command_name=command_name,
+        response_status="ok",
+        command_data=build_command_data(command_name, data),
+        data=data,
+        session_id=session_id,
+        project_override=project_override,
+        session_source=session_source,
+    )
 
 
 @pytest.mark.parametrize(
     ("context", "expected"),
     [
         (
-            AdviceContext(
-                command_name="status",
-                response_status="ok",
-                data={"alive": True, "busy": True},
-            ),
+            _success_context("status", {"alive": True, "busy": True}),
             ["Run `agentnb wait --json` to wait until the session is usable."],
         ),
         (
-            AdviceContext(
-                command_name="status",
-                response_status="ok",
-                data={"alive": False},
-            ),
+            _success_context("status", {"alive": False}),
             [
                 "Run `agentnb start --json` to start a project-scoped kernel.",
                 "Run `agentnb doctor --json` if startup has been failing.",
             ],
         ),
         (
-            AdviceContext(
-                command_name="exec",
-                response_status="ok",
-                data={"background": True},
-            ),
+            _success_context("exec", {"background": True}),
             [
-                "Run `agentnb runs wait EXECUTION_ID --json` to wait for the final result.",
-                "Run `agentnb runs show EXECUTION_ID --json` to inspect the current run record.",
-                "Run `agentnb runs cancel EXECUTION_ID --json` to stop the background run.",
+                "Run `agentnb runs wait run-1 --json` to wait for the final result.",
+                "Run `agentnb runs show run-1 --json` to inspect the current run record.",
+                "Run `agentnb runs cancel run-1 --json` to stop the background run.",
             ],
         ),
     ],
@@ -85,10 +94,9 @@ def test_advice_policy_uses_session_name_for_preserved_run_cancel() -> None:
     policy = AdvicePolicy()
 
     suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="runs-cancel",
-            response_status="ok",
-            data={
+        _success_context(
+            "runs-cancel",
+            {
                 "cancel_requested": True,
                 "session_outcome": "preserved",
                 "session_id": "analysis",
@@ -101,7 +109,7 @@ def test_advice_policy_uses_session_name_for_preserved_run_cancel() -> None:
             "Run `agentnb wait --session analysis --json` "
             "to confirm the session is ready for more work."
         ),
-        "Run `agentnb runs show EXECUTION_ID --json` to inspect the cancelled run record.",
+        "Run `agentnb runs show run-1 --json` to inspect the cancelled run record.",
     ]
 
 
@@ -109,11 +117,7 @@ def test_advice_policy_interpolates_execution_id_for_background_exec() -> None:
     policy = AdvicePolicy()
 
     suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="exec",
-            response_status="ok",
-            data={"background": True, "execution_id": "run-7"},
-        )
+        _success_context("exec", {"background": True, "execution_id": "run-7"})
     )
 
     assert suggestions == [
@@ -125,11 +129,7 @@ def test_advice_policy_interpolates_execution_id_for_background_exec() -> None:
 
 def test_advice_policy_background_exec_text_and_actions_share_the_same_steps() -> None:
     policy = AdvicePolicy()
-    context = AdviceContext(
-        command_name="exec",
-        response_status="ok",
-        data={"background": True, "execution_id": "run-7"},
-    )
+    context = _success_context("exec", {"background": True, "execution_id": "run-7"})
 
     assert policy.suggestions(context) == [
         "Run `agentnb runs wait run-7 --json` to wait for the final result.",
@@ -162,10 +162,9 @@ def test_advice_policy_preserves_cross_project_scope_for_follow_ups() -> None:
     policy = AdvicePolicy()
 
     suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="exec",
-            response_status="ok",
-            data={"execution_id": "run-7"},
+        _success_context(
+            "exec",
+            {"execution_id": "run-7"},
             session_id="analysis",
             session_source="explicit",
             project_override=Path("/tmp/other"),
@@ -386,11 +385,7 @@ def test_advice_policy_doctor_ready_with_kernel_alive() -> None:
     policy = AdvicePolicy()
 
     suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="doctor",
-            response_status="ok",
-            data={"ready": True, "session_exists": True, "kernel_alive": True},
-        )
+        _success_context("doctor", {"ready": True, "session_exists": True, "kernel_alive": True})
     )
 
     assert suggestions == ["Kernel is already running."]
@@ -400,11 +395,7 @@ def test_advice_policy_doctor_ready_session_exists_kernel_dead() -> None:
     policy = AdvicePolicy()
 
     suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="doctor",
-            response_status="ok",
-            data={"ready": True, "session_exists": True, "kernel_alive": False},
-        )
+        _success_context("doctor", {"ready": True, "session_exists": True, "kernel_alive": False})
     )
 
     assert suggestions == [
@@ -416,13 +407,7 @@ def test_advice_policy_doctor_ready_session_exists_kernel_dead() -> None:
 def test_advice_policy_doctor_ready_without_session() -> None:
     policy = AdvicePolicy()
 
-    suggestions = policy.suggestions(
-        AdviceContext(
-            command_name="doctor",
-            response_status="ok",
-            data={"ready": True},
-        )
-    )
+    suggestions = policy.suggestions(_success_context("doctor", {"ready": True}))
 
     assert suggestions == ["Run `agentnb start --json` to start the kernel."]
 
@@ -465,10 +450,9 @@ def test_advice_policy_session_busy_with_active_run_suggests_run_controls() -> N
 def test_advice_policy_file_exec_truncation_suggests_escape_hatches() -> None:
     policy = AdvicePolicy()
 
-    context = AdviceContext(
-        command_name="exec",
-        response_status="ok",
-        data={
+    context = _success_context(
+        "exec",
+        {
             "source_kind": "file",
             "source_path": "/tmp/project/analysis.py",
             "stdout_truncated": True,
@@ -512,10 +496,9 @@ def test_advice_policy_file_exec_truncation_suggests_escape_hatches() -> None:
 def test_advice_policy_active_runs_follow_suggests_wait_show_cancel() -> None:
     policy = AdvicePolicy()
 
-    context = AdviceContext(
-        command_name="runs-follow",
-        response_status="ok",
-        data={"run": {"execution_id": "run-9", "status": "running"}},
+    context = _success_context(
+        "runs-follow",
+        {"run": {"execution_id": "run-9", "status": "running"}},
     )
 
     assert policy.suggestions(context) == [

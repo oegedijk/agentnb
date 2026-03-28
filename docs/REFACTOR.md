@@ -531,44 +531,92 @@ What is still incomplete:
   mapping-oriented output/projection fallbacks still remain at explicit
   compatibility edges.
 
+### Tranche 8: Typed-Only Response Cutover
+
+Status: done
+
+Completed in the current refactor:
+
+- internal response construction now has one typed path for command responses:
+  - `success_response(...)` accepts only typed `command_data`
+  - `error_response(...)` accepts typed `command_data` or explicit serialized
+    `error_data`
+- the old mixed typed-vs-mapping constructor path was removed from the normal
+  app-facing flow.
+- the remaining command-data compatibility symbols were removed from product
+  code:
+  - `SerializedCommandData`
+  - `CommandDataLike`
+  - `ensure_command_data(...)`
+  - `compat_command_data(...)`
+- `app.py` now carries typed `CommandData` from command handlers to the
+  response edge and only uses serialized `error_data` for generic
+  non-command-specific error envelopes.
+- response/session helpers were narrowed to typed command data:
+  - `with_switched_session(...)`
+  - run/session lookup resolution in `app.py`
+- compatibility-only mapping overloads were removed from typed command-data
+  factories that already had typed owning inputs:
+  - `DoctorCommandData.from_status(...)`
+  - `SessionListEntryData.from_runtime_entry(...)`
+  - `SessionDeleteCommandData.from_outcome(...)`
+  - `RunCancelCommandData.from_outcome(...)`
+- `response_serialization.py`, `projection.py`, `output.py`, and `advice.py`
+  now consume typed command data on the normal success path instead of carrying
+  mapping fallbacks for internal convenience.
+- agent projection now has one explicit rule:
+  - if `command_data` exists, project from typed command data
+  - otherwise pass through stored serialized `response.data`
+  This keeps generic error metadata working without reintroducing mixed
+  internal currency.
+- tests were rebalanced around typed response builders and typed command-data
+  seams; mapping-only constructor coverage now remains only where serialized
+  generic error envelopes are still deliberate behavior.
+
+What this tranche intentionally did not do:
+
+- it did not introduce a new typed model for generic error metadata
+- it did not remove deliberate external/package helpers that still expose
+  serialized payload dicts
+- it did not change persistence schemas or the stable response envelope
+
+New invariant after this tranche:
+
+- all successful app-facing responses use typed `CommandData`
+- typed command-specific error responses also use typed `CommandData`
+- only generic error envelopes are allowed to have `command_data=None`, and
+  those carry explicit serialized `error_data` / `ErrorContext` output instead
+
+What is still incomplete:
+
+- some explicit serialized-edge/public helpers still deserve review to confirm
+  whether they remain justified as public wire helpers or should be removed
+  entirely.
+
 ## Next Tranche
 
-The next highest-value work is now **removing the remaining explicit
-command-data compatibility adapters from internal call paths**. With the worker
-boot path now fully under `runs`, the largest remaining abstraction leak is the
-mixed typed-vs-mapping response seam around command data, projection, and
-output.
+The next highest-value work is now **reviewing the remaining explicit
+serialized-edge/public helpers and deciding which ones still deserve to
+exist**. After the typed-only response cutover, the main architectural question
+is no longer "should internal call paths use dicts?" That answer is now no.
+The remaining question is which serialized helpers are still real external
+edges versus leftover convenience APIs.
 
 That tranche should include:
 
-- making typed command data the only internal currency for app/output/projection
-  paths that are already owned by the typed command-data layer.
-- removing `SerializedCommandData` / `compat_command_data(...)` from normal
-  internal call paths once remaining compatibility callers are retired or
-  isolated.
-- eliminating mapping-based fallbacks in:
-  - `output.py`
-  - `projection.py`
-  once all app-facing responses are guaranteed to originate from typed command
-  data.
-- keeping payload `TypedDict`s only at deliberate external/package or serializer
-  wire edges rather than as mixed internal currency inside app-facing logic.
-- rebalancing tests so typed command-data seams are asserted directly, while any
-  remaining compatibility behavior is covered only at explicit external edges.
+- auditing remaining public or package-level helpers that still return payload
+  dicts, such as explicit wire/package conveniences that bypass typed owners.
+- keeping only deliberate external/package compatibility edges public and
+  moving any remaining internal callers fully onto typed owning boundaries.
+- tightening tests so those helpers are covered only as explicit public/wire
+  contracts rather than as mixed internal fixtures.
+- deciding whether generic error metadata should stay serialized-only or later
+  receive its own typed model.
 
 Advice for that tranche:
 
-- make it another clean cut: once a compatibility adapter stops serving a real
-  external edge, remove it rather than preserving it for internal convenience.
-- keep the serializer/output boundary explicit: pruning adapters should not
-  collapse wire shaping back into `app.py` or other upstream services.
-- prefer rebalancing tests toward:
-  - `command_data.py`
-  - `response_serialization.py`
-  - the direct `output.py` / `projection.py` typed seams
-  rather than preserving mapping-based fixtures that only restate prior
-  implementation structure.
-
-After that, the likely tranche is to revisit whether any remaining mixed
-mapping-oriented response helpers still deserve to exist as explicit public
-compatibility edges.
+- keep the clean-cut rule: if a serialized helper is not serving a real
+  external edge, remove it rather than preserving it for convenience.
+- preserve the stable JSON/agent envelope and keep serializer ownership at the
+  response edge.
+- do not reintroduce dual typed/mapping internal paths after this cutover.

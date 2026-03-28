@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from agentnb.command_data import ExecCommandData
 from agentnb.contracts import (
     SCHEMA_VERSION,
@@ -10,6 +12,7 @@ from agentnb.contracts import (
 )
 from agentnb.execution_output import OutputItem
 from agentnb.runs.store import ExecutionRecord
+from tests.helpers import build_command_data
 
 
 def test_success_response_to_dict_preserves_schema_and_payload() -> None:
@@ -17,7 +20,7 @@ def test_success_response_to_dict_preserves_schema_and_payload() -> None:
         command="status",
         project="/tmp/project",
         session_id="default",
-        data={"alive": False},
+        command_data=build_command_data("status", {"alive": False}),
         suggestions=["Run `agentnb start --json`."],
     )
 
@@ -44,7 +47,7 @@ def test_error_response_to_dict_preserves_nested_error_fields() -> None:
         ename="RuntimeError",
         evalue="missing kernel",
         traceback=["line1"],
-        data={"alive": False},
+        error_data={"alive": False},
         suggestions=["Run `agentnb start --json`."],
     )
 
@@ -69,7 +72,7 @@ def test_error_response_preserves_mapping_payload_for_sessions_delete() -> None:
         session_id="default",
         code="SESSION_NOT_FOUND",
         message="Session not found.",
-        data={"session_id": "analysis"},
+        error_data={"session_id": "analysis"},
     )
 
     assert response.data == {"session_id": "analysis"}
@@ -77,24 +80,43 @@ def test_error_response_preserves_mapping_payload_for_sessions_delete() -> None:
     assert response.to_dict()["data"] == {"session_id": "analysis"}
 
 
-def test_success_response_preserves_partial_mapping_payload_for_runs_cancel() -> None:
+def test_success_response_rejects_removed_raw_data_keyword() -> None:
+    with pytest.raises(TypeError):
+        success_response(
+            command="status",
+            project="/tmp/project",
+            session_id="default",
+            data={"alive": False},  # type: ignore[call-arg]
+        )
+
+
+def test_success_response_serializes_typed_runs_cancel_payload() -> None:
     response = success_response(
         command="runs-cancel",
         project="/tmp/project",
         session_id="default",
-        data={"execution_id": "run-1", "cancel_requested": False, "status": "ok"},
+        command_data=build_command_data(
+            "runs-cancel",
+            {"execution_id": "run-1", "cancel_requested": False, "status": "ok"},
+        ),
     )
 
     assert response.data == {
         "execution_id": "run-1",
+        "session_id": "default",
         "cancel_requested": False,
         "status": "ok",
+        "run_status": "ok",
+        "session_outcome": "unchanged",
     }
-    assert response.command_data is None
+    assert response.command_data is not None
     assert response.to_dict()["data"] == {
         "execution_id": "run-1",
+        "session_id": "default",
         "cancel_requested": False,
         "status": "ok",
+        "run_status": "ok",
+        "session_outcome": "unchanged",
     }
 
 
@@ -103,7 +125,7 @@ def test_success_response_serializes_typed_command_data_into_stable_envelope() -
         command="exec",
         project="/tmp/project",
         session_id="default",
-        data=ExecCommandData(
+        command_data=ExecCommandData(
             record=ExecutionRecord(
                 execution_id="run-1",
                 ts="2026-03-12T00:00:00+00:00",
@@ -139,7 +161,7 @@ def test_error_response_serializes_typed_command_data_into_stable_envelope() -> 
         session_id="default",
         code="EXECUTION_ERROR",
         message="Execution failed",
-        data=ExecCommandData(
+        command_data=ExecCommandData(
             record=ExecutionRecord(
                 execution_id="run-2",
                 ts="2026-03-12T00:00:00+00:00",

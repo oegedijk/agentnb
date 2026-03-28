@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from agentnb.command_data import RunLookupCommandData
+from agentnb.contracts import success_response
 from agentnb.projection import ResponseProjector
-from tests.helpers import build_error_response, build_success_response
+from tests.helpers import build_error_response, build_run_snapshot_data, build_success_response
 
 
 def test_response_projector_full_json_matches_stable_contract() -> None:
@@ -342,23 +344,22 @@ def test_response_projector_agent_keeps_exec_truncation_flags() -> None:
 
 
 def test_response_projector_agent_keeps_runs_follow_observation_metadata() -> None:
-    response = build_success_response(
+    response = success_response(
         command="runs-follow",
         project="/tmp/project",
         session_id="default",
-        data={
-            "status": "running",
-            "completion_reason": "window_elapsed",
-            "replayed_event_count": 1,
-            "emitted_event_count": 2,
-            "run": {
-                "execution_id": "run-1",
-                "session_id": "default",
-                "command_type": "exec",
-                "status": "running",
-                "duration_ms": 12,
-            },
-        },
+        command_data=RunLookupCommandData(
+            run=build_run_snapshot_data(
+                execution_id="run-1",
+                session_id="default",
+                status="running",
+                duration_ms=12,
+            ),
+            status="running",
+            completion_reason="window_elapsed",
+            replayed_event_count=1,
+            emitted_event_count=2,
+        ),
     )
 
     projected = ResponseProjector().project(response, profile="agent")
@@ -370,7 +371,7 @@ def test_response_projector_agent_keeps_runs_follow_observation_metadata() -> No
         "emitted_event_count": 2,
         "run": {
             "execution_id": "run-1",
-            "ts": None,
+            "ts": "2026-03-12T00:00:00+00:00",
             "session_id": "default",
             "command_type": "exec",
             "status": "running",

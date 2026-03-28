@@ -7,6 +7,11 @@ from agentnb.contracts import ExecutionResult, KernelStatus
 from agentnb.errors import AgentNBException, SessionBusyError
 from agentnb.history import HistoryStore
 from agentnb.introspection import HelperExecutionPolicy, KernelIntrospection
+from agentnb.introspection_models import (
+    DataframePreviewData,
+    MappingPreviewData,
+    SequencePreviewData,
+)
 from agentnb.runtime import KernelRuntime, KernelWaitResult
 
 
@@ -27,8 +32,8 @@ def test_kernel_introspection_returns_payload_and_records_history(
 
     result = KernelIntrospection(runtime).inspect_var(project_root=project_dir, name="value")
 
-    assert result.payload["name"] == "value"
-    assert result.payload["type"] == "int"
+    assert result.payload.name == "value"
+    assert result.payload.type_name == "int"
     execute.assert_called_once()
     entries = HistoryStore(project_dir).read(include_internal=True)
     assert len(entries) == 2
@@ -64,11 +69,11 @@ def test_kernel_introspection_parses_preview_omission_metadata(
 
     result = KernelIntrospection(runtime).inspect_var(project_root=project_dir, name="payload")
 
-    preview = result.payload["preview"]
-    assert preview["kind"] == "mapping-like"
-    assert preview["keys_shown"] == 3
-    assert preview["sample_items_shown"] == 2
-    assert preview["sample_truncated"] is True
+    preview = result.payload.preview
+    assert isinstance(preview, MappingPreviewData)
+    assert preview.keys_shown == 3
+    assert preview.sample_items_shown == 2
+    assert preview.sample_truncated is True
 
 
 def test_kernel_introspection_parses_dataframe_preview_counts(
@@ -102,12 +107,12 @@ def test_kernel_introspection_parses_dataframe_preview_counts(
 
     result = KernelIntrospection(runtime).inspect_var(project_root=project_dir, name="df")
 
-    preview = result.payload["preview"]
-    assert preview["kind"] == "dataframe-like"
-    assert preview["columns_shown"] == 3
-    assert preview["dtypes_shown"] == 2
-    assert preview["null_count_fields_shown"] == 2
-    assert preview["head_rows_shown"] == 1
+    preview = result.payload.preview
+    assert isinstance(preview, DataframePreviewData)
+    assert preview.columns_shown == 3
+    assert preview.dtypes_shown == 2
+    assert preview.null_count_fields_shown == 2
+    assert preview.head_rows_shown == 1
 
 
 def test_kernel_introspection_parses_sequence_preview_counts(
@@ -138,11 +143,11 @@ def test_kernel_introspection_parses_sequence_preview_counts(
 
     result = KernelIntrospection(runtime).inspect_var(project_root=project_dir, name="items")
 
-    preview = result.payload["preview"]
-    assert preview["kind"] == "sequence-like"
-    assert preview["sample_items_shown"] == 2
-    assert preview["sample_truncated"] is True
-    assert preview["sample_keys_shown"] == 1
+    preview = result.payload.preview
+    assert isinstance(preview, SequencePreviewData)
+    assert preview.sample_items_shown == 2
+    assert preview.sample_truncated is True
+    assert preview.sample_keys_shown == 1
 
 
 @pytest.mark.parametrize(
@@ -215,7 +220,7 @@ def test_kernel_introspection_can_wait_for_helper_access_when_requested(
         execution_policy=HelperExecutionPolicy(wait_for_usable=True),
     )
 
-    assert result.payload["name"] == "value"
+    assert result.payload.name == "value"
     assert result.access_metadata.waited is True
     assert result.access_metadata.waited_for == "idle"
     assert result.access_metadata.waited_ms == 20

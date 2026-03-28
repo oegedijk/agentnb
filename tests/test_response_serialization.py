@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from agentnb.command_data import ExecCommandData, RunListEntryData
-from agentnb.contracts import ExecutionEvent
+from agentnb.command_data import ExecCommandData, RunsListCommandData
 from agentnb.execution_output import OutputItem
 from agentnb.journal import JournalEntry
 from agentnb.response_serialization import (
     compact_execution_payload,
     compact_history_entry,
-    compact_run_entry,
+    serialize_command_data,
 )
 from agentnb.runs.store import ExecutionRecord
+from tests.helpers import build_run_list_entry_data
 
 
 def _record(**overrides: object) -> ExecutionRecord:
@@ -114,22 +114,23 @@ def test_compact_execution_payload_does_not_invent_structured_preview_for_scalar
     assert "result_preview" not in compacted
 
 
-def test_compact_run_entry_prefers_structured_result_preview_when_available() -> None:
-    compacted = compact_run_entry(
-        RunListEntryData(
-            payload={
-                "execution_id": "run-1",
-                "status": "ok",
-                "result": "large mapping repr",
-                "result_preview": {
-                    "kind": "mapping-like",
-                    "length": 2,
-                    "keys": ["alpha", "beta"],
-                    "sample": {"alpha": 1, "beta": 2},
-                },
-            }
-        )
-    )
+def test_runs_list_serialization_prefers_structured_result_preview_when_available() -> None:
+    compacted = serialize_command_data(
+        "runs-list",
+        RunsListCommandData(
+            runs=[
+                build_run_list_entry_data(
+                    result="large mapping repr",
+                    result_preview={
+                        "kind": "mapping-like",
+                        "length": 2,
+                        "keys": ["alpha", "beta"],
+                        "sample": {"alpha": 1, "beta": 2},
+                    },
+                )
+            ]
+        ),
+    )["runs"][0]
 
     assert compacted["result_preview"] == {
         "kind": "mapping-like",
@@ -139,26 +140,20 @@ def test_compact_run_entry_prefers_structured_result_preview_when_available() ->
     }
 
 
-def test_compact_run_entry_preserves_projected_cancelled_error_type() -> None:
-    compacted = compact_run_entry(
-        RunListEntryData(
-            payload=cast(
-                dict[str, object],
-                _record(
+def test_runs_list_serialization_preserves_projected_cancelled_error_type() -> None:
+    compacted = serialize_command_data(
+        "runs-list",
+        RunsListCommandData(
+            runs=[
+                build_run_list_entry_data(
                     status="error",
                     cancel_requested=True,
                     terminal_reason="cancelled",
-                    events=[
-                        ExecutionEvent(
-                            kind="error",
-                            content="interrupted",
-                            metadata={"ename": "KeyboardInterrupt", "traceback": ["tb"]},
-                        )
-                    ],
-                ).to_dict(),
-            )
-        )
-    )
+                    error_type="CancelledError",
+                )
+            ]
+        ),
+    )["runs"][0]
 
     assert compacted["terminal_reason"] == "cancelled"
     assert compacted["error_type"] == "CancelledError"
@@ -269,22 +264,22 @@ def test_compact_history_entry_preserves_multiline_code_preview() -> None:
     assert entry["code"] == "a = 1\nb = 2\nc = a + b\n..."
 
 
-def test_compact_run_entry_exposes_previews_and_error_type() -> None:
-    entry = compact_run_entry(
-        RunListEntryData(
-            payload={
-                "execution_id": "run-1",
-                "ts": "2026-03-11T00:00:00+00:00",
-                "session_id": "default",
-                "command_type": "exec",
-                "status": "error",
-                "duration_ms": 9,
-                "stdout": "line one\nline two",
-                "result": "value",
-                "ename": "RuntimeError",
-            }
-        )
-    )
+def test_runs_list_serialization_exposes_previews_and_error_type() -> None:
+    entry = serialize_command_data(
+        "runs-list",
+        RunsListCommandData(
+            runs=[
+                build_run_list_entry_data(
+                    ts="2026-03-11T00:00:00+00:00",
+                    status="error",
+                    duration_ms=9,
+                    stdout="line one\nline two",
+                    result="value",
+                    ename="RuntimeError",
+                )
+            ]
+        ),
+    )["runs"][0]
 
     assert entry == {
         "execution_id": "run-1",

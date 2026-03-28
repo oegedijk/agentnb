@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -38,6 +37,7 @@ from agentnb.execution import (
 )
 from agentnb.execution_invocation import ExecInvocationPolicy, OutputSelector
 from agentnb.introspection import KernelHelperResult, KernelIntrospection
+from agentnb.introspection_models import VariableEntry
 from agentnb.journal import JournalEntry
 from agentnb.runtime import DeleteSessionOutcome, KernelRuntime, RuntimeState, SessionListEntry
 from agentnb.selectors import parse_history_reference, parse_run_reference
@@ -704,30 +704,30 @@ def test_app_runs_list_compacts_runs_and_applies_last_selection(project_dir) -> 
     runtime = Mock(spec=KernelRuntime)
     executions = Mock(spec=ExecutionService)
     executions.list_runs.return_value = [
-        {
-            "execution_id": "run-1",
-            "ts": "2026-03-12T00:00:00+00:00",
-            "session_id": "default",
-            "command_type": "exec",
-            "status": "ok",
-            "duration_ms": 5,
-            "result": "41",
-            "stdout": "",
-            "ename": None,
-        },
-        {
-            "execution_id": "run-2",
-            "ts": "2026-03-12T00:01:00+00:00",
-            "session_id": "analysis",
-            "command_type": "exec",
-            "status": "error",
-            "duration_ms": 6,
-            "terminal_reason": "cancelled",
-            "cancel_requested": True,
-            "result": "",
-            "stdout": "nope",
-            "ename": "ValueError",
-        },
+        build_execution_record(
+            execution_id="run-1",
+            ts="2026-03-12T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="ok",
+            duration_ms=5,
+            result="41",
+            stdout="",
+            ename=None,
+        ),
+        build_execution_record(
+            execution_id="run-2",
+            ts="2026-03-12T00:01:00+00:00",
+            session_id="analysis",
+            command_type="exec",
+            status="error",
+            duration_ms=6,
+            terminal_reason="cancelled",
+            cancel_requested=True,
+            result="",
+            stdout="nope",
+            ename="ValueError",
+        ),
     ]
     app = AgentNBApp(runtime=runtime, executions=executions)
 
@@ -753,7 +753,7 @@ def test_app_runs_list_compacts_runs_and_applies_last_selection(project_dir) -> 
             "terminal_reason": "cancelled",
             "cancel_requested": True,
             "stdout_preview": "nope",
-            "error_type": "ValueError",
+            "error_type": "CancelledError",
         }
     ]
     _assert_called_with_subset(
@@ -826,7 +826,7 @@ def test_app_run_lookup_sanitizes_tracebacks_and_hides_follow_output_fields(proj
         **{key: value for key, value in dict(raw_run).items() if key != "outputs"}
     )
     executions.retrieve_run.side_effect = [
-        RunRetrievalOutcome(run=cast(ExecutionRecord, dict(raw_run))),
+        RunRetrievalOutcome(run=record_run),
         RunRetrievalOutcome(
             run=record_run,
             completion_reason="window_elapsed",
@@ -849,7 +849,7 @@ def test_app_run_lookup_sanitizes_tracebacks_and_hides_follow_output_fields(proj
     assert isinstance(show_response.command_data, RunLookupCommandData)
     assert isinstance(follow_response.command_data, RunLookupCommandData)
     show_run = show_response.data["run"]
-    assert show_run["traceback"] == ["Traceback line"]
+    assert show_run["traceback"] == ["frame 1"]
     assert show_run["recorded_traceback"] == ["KeyboardInterrupt"]
     assert show_run["events"][0]["metadata"]["traceback"] == ["frame 1"]
     assert "outputs" not in show_run
@@ -1122,7 +1122,7 @@ def test_app_vars_surfaces_helper_access_metadata(project_dir) -> None:
     introspection = Mock(spec=KernelIntrospection)
     introspection.list_vars.return_value = KernelHelperResult(
         execution=Mock(),
-        payload=[{"name": "value", "type": "int", "repr": "1"}],
+        payload=[VariableEntry(name="value", type_name="int", repr_text="1")],
         access_metadata=HelperAccessMetadata(
             started_new_session=True,
             waited=True,
@@ -1245,13 +1245,17 @@ def test_app_file_exec_without_visible_output_surfaces_namespace_delta(project_d
     introspection.list_vars.side_effect = [
         KernelHelperResult(
             execution=Mock(),
-            payload=[{"name": "value", "type": "int", "repr": "1"}],
+            payload=[VariableEntry(name="value", type_name="int", repr_text="1")],
         ),
         KernelHelperResult(
             execution=Mock(),
             payload=[
-                {"name": "value", "type": "int", "repr": "2"},
-                {"name": "payload", "type": "dict", "repr": "dict len=1 keys=id"},
+                VariableEntry(name="value", type_name="int", repr_text="2"),
+                VariableEntry(
+                    name="payload",
+                    type_name="dict",
+                    repr_text="dict len=1 keys=id",
+                ),
             ],
         ),
     ]

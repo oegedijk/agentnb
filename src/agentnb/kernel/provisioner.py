@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Literal
 
 from ..errors import InvalidInputError, ProvisioningError
-from ..payloads import DoctorCheckPayload, DoctorPayload
 from ..state_layout import StateLayout
 
 IPYKERNEL_REQUIREMENT = "ipykernel>=6.0"
@@ -53,14 +52,6 @@ class DoctorCheck:
     message: str
     fix_hint: str | None = None
 
-    def to_dict(self) -> DoctorCheckPayload:
-        return {
-            "name": self.name,
-            "status": self.status,
-            "message": self.message,
-            "fix_hint": self.fix_hint,
-        }
-
 
 @dataclass(slots=True)
 class DoctorReport:
@@ -68,14 +59,6 @@ class DoctorReport:
     selected_python: str | None
     python_source: str | None
     checks: list[DoctorCheck]
-
-    def to_dict(self) -> DoctorPayload:
-        return {
-            "ready": self.ready,
-            "selected_python": self.selected_python,
-            "python_source": self.python_source,
-            "checks": [check.to_dict() for check in self.checks],
-        }
 
 
 class KernelProvisioner:

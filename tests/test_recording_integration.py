@@ -57,8 +57,8 @@ def test_recording_contract_is_canonical_for_exec_inspect_and_reset(
         )
     )
 
-    assert inspect_payload["name"] == "alpha"
-    assert inspect_payload["repr"] == "41"
+    assert inspect_payload.name == "alpha"
+    assert inspect_payload.repr_text == "41"
 
     visible_history = runtime.history(project_root=project_dir)
     assert [entry.command_type for entry in visible_history] == ["exec", "inspect", "reset"]

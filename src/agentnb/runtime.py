@@ -164,21 +164,6 @@ class DoctorStatus:
             kernel_pid=kernel_pid,
         )
 
-    def to_payload(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "ready": self.ready,
-            "checks": [check.to_dict() for check in self.checks],
-            "stale_session_cleaned": self.stale_session_cleaned,
-            "session_exists": self.session_exists,
-            "kernel_alive": self.kernel_alive,
-            "kernel_pid": self.kernel_pid,
-        }
-        if self.selected_python is not None:
-            payload["selected_python"] = self.selected_python
-        if self.python_source is not None:
-            payload["python_source"] = self.python_source
-        return payload
-
 
 @dataclass(slots=True, frozen=True)
 class TimeoutRecovery:
@@ -795,18 +780,6 @@ class KernelRuntime:
             kernel_pid=status.pid,
             stale_session_cleaned=False,
         )
-
-    def doctor(
-        self,
-        project_root: Path,
-        session_id: str = DEFAULT_SESSION_ID,
-        python_executable: Path | None = None,
-    ) -> dict[str, object]:
-        return self.doctor_status(
-            project_root=project_root,
-            session_id=session_id,
-            python_executable=python_executable,
-        ).to_payload()
 
     def _require_session(
         self, project_root: Path, session_id: str

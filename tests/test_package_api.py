@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agentnb import (
+    DoctorStatus,
     __all__,
     doctor_environment,
     execute_code,
@@ -37,9 +38,18 @@ class FakeRuntime:
     def stop(self, **kwargs: object) -> None:
         self.calls.append(("stop", kwargs))
 
-    def doctor(self, **kwargs: object) -> dict[str, object]:
-        self.calls.append(("doctor", kwargs))
-        return {"ready": True}
+    def doctor_status(self, **kwargs: object) -> DoctorStatus:
+        self.calls.append(("doctor_status", kwargs))
+        return DoctorStatus(
+            ready=True,
+            selected_python=None,
+            python_source=None,
+            checks=[],
+            stale_session_cleaned=False,
+            session_exists=False,
+            kernel_alive=False,
+            kernel_pid=None,
+        )
 
 
 def test_package_api_exports_expected_symbols() -> None:
@@ -48,6 +58,7 @@ def test_package_api_exports_expected_symbols() -> None:
     assert "execute_code" in __all__
     assert "stop_kernel" in __all__
     assert "doctor_environment" in __all__
+    assert "DoctorStatus" in __all__
 
 
 def test_package_api_wrapper_functions_delegate(monkeypatch, project_dir: Path) -> None:
@@ -69,7 +80,8 @@ def test_package_api_wrapper_functions_delegate(monkeypatch, project_dir: Path) 
     assert started is True
     assert current.alive is True
     assert execution.result == "2"
-    assert doctor == {"ready": True}
+    assert isinstance(doctor, DoctorStatus)
+    assert doctor.ready is True
     assert runtime.calls == [
         (
             "start",
@@ -102,7 +114,7 @@ def test_package_api_wrapper_functions_delegate(monkeypatch, project_dir: Path) 
             },
         ),
         (
-            "doctor",
+            "doctor_status",
             {
                 "project_root": project_dir,
                 "session_id": "analysis",

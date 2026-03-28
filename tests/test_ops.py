@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import suppress
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
 from agentnb.errors import AgentNBException
 from agentnb.introspection import KernelIntrospection
+from agentnb.introspection_models import (
+    DataframePreviewData,
+    MappingPreviewData,
+    SequencePreviewData,
+)
 from agentnb.runtime import KernelRuntime
 from tests.conftest import TestLocalIPythonBackend
 from tests.helpers import create_project_dir, reset_integration_kernel
@@ -74,26 +80,28 @@ import localmod
 
     introspection = KernelIntrospection(runtime)
     vars_payload = introspection.list_vars(project_root=project_dir).payload
-    assert any(item["name"] == "my_value" for item in vars_payload)
-    names = {item["name"] for item in vars_payload}
+    assert any(item.name == "my_value" for item in vars_payload)
+    names = {item.name for item in vars_payload}
     assert "In" not in names
     assert "Out" not in names
     assert "get_ipython" not in names
     assert "open" not in names
 
     inspect_payload = introspection.inspect_var(project_root=project_dir, name="my_value").payload
-    assert inspect_payload["name"] == "my_value"
-    assert inspect_payload["type"] == "list"
-    assert inspect_payload["preview"] == {
-        "kind": "sequence-like",
+    assert inspect_payload.name == "my_value"
+    assert inspect_payload.type_name == "list"
+    assert isinstance(inspect_payload.preview, SequencePreviewData)
+    assert asdict(inspect_payload.preview) == {
         "length": 3,
         "sample": [1, 2, 3],
         "item_type": "int",
+        "sample_keys": [],
         "sample_items_shown": 3,
+        "sample_keys_shown": None,
         "sample_truncated": False,
     }
-    assert inspect_payload["members"] == []
-    assert inspect_payload["doc"] == ""
+    assert inspect_payload.members == []
+    assert inspect_payload.doc == ""
 
     _write_module(
         project_dir,
@@ -115,10 +123,10 @@ def greet() -> str:
         project_root=project_dir,
         module_name="localmod",
     ).payload
-    assert reload_payload["requested_module"] == "localmod"
-    assert reload_payload["reloaded_modules"] == ["localmod"]
-    assert "greet" in reload_payload["rebound_names"]
-    assert reload_payload["failed_modules"] == []
+    assert reload_payload.requested_module == "localmod"
+    assert reload_payload.reloaded_modules == ["localmod"]
+    assert "greet" in reload_payload.rebound_names
+    assert reload_payload.failed_modules == []
 
     after_reload = runtime.execute(
         project_root=project_dir,
@@ -207,16 +215,23 @@ frame = DataFrameLike()
     introspection = KernelIntrospection(runtime)
     inspect_payload = introspection.inspect_var(project_root=project_dir, name="frame").payload
 
-    assert inspect_payload["name"] == "frame"
-    assert inspect_payload["preview"] is not None
-    assert inspect_payload["preview"]["kind"] == "dataframe-like"
-    assert inspect_payload["preview"]["shape"] == [2, 2]
-    assert inspect_payload["preview"]["columns"] == ["a", "b"]
-    assert inspect_payload["preview"]["dtypes"] == {"a": "int64", "b": "string"}
-    assert inspect_payload["preview"]["null_counts"] == {"a": 0, "b": 1}
-    assert inspect_payload["preview"]["head"] == [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}]
-    assert inspect_payload["members"] == []
-    assert inspect_payload["doc"] == ""
+    assert inspect_payload.name == "frame"
+    assert inspect_payload.preview is not None
+    assert isinstance(inspect_payload.preview, DataframePreviewData)
+    assert asdict(inspect_payload.preview) == {
+        "shape": [2, 2],
+        "columns": ["a", "b"],
+        "column_count": 2,
+        "columns_shown": 2,
+        "dtypes": {"a": "int64", "b": "string"},
+        "dtypes_shown": 2,
+        "head": [{"a": 1, "b": "x"}, {"a": 2, "b": "y"}],
+        "head_rows_shown": 2,
+        "null_counts": {"a": 0, "b": 1},
+        "null_count_fields_shown": 2,
+    }
+    assert inspect_payload.members == []
+    assert inspect_payload.doc == ""
 
 
 def test_ops_inspect_supports_safe_reference_access(
@@ -245,9 +260,9 @@ payload = holder.value
         name="payload['items'][0]",
     ).payload
 
-    assert attr_payload["name"] == "holder.value"
-    assert attr_payload["preview"] == {
-        "kind": "mapping-like",
+    assert attr_payload.name == "holder.value"
+    assert isinstance(attr_payload.preview, MappingPreviewData)
+    assert asdict(attr_payload.preview) == {
         "length": 1,
         "keys": ["items"],
         "sample": {"items": [{"id": 1}, {"id": 2}]},
@@ -255,9 +270,9 @@ payload = holder.value
         "sample_items_shown": 1,
         "sample_truncated": False,
     }
-    assert subscript_payload["name"] == "payload['items'][0]"
-    assert subscript_payload["preview"] == {
-        "kind": "mapping-like",
+    assert subscript_payload.name == "payload['items'][0]"
+    assert isinstance(subscript_payload.preview, MappingPreviewData)
+    assert asdict(subscript_payload.preview) == {
         "length": 1,
         "keys": ["id"],
         "sample": {"id": 1},
@@ -294,8 +309,8 @@ payload = {
         .payload
     )
 
-    assert inspect_payload["preview"] == {
-        "kind": "mapping-like",
+    assert isinstance(inspect_payload.preview, MappingPreviewData)
+    assert asdict(inspect_payload.preview) == {
         "length": 2,
         "keys": ["items", "paging"],
         "sample": {
@@ -361,13 +376,14 @@ def value() -> str:
 
     reload_payload = KernelIntrospection(runtime).reload_module(project_root=project_dir).payload
 
-    assert reload_payload["requested_module"] is None
-    assert reload_payload["mode"] == "project"
-    assert reload_payload["reloaded_modules"] == ["alpha_mod", "beta_mod"]
-    assert "alpha_value" in reload_payload["rebound_names"]
-    assert reload_payload["failed_modules"] == []
-    assert reload_payload["skipped_modules"] == []
-    assert reload_payload["excluded_module_count"] > 0
+    assert reload_payload.requested_module is None
+    assert reload_payload.mode == "project"
+    assert reload_payload.reloaded_modules == ["alpha_mod", "beta_mod"]
+    assert "alpha_value" in reload_payload.rebound_names
+    assert reload_payload.failed_modules == []
+    assert reload_payload.skipped_modules == []
+    assert reload_payload.excluded_module_count is not None
+    assert reload_payload.excluded_module_count > 0
 
     result = runtime.execute(
         project_root=project_dir,
@@ -419,8 +435,8 @@ frame = FakeFrame()
     )
 
     vars_payload = KernelIntrospection(runtime).list_vars(project_root=project_dir).payload
-    frame_entry = next(item for item in vars_payload if item["name"] == "frame")
-    assert frame_entry["repr"] == "DataFrame shape=(10, 3) columns=a, b, c"
+    frame_entry = next(item for item in vars_payload if item.name == "frame")
+    assert frame_entry.repr_text == "DataFrame shape=(10, 3) columns=a, b, c"
 
 
 def test_ops_sqlite_rows_get_structural_previews(
@@ -447,14 +463,15 @@ rows = conn.execute("select * from items order by id").fetchall()
 
     introspection = KernelIntrospection(runtime)
     vars_payload = introspection.list_vars(project_root=project_dir).payload
-    row_entry = next(item for item in vars_payload if item["name"] == "rows")
-    assert row_entry["repr"] == "list len=2 item_keys=id, title"
+    row_entry = next(item for item in vars_payload if item.name == "rows")
+    assert row_entry.repr_text == "list len=2 item_keys=id, title"
 
     inspect_payload = introspection.inspect_var(project_root=project_dir, name="rows").payload
-    preview = inspect_payload["preview"]
-    assert preview["kind"] == "sequence-like"
-    assert preview["sample_keys"] == ["id", "title"]
-    first = preview["sample"][0]
+    preview = inspect_payload.preview
+    assert isinstance(preview, SequencePreviewData)
+    preview_dict = asdict(preview)
+    assert preview_dict["sample_keys"] == ["id", "title"]
+    first = preview_dict["sample"][0]
     assert isinstance(first, dict)
     assert first["title"] == "a"
 
@@ -481,8 +498,10 @@ posts = [
         )
         .payload
     )
-    assert inspect_payload["preview"]["kind"] == "sequence-like"
-    assert inspect_payload["preview"]["length"] == 3
-    assert inspect_payload["preview"]["item_type"] == "dict"
-    assert inspect_payload["preview"]["sample_keys"] == ["id", "title", "body"]
-    assert len(inspect_payload["preview"]["sample"]) == 3
+    assert inspect_payload.preview is not None
+    assert isinstance(inspect_payload.preview, SequencePreviewData)
+    preview_dict = asdict(inspect_payload.preview)
+    assert preview_dict["length"] == 3
+    assert preview_dict["item_type"] == "dict"
+    assert preview_dict["sample_keys"] == ["id", "title", "body"]
+    assert len(preview_dict["sample"]) == 3

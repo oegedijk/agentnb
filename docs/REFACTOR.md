@@ -595,28 +595,113 @@ What is still incomplete:
 
 ## Next Tranche
 
-The next highest-value work is now **reviewing the remaining explicit
-serialized-edge/public helpers and deciding which ones still deserve to
-exist**. After the typed-only response cutover, the main architectural question
-is no longer "should internal call paths use dicts?" That answer is now no.
-The remaining question is which serialized helpers are still real external
-edges versus leftover convenience APIs.
+### Tranche 9: Ousterhout Audit + Typed Helper / Run View Cutover
+
+Status: done
+
+Completed in the current refactor:
+
+- helper/introspection results now have explicit typed owning models in
+  `introspection_models.py` instead of leaking payload `TypedDict`s through
+  command data:
+  - `VariableEntry`
+  - `InspectValue`
+  - typed preview models
+  - `ReloadResult`
+  - `NamespaceDelta`
+- `KernelIntrospection` now parses helper JSON directly into those typed helper
+  models rather than returning raw mapping payloads on the normal success path.
+- app-facing helper command data now carries typed helper models only:
+  - `VarsCommandData`
+  - `InspectCommandData`
+  - `ReloadCommandData`
+  - file-exec namespace deltas
+- package/root doctor access was narrowed to the typed owner:
+  - `KernelRuntime.doctor()` was removed
+  - `doctor_status()` is now the owning runtime seam
+  - `DoctorStatus` is exported at the package root
+- `response_serialization.py` was reduced further toward an edge-only role:
+  - serialized helper shaping now converts typed helper models directly
+  - shallow convenience exports for run-entry/run-lookup serialization were
+    removed
+- app/output/advice layers no longer depend on raw helper payload mappings or
+  `.payload.get(...)`-style access for vars/inspect/reload/namespace-delta
+  behavior.
+- run command data was tightened around app-owned DTOs instead of leaking the
+  persisted run-store model upward:
+  - `RunListEntryData`
+  - `RunSnapshotData`
+- `app.py` now projects `ExecutionRecord` into those run DTOs once at the app
+  boundary, and:
+  - `output.py`
+  - `advice.py`
+  - `response_serialization.py`
+  now depend on the app-owned run views rather than on `runs.store`
+  projection/default behavior.
+- tests were rebalanced around those owning seams:
+  - helper-facing tests now construct typed helper results directly
+  - run-facing response/output/projection tests now build app-owned run DTOs
+    instead of smuggling `ExecutionRecord` through command-data seams
+  - CLI fixture helpers now translate legacy shorthand payloads into typed
+    helper/run models at the test edge rather than keeping dicts alive in
+    product code
+
+What this tranche intentionally did not do:
+
+- it did not restore compatibility for shallow package helpers or agent-output
+  field choices when those conflicted with the clean cutover rule
+- it did not introduce a new generic typed model for serialized error metadata
+- it did not change persisted run schemas or the stable full response envelope
+- it did not remove `ExecutionRecord` from exec/reset command data, where the
+  execution boundary still legitimately owns the canonical execution outcome
+
+New invariants after this tranche:
+
+- helper/introspection command data is typed-only above the introspection
+  boundary
+- run lookup/list command data is app-owned view data above the app boundary
+- `ExecutionRecord` no longer leaks into app/output/advice/serializer layers
+  for `runs list` and `runs show/follow/wait`
+- serializer ownership remains at the response edge, but it now consumes typed
+  app/helper/run views rather than mixed storage models or ad hoc mappings
+
+What is still incomplete:
+
+- `ExecCommandData` still carries `ExecutionRecord` directly; that is
+  defensible because exec/reset are still tightly coupled to the canonical
+  execution outcome model, but it remains a seam worth reviewing if the
+  execution boundary is split further later.
+- `selectors.py` still resolves run selectors against generic run mappings from
+  `ExecutionService.list_runs(...)` rather than against a typed run-summary
+  view owned by the execution boundary.
+- some public/package helpers still expose serialized payload dicts and should
+  be reviewed only as deliberate external edges, not as internal convenience
+  seams.
+
+## Next Tranche
+
+The next highest-value work is now **tightening run selection and remaining
+public serialized helpers around real owning boundaries**.
 
 That tranche should include:
 
-- auditing remaining public or package-level helpers that still return payload
-  dicts, such as explicit wire/package conveniences that bypass typed owners.
-- keeping only deliberate external/package compatibility edges public and
-  moving any remaining internal callers fully onto typed owning boundaries.
-- tightening tests so those helpers are covered only as explicit public/wire
-  contracts rather than as mixed internal fixtures.
-- deciding whether generic error metadata should stay serialized-only or later
-  receive its own typed model.
+- introducing a typed run-summary view at the execution/selector seam so
+  `selectors.py` stops interpreting generic run mappings directly
+- deciding whether `ExecCommandData.record` should remain `ExecutionRecord` as
+  the canonical exec outcome owner or whether a narrower exec-view DTO is now
+  justified
+- auditing the remaining public/package helpers that still expose serialized
+  payload dicts and deleting any that are not real external edges
+- keeping tests focused on owning boundaries:
+  - typed internal seams for product code
+  - mapping assertions only for deliberate wire/package contracts
 
 Advice for that tranche:
 
-- keep the clean-cut rule: if a serialized helper is not serving a real
-  external edge, remove it rather than preserving it for convenience.
-- preserve the stable JSON/agent envelope and keep serializer ownership at the
-  response edge.
-- do not reintroduce dual typed/mapping internal paths after this cutover.
+- keep the clean-cut rule: do not reintroduce compatibility shims between
+  internal layers just because they are convenient.
+- prefer one deep typed owner per seam over broad reusable “data bags”.
+- if a higher layer only needs a subset view, project it once at the owning
+  boundary instead of passing the lower-layer domain model through unchanged.
+- preserve the stable full JSON envelope only at the serializer edge; do not
+  let wire contracts become internal currency again.

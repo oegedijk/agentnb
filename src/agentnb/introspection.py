@@ -19,16 +19,18 @@ from .errors import (
 )
 from .execution import SessionAccessProvider
 from .history import HistoryStore
+from .introspection_models import (
+    DataframePreviewData,
+    FailedModule,
+    InspectPreviewData,
+    InspectValue,
+    MappingPreviewData,
+    ReloadResult,
+    SequencePreviewData,
+    VariableEntry,
+)
 from .payloads import (
-    DataframePreview,
-    FailedModuleEntry,
-    InspectPayload,
-    InspectPreview,
     JSONValue,
-    MappingPreview,
-    ReloadReport,
-    SequencePreview,
-    VarEntry,
 )
 from .recording import CommandRecorder, CommandRecording
 from .runtime import KernelRuntime, KernelWaitResult
@@ -93,7 +95,7 @@ class KernelIntrospection:
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float = 10.0,
         execution_policy: HelperExecutionPolicy | None = None,
-    ) -> KernelHelperResult[list[VarEntry]]:
+    ) -> KernelHelperResult[list[VariableEntry]]:
         result = self._run_json_helper(
             project_root=project_root,
             session_id=session_id,
@@ -114,7 +116,7 @@ class KernelIntrospection:
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float = 10.0,
         execution_policy: HelperExecutionPolicy | None = None,
-    ) -> KernelHelperResult[InspectPayload]:
+    ) -> KernelHelperResult[InspectValue]:
         reference = _parse_inspect_reference(name)
         result = self._run_json_helper(
             project_root=project_root,
@@ -136,7 +138,7 @@ class KernelIntrospection:
         session_id: str = DEFAULT_SESSION_ID,
         timeout_s: float = 10.0,
         execution_policy: HelperExecutionPolicy | None = None,
-    ) -> KernelHelperResult[ReloadReport]:
+    ) -> KernelHelperResult[ReloadResult]:
         result = self._run_json_helper(
             project_root=project_root,
             session_id=session_id,
@@ -500,11 +502,11 @@ def _augment_helper_error(
     )
 
 
-def _parse_var_entries(payload: JSONValue) -> list[VarEntry]:
+def _parse_var_entries(payload: JSONValue) -> list[VariableEntry]:
     if not isinstance(payload, list):
         raise AgentNBException(code="PARSE_ERROR", message="Vars helper returned an invalid shape")
 
-    entries: list[VarEntry] = []
+    entries: list[VariableEntry] = []
     for item in payload:
         if not isinstance(item, dict):
             continue
@@ -514,16 +516,16 @@ def _parse_var_entries(payload: JSONValue) -> list[VarEntry]:
         if not all(isinstance(value, str) for value in (name, value_type, repr_text)):
             continue
         entries.append(
-            VarEntry(
+            VariableEntry(
                 name=name,
-                type=value_type,
-                repr=repr_text,
+                type_name=value_type,
+                repr_text=repr_text,
             )
         )
     return entries
 
 
-def _parse_inspect_payload(payload: JSONValue) -> InspectPayload:
+def _parse_inspect_payload(payload: JSONValue) -> InspectValue:
     if not isinstance(payload, dict):
         raise AgentNBException(
             code="PARSE_ERROR",
@@ -538,79 +540,92 @@ def _parse_inspect_payload(payload: JSONValue) -> InspectPayload:
             message="Inspect helper returned an invalid shape",
         )
 
-    inspect_payload: InspectPayload = {
-        "name": name,
-        "type": value_type,
-    }
-
     repr_text = payload.get("repr")
-    if isinstance(repr_text, str):
-        inspect_payload["repr"] = repr_text
-
     members = payload.get("members")
-    if isinstance(members, list):
-        inspect_payload["members"] = [member for member in members if isinstance(member, str)]
-
+    parsed_members = (
+        [member for member in members if isinstance(member, str)]
+        if isinstance(members, list)
+        else []
+    )
     doc = payload.get("doc")
-    if isinstance(doc, str):
-        inspect_payload["doc"] = doc
-
     preview = payload.get("preview")
     parsed_preview = _parse_inspect_preview(preview)
-    if parsed_preview is not None:
-        inspect_payload["preview"] = parsed_preview
+    return InspectValue(
+        name=name,
+        type_name=value_type,
+        repr_text=repr_text if isinstance(repr_text, str) else None,
+        members=parsed_members,
+        doc=doc if isinstance(doc, str) else None,
+        preview=parsed_preview,
+    )
 
-    return inspect_payload
 
-
-def _parse_inspect_preview(payload: JSONValue) -> InspectPreview | None:
+def _parse_inspect_preview(payload: JSONValue) -> InspectPreviewData | None:
     if not isinstance(payload, dict):
         return None
 
     kind = payload.get("kind")
     if kind == "dataframe-like":
-        preview: DataframePreview = {"kind": "dataframe-like"}
         shape = payload.get("shape")
-        if isinstance(shape, list) and all(isinstance(item, int) for item in shape):
-            preview["shape"] = shape
+        parsed_shape = (
+            shape
+            if isinstance(shape, list) and all(isinstance(item, int) for item in shape)
+            else None
+        )
         columns = payload.get("columns")
-        if isinstance(columns, list):
-            preview["columns"] = [column for column in columns if isinstance(column, str)]
-        column_count = payload.get("column_count")
-        if isinstance(column_count, int):
-            preview["column_count"] = column_count
-        columns_shown = payload.get("columns_shown")
-        if isinstance(columns_shown, int):
-            preview["columns_shown"] = columns_shown
+        parsed_columns = (
+            [column for column in columns if isinstance(column, str)]
+            if isinstance(columns, list)
+            else []
+        )
         dtypes = payload.get("dtypes")
-        if isinstance(dtypes, dict):
-            preview["dtypes"] = {
+        parsed_dtypes = (
+            {
                 str(key): str(value)
                 for key, value in dtypes.items()
                 if isinstance(key, str) and isinstance(value, str)
             }
-        dtypes_shown = payload.get("dtypes_shown")
-        if isinstance(dtypes_shown, int):
-            preview["dtypes_shown"] = dtypes_shown
+            if isinstance(dtypes, dict)
+            else None
+        )
         head = payload.get("head")
-        if isinstance(head, list):
-            preview["head"] = [
-                cast(dict[str, JSONValue], row) for row in head if isinstance(row, dict)
-            ]
-        head_rows_shown = payload.get("head_rows_shown")
-        if isinstance(head_rows_shown, int):
-            preview["head_rows_shown"] = head_rows_shown
+        parsed_head = (
+            [cast(dict[str, JSONValue], row) for row in head if isinstance(row, dict)]
+            if isinstance(head, list)
+            else None
+        )
         null_counts = payload.get("null_counts")
-        if isinstance(null_counts, dict):
-            preview["null_counts"] = {
+        parsed_null_counts = (
+            {
                 str(key): value
                 for key, value in null_counts.items()
                 if isinstance(key, str) and isinstance(value, int)
             }
-        null_count_fields_shown = payload.get("null_count_fields_shown")
-        if isinstance(null_count_fields_shown, int):
-            preview["null_count_fields_shown"] = null_count_fields_shown
-        return preview
+            if isinstance(null_counts, dict)
+            else None
+        )
+        return DataframePreviewData(
+            shape=parsed_shape,
+            columns=parsed_columns,
+            column_count=payload.get("column_count")
+            if isinstance(payload.get("column_count"), int)
+            else None,
+            columns_shown=payload.get("columns_shown")
+            if isinstance(payload.get("columns_shown"), int)
+            else None,
+            dtypes=parsed_dtypes,
+            dtypes_shown=payload.get("dtypes_shown")
+            if isinstance(payload.get("dtypes_shown"), int)
+            else None,
+            head=parsed_head,
+            head_rows_shown=payload.get("head_rows_shown")
+            if isinstance(payload.get("head_rows_shown"), int)
+            else None,
+            null_counts=parsed_null_counts,
+            null_count_fields_shown=payload.get("null_count_fields_shown")
+            if isinstance(payload.get("null_count_fields_shown"), int)
+            else None,
+        )
 
     if kind == "mapping-like":
         keys = payload.get("keys")
@@ -622,76 +637,76 @@ def _parse_inspect_preview(payload: JSONValue) -> InspectPreview | None:
             or not isinstance(sample, dict)
         ):
             return None
-        preview: MappingPreview = {
-            "kind": "mapping-like",
-            "length": length,
-            "keys": [key for key in keys if isinstance(key, str)],
-            "sample": cast(dict[str, JSONValue], sample),
-        }
-        keys_shown = payload.get("keys_shown")
-        if isinstance(keys_shown, int):
-            preview["keys_shown"] = keys_shown
-        sample_items_shown = payload.get("sample_items_shown")
-        if isinstance(sample_items_shown, int):
-            preview["sample_items_shown"] = sample_items_shown
-        if isinstance(payload.get("sample_truncated"), bool):
-            preview["sample_truncated"] = cast(bool, payload.get("sample_truncated"))
-        return preview
+        return MappingPreviewData(
+            length=length,
+            keys=[key for key in keys if isinstance(key, str)],
+            sample=cast(dict[str, JSONValue], sample),
+            keys_shown=payload.get("keys_shown")
+            if isinstance(payload.get("keys_shown"), int)
+            else None,
+            sample_items_shown=payload.get("sample_items_shown")
+            if isinstance(payload.get("sample_items_shown"), int)
+            else None,
+            sample_truncated=cast(bool, payload.get("sample_truncated"))
+            if isinstance(payload.get("sample_truncated"), bool)
+            else None,
+        )
 
     if kind == "sequence-like":
         sample = payload.get("sample")
         length = payload.get("length")
         if not isinstance(length, int) or not isinstance(sample, list):
             return None
-        preview: SequencePreview = {
-            "kind": "sequence-like",
-            "length": length,
-            "sample": cast(list[JSONValue], sample),
-        }
         item_type = payload.get("item_type")
-        if isinstance(item_type, str):
-            preview["item_type"] = item_type
         sample_keys = payload.get("sample_keys")
-        if isinstance(sample_keys, list):
-            preview["sample_keys"] = [key for key in sample_keys if isinstance(key, str)]
-        sample_items_shown = payload.get("sample_items_shown")
-        if isinstance(sample_items_shown, int):
-            preview["sample_items_shown"] = sample_items_shown
-        sample_keys_shown = payload.get("sample_keys_shown")
-        if isinstance(sample_keys_shown, int):
-            preview["sample_keys_shown"] = sample_keys_shown
-        if isinstance(payload.get("sample_truncated"), bool):
-            preview["sample_truncated"] = cast(bool, payload.get("sample_truncated"))
-        return preview
+        return SequencePreviewData(
+            length=length,
+            sample=cast(list[JSONValue], sample),
+            item_type=item_type if isinstance(item_type, str) else None,
+            sample_keys=[key for key in sample_keys if isinstance(key, str)]
+            if isinstance(sample_keys, list)
+            else [],
+            sample_items_shown=payload.get("sample_items_shown")
+            if isinstance(payload.get("sample_items_shown"), int)
+            else None,
+            sample_keys_shown=payload.get("sample_keys_shown")
+            if isinstance(payload.get("sample_keys_shown"), int)
+            else None,
+            sample_truncated=cast(bool, payload.get("sample_truncated"))
+            if isinstance(payload.get("sample_truncated"), bool)
+            else None,
+        )
 
     return None
 
 
-def _parse_reload_report(payload: JSONValue) -> ReloadReport:
+def _parse_reload_report(payload: JSONValue) -> ReloadResult:
     if not isinstance(payload, dict):
         raise AgentNBException(
             code="PARSE_ERROR",
             message="Reload helper returned an invalid shape",
         )
 
-    report: ReloadReport = {}
     mode = payload.get("mode")
-    if mode in {"module", "project"}:
-        report["mode"] = mode
+    parsed_mode = cast(
+        Literal["module", "project"] | None,
+        mode if mode in {"module", "project"} else None,
+    )
     requested_module = payload.get("requested_module")
-    if requested_module is None or isinstance(requested_module, str):
-        report["requested_module"] = requested_module
+    parsed_requested_module = (
+        requested_module if requested_module is None or isinstance(requested_module, str) else None
+    )
+    parsed_lists: dict[str, list[str]] = {}
     for key in ("reloaded_modules", "skipped_modules", "rebound_names", "stale_names", "notes"):
         value = payload.get(key)
         if isinstance(value, list):
-            report[key] = [item for item in value if isinstance(item, str)]
+            parsed_lists[key] = [item for item in value if isinstance(item, str)]
     excluded_count = payload.get("excluded_module_count")
-    if isinstance(excluded_count, int):
-        report["excluded_module_count"] = excluded_count
+    parsed_excluded_count = excluded_count if isinstance(excluded_count, int) else None
 
     failed_modules = payload.get("failed_modules")
+    parsed_failed: list[FailedModule] = []
     if isinstance(failed_modules, list):
-        parsed_failed: list[FailedModuleEntry] = []
         for item in failed_modules:
             if not isinstance(item, dict):
                 continue
@@ -700,15 +715,24 @@ def _parse_reload_report(payload: JSONValue) -> ReloadReport:
             message = item.get("message")
             if all(isinstance(value, str) for value in (module, error_type, message)):
                 parsed_failed.append(
-                    FailedModuleEntry(
+                    FailedModule(
                         module=module,
                         error_type=error_type,
                         message=message,
                     )
                 )
-        report["failed_modules"] = parsed_failed
 
-    return report
+    return ReloadResult(
+        mode=parsed_mode,
+        requested_module=parsed_requested_module,
+        reloaded_modules=parsed_lists.get("reloaded_modules", []),
+        failed_modules=parsed_failed,
+        skipped_modules=parsed_lists.get("skipped_modules", []),
+        rebound_names=parsed_lists.get("rebound_names", []),
+        stale_names=parsed_lists.get("stale_names", []),
+        excluded_module_count=parsed_excluded_count,
+        notes=parsed_lists.get("notes", []),
+    )
 
 
 def _parse_inspect_reference(reference: str) -> InspectReference:

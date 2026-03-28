@@ -169,16 +169,16 @@ def test_runtime_doctor_merges_store_metadata(project_dir: Path, mocker: MockerF
 
     runtime = KernelRuntime(backend=backend, provisioner_factory=lambda _: provisioner)
 
-    payload = runtime.doctor(project_root=project_dir)
+    status = runtime.doctor_status(project_root=project_dir)
 
-    assert payload["ready"] is True
-    assert payload["selected_python"] == "/custom/python"
-    assert payload["python_source"] == "explicit"
-    assert payload["session_exists"] is False
-    assert payload["stale_session_cleaned"] is False
-    assert payload["checks"] == [
-        {"name": "python", "status": "ok", "message": "ok", "fix_hint": None}
-    ]
+    assert status.ready is True
+    assert status.selected_python == "/custom/python"
+    assert status.python_source == "explicit"
+    assert status.session_exists is False
+    assert status.stale_session_cleaned is False
+    assert [
+        (check.name, check.status, check.message, check.fix_hint) for check in status.checks
+    ] == [("python", "ok", "ok", None)]
 
 
 def test_runtime_ensure_started_delegates_to_start(

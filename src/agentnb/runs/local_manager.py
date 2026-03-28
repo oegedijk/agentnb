@@ -20,7 +20,7 @@ from ..recording import CommandRecorder, CommandRecording
 from ..session import pid_exists
 from .executor import LocalRunExecutor, RunExecutor
 from .manager import RunManager
-from .models import RunCancelOutcome, RunObservationResult, RunObserver, RunPlan, RunSpec
+from .models import RunCancelOutcome, RunHandle, RunObservationResult, RunObserver, RunPlan, RunSpec
 from .store import (
     ExecutionRecord,
     ExecutionRun,
@@ -291,6 +291,26 @@ class LocalRunManager(RunManager):
             waited_ms=waited_ms,
             initial_runtime_state=initial_runtime_state,
             blocking_execution_id=blocking_execution_id,
+        )
+
+    def active_run_for_session(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        excluding_execution_id: str | None = None,
+    ) -> RunHandle | None:
+        active = self._active_run_for_session(
+            project_root=project_root,
+            session_id=session_id,
+            excluding_execution_id=excluding_execution_id,
+        )
+        if active is None:
+            return None
+        return RunHandle(
+            execution_id=active.execution_id,
+            session_id=active.session_id,
+            command_type=active.command_type,
         )
 
     def complete_background_run(self, *, project_root: Path, execution_id: str) -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from .contracts import (
     ExecutionSink,
@@ -11,7 +11,7 @@ from .contracts import (
     HelperInitialRuntimeState,
     HelperWaitFor,
 )
-from .errors import KernelWaitTimedOutError, RunWaitTimedOutError
+from .errors import KernelWaitTimedOutError
 from .recording import CommandRecorder
 from .runs import (
     ExecutionRecord,
@@ -21,7 +21,7 @@ from .runs import (
     ManagedExecution,
     RunCancelOutcome,
     RunManager,
-    RunObservationResult,
+    RunObservationCompletion,
     RunSpec,
     StartOutcome,
     _ExecutionProgressSink,
@@ -75,6 +75,64 @@ class SessionAccessOutcome:
         )
 
 
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ExecutionCommandRequest:
+    project_root: Path
+    session_id: str = DEFAULT_SESSION_ID
+    command_type: Literal["exec", "reset"]
+    mode: Literal["foreground", "background"] = "foreground"
+    code: str | None = None
+    timeout_s: float = 30.0
+    ensure_started: bool = False
+    event_sink: ExecutionSink | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RunListRequest:
+    project_root: Path
+    session_id: str | None = None
+    errors_only: bool = False
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RunRetrievalRequest:
+    project_root: Path
+    execution_id: str
+    mode: Literal["get", "wait", "follow"] = "get"
+    timeout_s: float = 30.0
+    poll_interval_s: float = 0.1
+    event_sink: ExecutionSink | None = None
+    skip_history: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class RunRetrievalOutcome:
+    run: ExecutionRecord
+    completion_reason: RunObservationCompletion | None = None
+    replayed_event_count: int = 0
+    emitted_event_count: int = 0
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class RunCancelRequest:
+    project_root: Path
+    execution_id: str
+    timeout_s: float = 10.0
+    poll_interval_s: float = 0.1
+
+
+class SessionAccessProvider(Protocol):
+    def wait_for_session_access(
+        self,
+        *,
+        project_root: Path,
+        session_id: str = DEFAULT_SESSION_ID,
+        target: SessionAccessTarget,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.1,
+    ) -> SessionAccessOutcome: ...
+
+
 class ExecutionService:
     def __init__(
         self,
@@ -86,151 +144,73 @@ class ExecutionService:
         self._recorder = recorder or CommandRecorder()
         self._run_manager = run_manager or LocalRunManager(runtime, recorder=self._recorder)
 
-    def execute_code(
-        self,
-        *,
-        project_root: Path,
-        session_id: str = DEFAULT_SESSION_ID,
-        code: str,
-        timeout_s: float,
-        ensure_started: bool = False,
-        event_sink: ExecutionSink | None = None,
-    ) -> ManagedExecution:
+    def execute(self, request: ExecutionCommandRequest) -> ManagedExecution:
         return self._run_manager.submit(
             RunSpec(
-                project_root=project_root,
-                session_id=session_id,
-                command_type="exec",
-                code=code,
-                mode="foreground",
-                timeout_s=timeout_s,
-                ensure_started=ensure_started,
+                project_root=request.project_root,
+                session_id=request.session_id,
+                command_type=request.command_type,
+                code=request.code,
+                mode=request.mode,
+                timeout_s=request.timeout_s,
+                ensure_started=request.ensure_started,
             ),
-            observer=event_sink,
-        )
-
-    def start_background_code(
-        self,
-        *,
-        project_root: Path,
-        session_id: str = DEFAULT_SESSION_ID,
-        code: str,
-        ensure_started: bool = False,
-    ) -> ManagedExecution:
-        return self._run_manager.submit(
-            RunSpec(
-                project_root=project_root,
-                session_id=session_id,
-                command_type="exec",
-                code=code,
-                mode="background",
-                ensure_started=ensure_started,
-            )
-        )
-
-    def reset_session(
-        self,
-        *,
-        project_root: Path,
-        session_id: str = DEFAULT_SESSION_ID,
-        timeout_s: float,
-    ) -> ManagedExecution:
-        return self._run_manager.submit(
-            RunSpec(
-                project_root=project_root,
-                session_id=session_id,
-                command_type="reset",
-                code=None,
-                mode="foreground",
-                timeout_s=timeout_s,
-            )
+            observer=request.event_sink,
         )
 
     def list_runs(
         self,
         *,
-        project_root: Path,
-        session_id: str | None = None,
-        errors_only: bool = False,
+        request: RunListRequest,
     ) -> list[ExecutionRecord]:
         return self._run_manager.list_runs(
-            project_root=project_root,
-            session_id=session_id,
-            errors_only=errors_only,
+            project_root=request.project_root,
+            session_id=request.session_id,
+            errors_only=request.errors_only,
         )
 
-    def get_run(self, *, project_root: Path, execution_id: str) -> ExecutionRecord:
-        return self._run_manager.get_run(project_root=project_root, execution_id=execution_id)
-
-    def wait_for_run(
-        self,
-        *,
-        project_root: Path,
-        execution_id: str,
-        timeout_s: float = 30.0,
-        poll_interval_s: float = 0.1,
-    ) -> ExecutionRecord:
-        return self._run_manager.wait_for_run(
-            project_root=project_root,
-            execution_id=execution_id,
-            timeout_s=timeout_s,
-            poll_interval_s=poll_interval_s,
+    def retrieve_run(self, request: RunRetrievalRequest) -> RunRetrievalOutcome:
+        if request.mode == "follow":
+            observation = self._run_manager.follow_run(
+                project_root=request.project_root,
+                execution_id=request.execution_id,
+                timeout_s=request.timeout_s,
+                poll_interval_s=request.poll_interval_s,
+                observer=request.event_sink,
+                skip_history=request.skip_history,
+            )
+            return RunRetrievalOutcome(
+                run=observation.run,
+                completion_reason=observation.completion_reason,
+                replayed_event_count=observation.replayed_event_count,
+                emitted_event_count=observation.emitted_event_count,
+            )
+        if request.mode == "wait":
+            return RunRetrievalOutcome(
+                run=self._run_manager.wait_for_run(
+                    project_root=request.project_root,
+                    execution_id=request.execution_id,
+                    timeout_s=request.timeout_s,
+                    poll_interval_s=request.poll_interval_s,
+                )
+            )
+        return RunRetrievalOutcome(
+            run=self._run_manager.get_run(
+                project_root=request.project_root,
+                execution_id=request.execution_id,
+            )
         )
-
-    def observe_run(
-        self,
-        *,
-        project_root: Path,
-        execution_id: str,
-        timeout_s: float = 30.0,
-        poll_interval_s: float = 0.1,
-        event_sink: ExecutionSink | None = None,
-        skip_history: bool = False,
-    ) -> RunObservationResult:
-        return self._run_manager.follow_run(
-            project_root=project_root,
-            execution_id=execution_id,
-            timeout_s=timeout_s,
-            poll_interval_s=poll_interval_s,
-            observer=event_sink,
-            skip_history=skip_history,
-        )
-
-    def follow_run(
-        self,
-        *,
-        project_root: Path,
-        execution_id: str,
-        timeout_s: float = 30.0,
-        poll_interval_s: float = 0.1,
-        event_sink: ExecutionSink | None = None,
-        skip_history: bool = False,
-    ) -> ExecutionRecord:
-        observation = self.observe_run(
-            project_root=project_root,
-            execution_id=execution_id,
-            timeout_s=timeout_s,
-            poll_interval_s=poll_interval_s,
-            event_sink=event_sink,
-            skip_history=skip_history,
-        )
-        if observation.completion_reason == "window_elapsed":
-            raise RunWaitTimedOutError(timeout_s)
-        return observation.run
 
     def cancel_run(
         self,
         *,
-        project_root: Path,
-        execution_id: str,
-        timeout_s: float = 10.0,
-        poll_interval_s: float = 0.1,
+        request: RunCancelRequest,
     ) -> RunCancelOutcome:
         return self._run_manager.cancel_run(
-            project_root=project_root,
-            execution_id=execution_id,
-            timeout_s=timeout_s,
-            poll_interval_s=poll_interval_s,
+            project_root=request.project_root,
+            execution_id=request.execution_id,
+            timeout_s=request.timeout_s,
+            poll_interval_s=request.poll_interval_s,
         )
 
     def wait_for_helper_session_access(
@@ -332,11 +312,11 @@ class ExecutionService:
                 initial_runtime_state = (
                     wait_result.initial_runtime_state or wait_result.runtime_state
                 )
-            active_execution_id = self._active_execution_id_for_session(
+            active_run = self._run_manager.active_run_for_session(
                 project_root=request.project_root,
                 session_id=request.session_id,
             )
-            if active_execution_id is None:
+            if active_run is None:
                 if not waited_for_run:
                     return SessionAccessOutcome.from_wait_result(wait_result)
                 return SessionAccessOutcome(
@@ -353,42 +333,31 @@ class ExecutionService:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise KernelWaitTimedOutError(request.timeout_s, waiting_for="idle")
-            self.wait_for_run(
-                project_root=request.project_root,
-                execution_id=active_execution_id,
-                timeout_s=remaining,
-                poll_interval_s=request.poll_interval_s,
+            self.retrieve_run(
+                RunRetrievalRequest(
+                    project_root=request.project_root,
+                    execution_id=active_run.execution_id,
+                    mode="wait",
+                    timeout_s=remaining,
+                    poll_interval_s=request.poll_interval_s,
+                )
             )
             waited_for_run = True
 
-    def _active_execution_id_for_session(
-        self,
-        *,
-        project_root: Path,
-        session_id: str,
-    ) -> str | None:
-        runs = self._run_manager.list_runs(
-            project_root=project_root,
-            session_id=session_id,
-        )
-        for run in reversed(runs):
-            status = getattr(run, "status", None)
-            execution_id = getattr(run, "execution_id", None)
-            if status is None and isinstance(run, dict):
-                status = run.get("status")
-                execution_id = run.get("execution_id")
-            if status in {"starting", "running"} and isinstance(execution_id, str) and execution_id:
-                return execution_id
-        return None
-
 
 __all__ = [
+    "ExecutionCommandRequest",
     "ExecutionRecord",
     "ExecutionRun",
     "ExecutionService",
     "ExecutionStore",
     "ManagedExecution",
+    "RunCancelRequest",
+    "RunListRequest",
+    "RunRetrievalOutcome",
+    "RunRetrievalRequest",
     "SessionAccessOutcome",
+    "SessionAccessProvider",
     "SessionAccessRequest",
     "SessionAccessTarget",
     "StartOutcome",

@@ -17,7 +17,7 @@ from .errors import (
     NoKernelRunningError,
     SessionBusyError,
 )
-from .execution import ExecutionService
+from .execution import SessionAccessProvider
 from .history import HistoryStore
 from .payloads import (
     DataframePreview,
@@ -80,11 +80,11 @@ class KernelIntrospection:
     def __init__(
         self,
         runtime: KernelRuntime,
-        executions: ExecutionService | None = None,
+        session_access: SessionAccessProvider | None = None,
         recorder: CommandRecorder | None = None,
     ) -> None:
         self.runtime = runtime
-        self.executions = executions
+        self.session_access = session_access
         self.recorder = recorder or CommandRecorder()
 
     def list_vars(
@@ -321,8 +321,8 @@ class KernelIntrospection:
         session_id: str,
         timeout_s: float,
     ) -> HelperAccessMetadata:
-        if self.executions is not None:
-            return self.executions.wait_for_session_access(
+        if self.session_access is not None:
+            return self.session_access.wait_for_session_access(
                 project_root=project_root,
                 session_id=session_id,
                 timeout_s=timeout_s,

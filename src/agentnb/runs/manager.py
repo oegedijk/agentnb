@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..contracts import HelperAccessMetadata
-from .models import RunCancelOutcome, RunObservationResult, RunObserver, RunSpec
+from .models import RunCancelOutcome, RunHandle, RunObservationResult, RunObserver, RunSpec
 from .store import ExecutionRecord, ManagedExecution
 
 
@@ -58,5 +58,13 @@ class RunManager(Protocol):
         timeout_s: float = 10.0,
         poll_interval_s: float = 0.1,
     ) -> HelperAccessMetadata: ...
+
+    def active_run_for_session(
+        self,
+        *,
+        project_root: Path,
+        session_id: str,
+        excluding_execution_id: str | None = None,
+    ) -> RunHandle | None: ...
 
     def complete_background_run(self, *, project_root: Path, execution_id: str) -> None: ...

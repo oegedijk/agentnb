@@ -38,15 +38,24 @@ from .contracts import (
     success_response,
 )
 from .errors import AgentNBException, ErrorContext
-from .execution import ExecutionService, ManagedExecution, SessionAccessOutcome
+from .execution import (
+    ExecutionCommandRequest,
+    ExecutionService,
+    ManagedExecution,
+    RunRetrievalRequest,
+    SessionAccessOutcome,
+)
+from .execution import (
+    RunCancelRequest as ExecutionRunCancelRequest,
+)
+from .execution import (
+    RunListRequest as ExecutionRunListRequest,
+)
 from .execution_invocation import ExecInvocationPolicy, ExecSourceKind
-from .introspection import HelperExecutionPolicy
-from .ops import NotebookOps
+from .introspection import HelperExecutionPolicy, KernelIntrospection
 from .payloads import NamespaceDeltaEntry, NamespaceDeltaPayload, VarDisplayEntry
 from .response_serialization import selected_exec_output, serialize_command_data
-from .runtime import (
-    KernelRuntime,
-)
+from .runtime import KernelRuntime
 from .selectors import (
     HistoryReference,
     HistorySelectorResolver,
@@ -223,7 +232,7 @@ class AgentNBApp:
         *,
         runtime: KernelRuntime | None = None,
         executions: ExecutionService | None = None,
-        ops: NotebookOps | None = None,
+        introspection: KernelIntrospection | None = None,
         advisor: AdvicePolicy | None = None,
         run_selectors: RunSelectorResolver | None = None,
         history_selectors: HistorySelectorResolver | None = None,
@@ -233,7 +242,10 @@ class AgentNBApp:
         resolved_executions = executions or ExecutionService(resolved_runtime)
         self.runtime = resolved_runtime
         self.executions = resolved_executions
-        self.ops = ops or NotebookOps(resolved_runtime, executions=resolved_executions)
+        self.introspection = introspection or KernelIntrospection(
+            resolved_runtime,
+            session_access=resolved_executions,
+        )
         self.advisor = advisor or AdvicePolicy()
         self.run_selectors = run_selectors or RunSelectorResolver(self.executions)
         self.history_selectors = history_selectors or HistorySelectorResolver()
@@ -513,15 +525,17 @@ class AgentNBApp:
             semantics=_PASSIVE_COMMAND,
             handler=lambda _: RunCancelCommandData.from_outcome(
                 self.executions.cancel_run(
-                    project_root=request.project_root,
-                    execution_id=self.run_selectors.resolve_execution_id(
+                    request=ExecutionRunCancelRequest(
                         project_root=request.project_root,
-                        reference=request.run_reference,
-                        current_session_id=self.session_targeting.current_run_preference(
+                        execution_id=self.run_selectors.resolve_execution_id(
                             project_root=request.project_root,
+                            reference=request.run_reference,
+                            current_session_id=self.session_targeting.current_run_preference(
+                                project_root=request.project_root,
+                            ),
+                            default_behavior="active",
                         ),
-                        default_behavior="active",
-                    ),
+                    )
                 )
             ),
         )
@@ -544,27 +558,24 @@ class AgentNBApp:
         invocation = request.invocation
         payload_builder = _ExecPayloadBuilder(
             runtime=self.runtime,
-            ops=self.ops,
+            introspection=self.introspection,
             request=request,
             session_id=session_id,
         )
-        if invocation.is_background:
-            managed = self.executions.start_background_code(
+        managed = self.executions.execute(
+            request=ExecutionCommandRequest(
                 project_root=request.project_root,
                 session_id=session_id,
-                code=request.code,
-                ensure_started=invocation.ensure_started,
-            )
-        else:
-            managed = self.executions.execute_code(
-                project_root=request.project_root,
-                session_id=session_id,
+                command_type="exec",
+                mode="background" if invocation.is_background else "foreground",
                 code=request.code,
                 timeout_s=request.timeout_s,
                 ensure_started=invocation.ensure_started,
-                event_sink=invocation.streaming_sink(event_sink),
+                event_sink=None
+                if invocation.is_background
+                else invocation.streaming_sink(event_sink),
             )
-
+        )
         payload = payload_builder.build(managed)
 
         if not invocation.is_background and managed.record.status == "error":
@@ -612,7 +623,7 @@ class AgentNBApp:
         return _kernel_session_data_from_access(access)
 
     def _vars_payload(self, *, request: VarsRequest, session_id: str) -> VarsCommandData:
-        helper_result = self.ops.list_vars_result(
+        helper_result = self.introspection.list_vars(
             project_root=request.project_root,
             session_id=session_id,
             execution_policy=_HELPER_EXECUTION_POLICY,
@@ -637,7 +648,7 @@ class AgentNBApp:
         )
 
     def _inspect_payload(self, *, request: InspectRequest, session_id: str) -> InspectCommandData:
-        helper_result = self.ops.inspect_var_result(
+        helper_result = self.introspection.inspect_var(
             project_root=request.project_root,
             session_id=session_id,
             name=request.name,
@@ -649,7 +660,7 @@ class AgentNBApp:
         )
 
     def _reload_payload(self, *, request: ReloadRequest, session_id: str) -> ReloadCommandData:
-        helper_result = self.ops.reload_module_result(
+        helper_result = self.introspection.reload_module(
             project_root=request.project_root,
             session_id=session_id,
             module_name=request.module_name,
@@ -682,10 +693,13 @@ class AgentNBApp:
         return InterruptCommandData()
 
     def _reset_payload(self, *, request: ResetRequest, session_id: str) -> ExecCommandData:
-        managed = self.executions.reset_session(
-            project_root=request.project_root,
-            session_id=session_id,
-            timeout_s=request.timeout_s,
+        managed = self.executions.execute(
+            request=ExecutionCommandRequest(
+                project_root=request.project_root,
+                session_id=session_id,
+                command_type="reset",
+                timeout_s=request.timeout_s,
+            )
         )
         payload = ExecCommandData(record=managed.record)
         if managed.record.status == "error":
@@ -724,9 +738,11 @@ class AgentNBApp:
 
     def _runs_list_payload(self, *, request: RunsListRequest) -> RunsListCommandData:
         entries = self.executions.list_runs(
-            project_root=request.project_root,
-            session_id=request.session_id if request.session_id is not None else None,
-            errors_only=request.errors,
+            request=ExecutionRunListRequest(
+                project_root=request.project_root,
+                session_id=request.session_id if request.session_id is not None else None,
+                errors_only=request.errors,
+            )
         )
         if request.last is not None:
             entries = entries[-request.last :]
@@ -752,41 +768,34 @@ class AgentNBApp:
             ),
             default_behavior=default_behavior,
         )
-        observation = None
-        if event_sink is not None:
-            observation = self.executions.observe_run(
+        retrieval = self.executions.retrieve_run(
+            request=RunRetrievalRequest(
                 project_root=project_root,
                 execution_id=execution_id,
+                mode="follow"
+                if event_sink is not None
+                else "wait"
+                if timeout_s is not None
+                else "get",
                 timeout_s=30.0 if timeout_s is None else timeout_s,
                 event_sink=event_sink,
                 skip_history=skip_history,
             )
-            run = observation.run
-        elif timeout_s is not None:
-            run = self.executions.wait_for_run(
-                project_root=project_root,
-                execution_id=execution_id,
-                timeout_s=timeout_s,
-            )
-        else:
-            run = self.executions.get_run(
-                project_root=project_root,
-                execution_id=execution_id,
-            )
+        )
+        run = retrieval.run
         run_payload = normalize_run_payload(run)
         payload = RunLookupCommandData(
             run=RunSnapshotData(
                 payload=run_payload,
-                include_output=not (observation is not None and skip_history),
-                snapshot_stale=observation is not None
-                and observation.completion_reason == "window_elapsed",
+                include_output=not (retrieval.completion_reason is not None and skip_history),
+                snapshot_stale=retrieval.completion_reason == "window_elapsed",
             ),
             status=cast(str | None, run_payload.get("status")),
         )
-        if observation is not None:
-            payload.completion_reason = observation.completion_reason
-            payload.replayed_event_count = observation.replayed_event_count
-            payload.emitted_event_count = observation.emitted_event_count
+        if retrieval.completion_reason is not None:
+            payload.completion_reason = retrieval.completion_reason
+            payload.replayed_event_count = retrieval.replayed_event_count
+            payload.emitted_event_count = retrieval.emitted_event_count
         return payload
 
     def _validate_exec_request(self, request: ExecRequest) -> CommandResponse | None:
@@ -1045,7 +1054,7 @@ def _run_response_session_id(current_session_id: str, data: CommandDataLike) -> 
 @dataclass(slots=True)
 class _ExecPayloadBuilder:
     runtime: KernelRuntime
-    ops: NotebookOps
+    introspection: KernelIntrospection
     request: ExecRequest
     session_id: str
     namespace_before: list[VarDisplayEntry] | None = field(init=False)
@@ -1122,7 +1131,7 @@ class _ExecPayloadBuilder:
         wait_for_usable: bool,
     ) -> list[VarDisplayEntry] | None:
         try:
-            helper_result = self.ops.list_vars_result(
+            helper_result = self.introspection.list_vars(
                 project_root=self.request.project_root,
                 session_id=self.session_id,
                 execution_policy=HelperExecutionPolicy(

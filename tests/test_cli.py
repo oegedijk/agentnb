@@ -26,6 +26,7 @@ from agentnb.errors import SessionBusyError
 from agentnb.execution import (
     ExecutionRecord,
     ManagedExecution,
+    RunRetrievalOutcome,
     SessionAccessOutcome,
     StartOutcome,
 )
@@ -33,7 +34,6 @@ from agentnb.execution_output import OutputItem
 from agentnb.introspection import KernelHelperResult
 from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
-from agentnb.runs.models import RunObservationResult
 from tests.helpers import build_execution_record
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
@@ -78,7 +78,10 @@ def _error(payload: CommandEnvelope) -> ErrorEnvelope:
 
 
 def _event_sink(kwargs: dict[str, object]) -> ExecutionSink:
-    sink = kwargs["event_sink"]
+    sink = kwargs.get("event_sink")
+    if sink is None:
+        request = cast(Any, kwargs["request"])
+        sink = request.event_sink
     assert sink is not None
     return cast(ExecutionSink, sink)
 
@@ -233,7 +236,7 @@ def _error_execution(
 def test_cli_json_envelope_for_exec_roundtrip(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.executions.execute_code = lambda **_: _managed_execution(result="2")  # type: ignore[method-assign]
+    cli.executions.execute = lambda **_: _managed_execution(result="2")  # type: ignore[method-assign]
     exec_res = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1 + 1"])
     assert exec_res.exit_code == 0
 
@@ -271,7 +274,7 @@ def test_cli_exec_input_modes(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.execute_code = lambda **_: _managed_execution(  # type: ignore[method-assign]
+    cli.executions.execute = lambda **_: _managed_execution(  # type: ignore[method-assign]
         result=expected_result,
         stdout=f"{expected_stdout}\n" if expected_stdout is not None else "",
         code="print('hello from stdin')\n" if stdin is not None else "1 + 1",
@@ -294,7 +297,7 @@ def test_cli_exec_returns_top_level_error_when_execution_fails(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.execute_code = lambda **_: _managed_execution(  # type: ignore[method-assign]
+    cli.executions.execute = lambda **_: _managed_execution(  # type: ignore[method-assign]
         status="error",
         ename="ZeroDivisionError",
         evalue="division by zero",
@@ -426,7 +429,7 @@ def test_cli_exec_stream_json_emits_start_events_and_final(
             )
         )
 
-    cli.executions.execute_code = execute_code_stub  # type: ignore[method-assign]
+    cli.executions.execute = execute_code_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -475,7 +478,7 @@ def test_cli_exec_stream_human_prints_live_output(
             )
         )
 
-    cli.executions.execute_code = execute_code_stub  # type: ignore[method-assign]
+    cli.executions.execute = execute_code_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -520,7 +523,7 @@ def test_cli_exec_stream_human_reports_restart_notice_after_recovery(
             start_outcome=StartOutcome(started_new_session=True, initial_runtime_state="dead"),
         )
 
-    cli.executions.execute_code = execute_code_stub  # type: ignore[method-assign]
+    cli.executions.execute = execute_code_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -617,7 +620,7 @@ def test_cli_exec_stream_json_returns_error_final_frame_on_execution_failure(
             )
         )
 
-    cli.executions.execute_code = execute_code_stub  # type: ignore[method-assign]
+    cli.executions.execute = execute_code_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -1262,7 +1265,7 @@ def test_cli_exec_result_only_returns_selected_text(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.execute_code = lambda **_: _managed_execution(result="2")  # type: ignore[method-assign]
+    cli.executions.execute = lambda **_: _managed_execution(result="2")  # type: ignore[method-assign]
 
     exec_res = cli_runner.invoke(
         main,
@@ -1277,7 +1280,7 @@ def test_cli_exec_result_only_prefers_preview_summary_for_large_values(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.execute_code = lambda **_: ManagedExecution(  # type: ignore[method-assign]
+    cli.executions.execute = lambda **_: ManagedExecution(  # type: ignore[method-assign]
         record=ExecutionRecord(
             execution_id="run-1",
             ts="2026-03-10T00:00:00+00:00",
@@ -1329,7 +1332,7 @@ def test_cli_exec_passes_named_session(cli_runner: CliRunner, project_dir: Path)
         execute_calls.append(dict(kwargs))
         return _managed_execution(result="2", session_id="analysis")
 
-    cli.executions.execute_code = execute_stub  # type: ignore[method-assign]
+    cli.executions.execute = execute_stub  # type: ignore[method-assign]
 
     exec_res = cli_runner.invoke(
         main,
@@ -1339,7 +1342,7 @@ def test_cli_exec_passes_named_session(cli_runner: CliRunner, project_dir: Path)
     assert exec_res.exit_code == 0
     payload = _payload(exec_res.output)
     assert payload["session_id"] == "analysis"
-    assert execute_calls[0]["session_id"] == "analysis"
+    assert cast(Any, execute_calls[0]["request"]).session_id == "analysis"
 
 
 def test_cli_exec_ensure_started_starts_missing_session(
@@ -1373,7 +1376,7 @@ def test_cli_exec_human_reports_restart_notice_after_dead_recovery(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.execute_code = lambda **_: ManagedExecution(  # type: ignore[method-assign]
+    cli.executions.execute = lambda **_: ManagedExecution(  # type: ignore[method-assign]
         record=ExecutionRecord(
             execution_id="run-1",
             ts="2026-03-10T00:00:00+00:00",
@@ -1442,7 +1445,7 @@ def test_cli_exec_file_request_preserves_source_metadata(
 def test_cli_exec_background_returns_run_id(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.executions.start_background_code = lambda **_: ManagedExecution(  # type: ignore[method-assign]
+    cli.executions.execute = lambda **_: ManagedExecution(  # type: ignore[method-assign]
         record=ExecutionRecord(
             execution_id="run-1",
             ts="2026-03-11T00:00:00+00:00",
@@ -1508,7 +1511,7 @@ def test_cli_exec_existing_python_path_suggests_file_execution(
 def test_cli_vars_includes_types_by_default(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.list_vars = lambda **_: _helper_result(  # type: ignore[method-assign]
         [{"name": "value", "type": "int", "repr": "42"}]
     )
 
@@ -1527,7 +1530,9 @@ def test_cli_vars_human_output_includes_session_identity(
     import agentnb.cli as cli
 
     cli.runtime.list_sessions = lambda **_: [{"session_id": "analysis"}]  # type: ignore[method-assign]
-    cli.ops.list_vars = lambda **_: [{"name": "value", "type": "int", "repr": "42"}]  # type: ignore[method-assign]
+    cli.introspection.list_vars = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "value", "type": "int", "repr": "42"}]
+    )
 
     vars_res = cli_runner.invoke(main, ["vars", "--project", str(project_dir)])
 
@@ -1539,7 +1544,7 @@ def test_cli_vars_human_output_includes_session_identity(
 def test_cli_vars_reports_helper_wait_metadata(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars_result = lambda **_: KernelHelperResult(  # type: ignore[method-assign]
+    cli.introspection.list_vars = lambda **_: KernelHelperResult(  # type: ignore[method-assign]
         execution=ExecutionResult(status="ok"),
         payload=[{"name": "value", "type": "int", "repr": "42"}],
         access_metadata=HelperAccessMetadata(
@@ -1568,7 +1573,7 @@ def test_cli_vars_hides_routines_and_compacts_container_values(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.list_vars = lambda **_: _helper_result(  # type: ignore[method-assign]
         [
             {"name": "posts", "type": "list", "repr": "list len=1 item_keys=id, title, body"},
             {"name": "query", "type": "dict", "repr": "dict len=2 keys=postId, _limit"},
@@ -1589,7 +1594,7 @@ def test_cli_vars_hides_routines_and_compacts_container_values(
 def test_cli_vars_no_types_hides_types(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.list_vars = lambda **_: _helper_result(  # type: ignore[method-assign]
         [{"name": "value", "type": "int", "repr": "42"}]
     )
 
@@ -1608,7 +1613,7 @@ def test_cli_vars_match_and_recent_filter_namespace(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.list_vars = lambda **_: _helper_result(  # type: ignore[method-assign]
         [
             {"name": "alpha_value", "type": "int", "repr": "1"},
             {"name": "beta_value", "type": "int", "repr": "2"},
@@ -2109,33 +2114,38 @@ def test_cli_runs_list_returns_compacted_runs(cli_runner: CliRunner, project_dir
 def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-1",
-        "ts": "2026-03-10T00:00:00+00:00",
-        "session_id": "default",
-        "command_type": "exec",
-        "status": "error",
-        "duration_ms": 12,
-        "code": "1 + 1",
-        "stdout": "",
-        "stderr": "",
-        "result": "2",
-        "execution_count": 1,
-        "ename": "CancelledError",
-        "evalue": "Run was cancelled by user.",
-        "traceback": None,
-        "terminal_reason": "cancelled",
-        "cancel_requested": True,
-        "recorded_ename": "KeyboardInterrupt",
-        "outputs": [
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
+        run=cast(
+            ExecutionRecord,
             {
-                "kind": "result",
-                "text": "2",
-                "mime": {"text/plain": "2"},
-            }
-        ],
-        "events": [],
-    }
+                "execution_id": "run-1",
+                "ts": "2026-03-10T00:00:00+00:00",
+                "session_id": "default",
+                "command_type": "exec",
+                "status": "error",
+                "duration_ms": 12,
+                "code": "1 + 1",
+                "stdout": "",
+                "stderr": "",
+                "result": "2",
+                "execution_count": 1,
+                "ename": "CancelledError",
+                "evalue": "Run was cancelled by user.",
+                "traceback": None,
+                "terminal_reason": "cancelled",
+                "cancel_requested": True,
+                "recorded_ename": "KeyboardInterrupt",
+                "outputs": [
+                    {
+                        "kind": "result",
+                        "text": "2",
+                        "mime": {"text/plain": "2"},
+                    }
+                ],
+                "events": [],
+            },
+        )
+    )
 
     result = cli_runner.invoke(
         main,
@@ -2157,22 +2167,30 @@ def test_cli_runs_show_json_strips_ansi_tracebacks(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-1",
-        "session_id": "default",
-        "status": "error",
-        "traceback": ["\u001b[31mTraceback...\u001b[0m", "ZeroDivisionError: boom"],
-        "recorded_traceback": ["\u001b[31mKeyboardInterrupt\u001b[0m"],
-        "events": [
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
+        run=cast(
+            ExecutionRecord,
             {
-                "kind": "error",
-                "content": "boom",
-                "metadata": {
-                    "traceback": ["\u001b[31mTraceback...\u001b[0m", "ZeroDivisionError: boom"]
-                },
-            }
-        ],
-    }
+                "execution_id": "run-1",
+                "session_id": "default",
+                "status": "error",
+                "traceback": ["\u001b[31mTraceback...\u001b[0m", "ZeroDivisionError: boom"],
+                "recorded_traceback": ["\u001b[31mKeyboardInterrupt\u001b[0m"],
+                "events": [
+                    {
+                        "kind": "error",
+                        "content": "boom",
+                        "metadata": {
+                            "traceback": [
+                                "\u001b[31mTraceback...\u001b[0m",
+                                "ZeroDivisionError: boom",
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+    )
 
     result = cli_runner.invoke(
         main,
@@ -2194,16 +2212,17 @@ def test_cli_runs_show_accepts_latest_selector(cli_runner: CliRunner, project_di
         {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
         {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
     ]
-    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-2",
-        "ts": "2026-03-11T00:00:00+00:00",
-        "session_id": "default",
-        "command_type": "exec",
-        "status": "ok",
-        "duration_ms": 10,
-        "result": "2",
-        "events": [],
-    }
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
+        run=build_execution_record(
+            execution_id="run-2",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            status="ok",
+            duration_ms=10,
+            result="2",
+            events=[],
+        )
+    )
 
     result = cli_runner.invoke(
         main,
@@ -2224,14 +2243,16 @@ def test_cli_runs_show_defaults_to_latest_relevant_run(
     cli.runtime.current_session_id = lambda **_: "analysis"  # type: ignore[method-assign]
     cli.executions.list_runs = lambda **kwargs: (  # type: ignore[method-assign]
         [{"execution_id": "run-analysis", "ts": "2026-03-11T00:00:00+00:00"}]
-        if kwargs.get("session_id") == "analysis"
+        if kwargs["request"].session_id == "analysis"
         else [{"execution_id": "run-other", "ts": "2026-03-12T00:00:00+00:00"}]
     )
-    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-analysis",
-        "session_id": "analysis",
-        "status": "ok",
-    }
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
+        run=build_execution_record(
+            execution_id="run-analysis",
+            session_id="analysis",
+            status="ok",
+        )
+    )
 
     result = cli_runner.invoke(main, ["runs", "show", "--project", str(project_dir), "--json"])
 
@@ -2246,12 +2267,14 @@ def test_cli_runs_wait_defaults_to_active_run(cli_runner: CliRunner, project_dir
     cli.executions.list_runs = lambda **_: [  # type: ignore[method-assign]
         {"execution_id": "run-1", "ts": "2026-03-11T00:00:00+00:00", "status": "running"},
     ]
-    cli.executions.wait_for_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-1",
-        "session_id": "default",
-        "status": "ok",
-        "result": "2",
-    }
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
+        run=build_execution_record(
+            execution_id="run-1",
+            session_id="default",
+            status="ok",
+            result="2",
+        )
+    )
 
     result = cli_runner.invoke(main, ["runs", "wait", "--project", str(project_dir), "--json"])
 
@@ -2265,18 +2288,19 @@ def test_cli_runs_show_human_clarifies_snapshot_for_running_run(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-1",
-        "ts": "2026-03-10T00:00:00+00:00",
-        "session_id": "default",
-        "command_type": "exec",
-        "status": "running",
-        "duration_ms": 12,
-        "stdout": "tick 1\ntick 2\n",
-        "stderr": "",
-        "result": None,
-        "events": [{"kind": "stdout", "content": "tick 1\n", "metadata": {}}],
-    }
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
+        run=build_execution_record(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            status="running",
+            duration_ms=12,
+            stdout="tick 1\ntick 2\n",
+            stderr="",
+            result=None,
+            events=[{"kind": "stdout", "content": "tick 1\n", "metadata": {}}],
+        )
+    )
 
     result = cli_runner.invoke(
         main,
@@ -2295,19 +2319,20 @@ def test_cli_runs_show_json_marks_running_snapshot_as_stale(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-1",
-        "ts": "2026-03-10T00:00:00+00:00",
-        "session_id": "default",
-        "command_type": "exec",
-        "status": "running",
-        "snapshot_stale": True,
-        "duration_ms": 12,
-        "stdout": "",
-        "stderr": "",
-        "result": None,
-        "events": [],
-    }
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
+        run=build_execution_record(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            status="running",
+            snapshot_stale=True,
+            duration_ms=12,
+            stdout="",
+            stderr="",
+            result=None,
+            events=[],
+        )
+    )
 
     result = cli_runner.invoke(
         main,
@@ -2324,18 +2349,19 @@ def test_cli_runs_show_json_exposes_top_level_status_alias(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.get_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-1",
-        "ts": "2026-03-10T00:00:00+00:00",
-        "session_id": "default",
-        "command_type": "exec",
-        "status": "running",
-        "duration_ms": 12,
-        "stdout": "",
-        "stderr": "",
-        "result": None,
-        "events": [],
-    }
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
+        run=build_execution_record(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            status="running",
+            duration_ms=12,
+            stdout="",
+            stderr="",
+            result=None,
+            events=[],
+        )
+    )
 
     result = cli_runner.invoke(
         main,
@@ -2351,11 +2377,13 @@ def test_cli_runs_show_json_exposes_top_level_status_alias(
 def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.executions.wait_for_run = lambda **_: {  # type: ignore[method-assign]
-        "execution_id": "run-1",
-        "status": "ok",
-        "result": "2",
-    }
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
+        run=build_execution_record(
+            execution_id="run-1",
+            status="ok",
+            result="2",
+        )
+    )
 
     result = cli_runner.invoke(
         main,
@@ -2375,33 +2403,38 @@ def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir:
             "wait",
             lambda cli: setattr(
                 cli.executions,
-                "wait_for_run",
-                lambda **_: {
-                    "execution_id": "run-1",
-                    "session_id": "default",
-                    "status": "ok",
-                    "result": "2",
-                    "outputs": [
+                "retrieve_run",
+                lambda **_: RunRetrievalOutcome(
+                    run=cast(
+                        ExecutionRecord,
                         {
-                            "kind": "result",
-                            "text": "2",
-                            "mime": {"text/plain": "2"},
-                        }
-                    ],
-                },
+                            "execution_id": "run-1",
+                            "session_id": "default",
+                            "status": "ok",
+                            "result": "2",
+                            "outputs": [
+                                {
+                                    "kind": "result",
+                                    "text": "2",
+                                    "mime": {"text/plain": "2"},
+                                }
+                            ],
+                        },
+                    )
+                ),
             ),
         ),
         (
             "follow",
             lambda cli: setattr(
                 cli.executions,
-                "observe_run",
+                "retrieve_run",
                 lambda **kwargs: (
                     _event_sink(kwargs).started(
                         execution_id="run-1",
                         session_id="default",
                     ),
-                    RunObservationResult(
+                    RunRetrievalOutcome(
                         run=build_execution_record(
                             execution_id="run-1",
                             session_id="default",
@@ -2446,12 +2479,12 @@ def test_cli_runs_follow_stream_json_emits_events_and_final(
 ) -> None:
     import agentnb.cli as cli
 
-    def follow_stub(**kwargs: object) -> RunObservationResult:
+    def follow_stub(**kwargs: object) -> RunRetrievalOutcome:
         sink = _event_sink(kwargs)
         sink.started(execution_id="run-1", session_id="default")
         sink.accept(ExecutionEvent(kind="stdout", content="hello\n"))
         sink.accept(ExecutionEvent(kind="result", content="2"))
-        return RunObservationResult(
+        return RunRetrievalOutcome(
             run=build_execution_record(
                 execution_id="run-1",
                 session_id="default",
@@ -2465,7 +2498,7 @@ def test_cli_runs_follow_stream_json_emits_events_and_final(
             completion_reason="terminal",
         )
 
-    cli.executions.observe_run = follow_stub  # type: ignore[method-assign]
+    cli.executions.retrieve_run = follow_stub  # type: ignore[method-assign]
 
     result = cli_runner.invoke(
         main,
@@ -2488,7 +2521,7 @@ def test_cli_runs_follow_window_elapsed_returns_ok_final_frame(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.observe_run = lambda **_: RunObservationResult(  # type: ignore[method-assign]
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
         run=build_execution_record(status="running", duration_ms=12, events=[]),
         completion_reason="window_elapsed",
         replayed_event_count=1,
@@ -2515,7 +2548,7 @@ def test_cli_runs_follow_human_window_elapsed_reuses_snapshot_renderer(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.executions.observe_run = lambda **_: RunObservationResult(  # type: ignore[method-assign]
+    cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
         run=build_execution_record(
             status="running",
             duration_ms=12,
@@ -2623,7 +2656,7 @@ def test_cli_reload_without_module_reloads_project_local_imports(
 ) -> None:
     import agentnb.cli as cli
 
-    cli.ops.reload_module_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.reload_module = lambda **_: _helper_result(  # type: ignore[method-assign]
         {
             "mode": "project",
             "requested_module": None,
@@ -2663,7 +2696,7 @@ def test_cli_exec_returns_session_busy_when_lock_exists(
             busy_for_ms=1500,
         )
 
-    cli.executions.execute_code = raise_busy  # type: ignore[method-assign]
+    cli.executions.execute = raise_busy  # type: ignore[method-assign]
     exec_res = cli_runner.invoke(main, ["exec", "--project", str(project_dir), "--json", "1 + 1"])
     assert exec_res.exit_code == 1
 
@@ -2802,7 +2835,7 @@ def test_cli_doctor_rejects_removed_fix_flag(
 def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.list_vars = lambda **_: _helper_result(  # type: ignore[method-assign]
         [{"name": "frame", "type": "FakeFrame", "repr": "DataFrame shape=(10, 3) columns=a, b, c"}]
     )
 
@@ -2814,10 +2847,10 @@ def test_cli_vars_compacts_dataframe_repr(cli_runner: CliRunner, project_dir: Pa
 def test_cli_sqlite_rows_get_structural_previews(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.list_vars_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.list_vars = lambda **_: _helper_result(  # type: ignore[method-assign]
         [{"name": "rows", "type": "list", "repr": "list len=2 item_keys=id, title"}]
     )
-    cli.ops.inspect_var_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.inspect_var = lambda **_: _helper_result(  # type: ignore[method-assign]
         {
             "name": "rows",
             "type": "list",
@@ -2852,7 +2885,7 @@ def test_cli_sqlite_rows_get_structural_previews(cli_runner: CliRunner, project_
 def test_cli_inspect_compacts_dataframe_payload(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.inspect_var_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.inspect_var = lambda **_: _helper_result(  # type: ignore[method-assign]
         {
             "name": "df",
             "type": "DataFrameLike",
@@ -2887,12 +2920,14 @@ def test_cli_inspect_human_output_includes_session_identity(
     import agentnb.cli as cli
 
     cli.runtime.list_sessions = lambda **_: [{"session_id": "analysis"}]  # type: ignore[method-assign]
-    cli.ops.inspect_var = lambda **_: {  # type: ignore[method-assign]
-        "name": "thing",
-        "type": "Thing",
-        "repr": "Thing(value=1)",
-        "members": ["alpha", "beta"],
-    }
+    cli.introspection.inspect_var = lambda **_: _helper_result(  # type: ignore[method-assign]
+        {
+            "name": "thing",
+            "type": "Thing",
+            "repr": "Thing(value=1)",
+            "members": ["alpha", "beta"],
+        }
+    )
 
     inspect_res = cli_runner.invoke(main, ["inspect", "--project", str(project_dir), "thing"])
 
@@ -2904,7 +2939,7 @@ def test_cli_inspect_human_output_includes_session_identity(
 def test_cli_inspect_compacts_sequence_payload(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.ops.inspect_var_result = lambda **_: _helper_result(  # type: ignore[method-assign]
+    cli.introspection.inspect_var = lambda **_: _helper_result(  # type: ignore[method-assign]
         {
             "name": "posts",
             "type": "list",

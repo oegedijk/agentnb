@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from typing import Literal
 from unittest.mock import Mock
 
 import pytest
 
 from agentnb.errors import AgentNBException
-from agentnb.execution import ExecutionService, RunListRequest
+from agentnb.execution import (
+    ExecutionService,
+    RunSelectionRequest,
+    RunSelectorCandidate,
+)
 from agentnb.journal import JournalQuery
 from agentnb.selectors import (
     HistoryReference,
@@ -15,6 +20,21 @@ from agentnb.selectors import (
     parse_history_reference,
     parse_run_reference,
 )
+
+
+def _candidate(
+    *,
+    execution_id: str = "run-1",
+    ts: str = "2026-03-11T00:00:00+00:00",
+    session_id: str = "default",
+    status: Literal["starting", "running", "ok", "error"] = "ok",
+) -> RunSelectorCandidate:
+    return RunSelectorCandidate(
+        execution_id=execution_id,
+        ts=ts,
+        session_id=session_id,
+        status=status,
+    )
 
 
 @pytest.mark.parametrize(
@@ -77,13 +97,13 @@ def test_run_selector_resolver_returns_explicit_execution_id_without_lookup(proj
     )
 
     assert execution_id == "run-123"
-    executions.list_runs.assert_not_called()
+    executions.list_run_selector_candidates.assert_not_called()
 
 
 def test_run_selector_resolver_prefers_current_session_for_latest(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.side_effect = [
-        [{"execution_id": "run-analysis", "ts": "2026-03-12T00:00:00+00:00"}],
+    executions.list_run_selector_candidates.side_effect = [
+        [_candidate(execution_id="run-analysis", ts="2026-03-12T00:00:00+00:00")],
     ]
     resolver = RunSelectorResolver(executions)
 
@@ -94,20 +114,20 @@ def test_run_selector_resolver_prefers_current_session_for_latest(project_dir) -
     )
 
     assert execution_id == "run-analysis"
-    executions.list_runs.assert_called_once()
-    request = executions.list_runs.call_args.kwargs["request"]
-    assert isinstance(request, RunListRequest)
+    executions.list_run_selector_candidates.assert_called_once()
+    request = executions.list_run_selector_candidates.call_args.kwargs["request"]
+    assert isinstance(request, RunSelectionRequest)
     assert request.project_root == project_dir
     assert request.session_id == "analysis"
 
 
 def test_run_selector_resolver_falls_back_to_project_latest(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.side_effect = [
+    executions.list_run_selector_candidates.side_effect = [
         [],
         [
-            {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
-            {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
+            _candidate(execution_id="run-1", ts="2026-03-10T00:00:00+00:00"),
+            _candidate(execution_id="run-2", ts="2026-03-11T00:00:00+00:00"),
         ],
     ]
     resolver = RunSelectorResolver(executions)
@@ -124,24 +144,24 @@ def test_run_selector_resolver_falls_back_to_project_latest(project_dir) -> None
 
 def test_run_selector_resolver_uses_last_error_and_last_success(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.side_effect = [
+    executions.list_run_selector_candidates.side_effect = [
         [],
         [
-            {"execution_id": "run-ok", "ts": "2026-03-10T00:00:00+00:00", "status": "ok"},
-            {
-                "execution_id": "run-error",
-                "ts": "2026-03-11T00:00:00+00:00",
-                "status": "error",
-            },
+            _candidate(execution_id="run-ok", ts="2026-03-10T00:00:00+00:00", status="ok"),
+            _candidate(
+                execution_id="run-error",
+                ts="2026-03-11T00:00:00+00:00",
+                status="error",
+            ),
         ],
         [],
         [
-            {"execution_id": "run-ok", "ts": "2026-03-10T00:00:00+00:00", "status": "ok"},
-            {
-                "execution_id": "run-error",
-                "ts": "2026-03-11T00:00:00+00:00",
-                "status": "error",
-            },
+            _candidate(execution_id="run-ok", ts="2026-03-10T00:00:00+00:00", status="ok"),
+            _candidate(
+                execution_id="run-error",
+                ts="2026-03-11T00:00:00+00:00",
+                status="error",
+            ),
         ],
     ]
     resolver = RunSelectorResolver(executions)
@@ -166,8 +186,14 @@ def test_run_selector_resolver_uses_last_error_and_last_success(project_dir) -> 
 
 def test_run_selector_resolver_defaults_waits_to_active_run(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.side_effect = [
-        [{"execution_id": "run-analysis", "ts": "2026-03-12T00:00:00+00:00", "status": "running"}],
+    executions.list_run_selector_candidates.side_effect = [
+        [
+            _candidate(
+                execution_id="run-analysis",
+                ts="2026-03-12T00:00:00+00:00",
+                status="running",
+            )
+        ],
     ]
     resolver = RunSelectorResolver(executions)
 
@@ -183,9 +209,9 @@ def test_run_selector_resolver_defaults_waits_to_active_run(project_dir) -> None
 
 def test_run_selector_resolver_rejects_ambiguous_active_run_without_preference(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.return_value = [
-        {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00", "status": "running"},
-        {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00", "status": "starting"},
+    executions.list_run_selector_candidates.return_value = [
+        _candidate(execution_id="run-1", ts="2026-03-10T00:00:00+00:00", status="running"),
+        _candidate(execution_id="run-2", ts="2026-03-11T00:00:00+00:00", status="starting"),
     ]
     resolver = RunSelectorResolver(executions)
 
@@ -198,7 +224,7 @@ def test_run_selector_resolver_rejects_ambiguous_active_run_without_preference(p
 
 def test_run_selector_resolver_rejects_missing_active_default(project_dir) -> None:
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.return_value = []
+    executions.list_run_selector_candidates.return_value = []
     resolver = RunSelectorResolver(executions)
 
     with pytest.raises(AgentNBException, match="No runs found for selector: @active"):
@@ -207,6 +233,21 @@ def test_run_selector_resolver_rejects_missing_active_default(project_dir) -> No
             reference=None,
             default_behavior="active",
         )
+
+
+def test_run_selector_resolver_no_longer_depends_on_mapping_style_runs(project_dir) -> None:
+    executions = Mock(spec=ExecutionService)
+    executions.list_run_selector_candidates.return_value = [
+        _candidate(execution_id="run-typed", ts="2026-03-12T00:00:00+00:00", status="running")
+    ]
+    resolver = RunSelectorResolver(executions)
+
+    execution_id = resolver.resolve_execution_id(
+        project_root=project_dir,
+        reference=parse_run_reference("@active"),
+    )
+
+    assert execution_id == "run-typed"
 
 
 def test_history_selector_resolver_uses_plain_query_without_reference() -> None:

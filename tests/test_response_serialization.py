@@ -6,7 +6,6 @@ from agentnb.command_data import ExecCommandData, RunsListCommandData
 from agentnb.execution_output import OutputItem
 from agentnb.journal import JournalEntry
 from agentnb.response_serialization import (
-    compact_execution_payload,
     compact_history_entry,
     serialize_command_data,
 )
@@ -27,58 +26,61 @@ def _record(**overrides: object) -> ExecutionRecord:
     return ExecutionRecord(**cast(Any, payload))
 
 
-def test_compact_execution_payload_truncates_large_fields_and_preserves_selected_output() -> None:
-    compacted = compact_execution_payload(
-        ExecCommandData(
-            record=_record(
-                duration_ms=12,
-                stdout="stdout " * 80,
-                stderr="stderr " * 80,
-                result="result " * 80,
-            )
-        )
+def _serialize_exec_payload(**overrides: object) -> dict[str, object]:
+    return cast(
+        dict[str, object],
+        serialize_command_data("exec", ExecCommandData(record=_record(**overrides))),
+    )
+
+
+def test_exec_serialization_truncates_large_fields_and_preserves_selected_output() -> None:
+    compacted = _serialize_exec_payload(
+        duration_ms=12,
+        stdout="stdout " * 80,
+        stderr="stderr " * 80,
+        result="result " * 80,
     )
 
     assert compacted["execution_id"] == "run-1"
-    assert "..." in compacted["stdout"] and "chars truncated" in compacted["stdout"]
-    assert "..." in compacted["stderr"] and "chars truncated" in compacted["stderr"]
-    assert compacted["result"].endswith("...")
+    assert "..." in cast(str, compacted["stdout"]) and "chars truncated" in cast(
+        str, compacted["stdout"]
+    )
+    assert "..." in cast(str, compacted["stderr"]) and "chars truncated" in cast(
+        str, compacted["stderr"]
+    )
+    assert cast(str, compacted["result"]).endswith("...")
     assert compacted["stdout_truncated"] is True
     assert compacted["stderr_truncated"] is True
     assert compacted["result_truncated"] is True
 
 
-def test_compact_execution_payload_truncation_notice_includes_char_count() -> None:
-    compacted = compact_execution_payload(ExecCommandData(record=_record(stdout="x" * 300)))
+def test_exec_serialization_truncation_notice_includes_char_count() -> None:
+    compacted = _serialize_exec_payload(stdout="x" * 300)
 
     assert "stdout" in compacted
-    assert "[100 chars truncated]" in compacted["stdout"]
+    assert "[100 chars truncated]" in cast(str, compacted["stdout"])
     assert compacted["stdout_truncated"] is True
 
 
-def test_compact_execution_payload_no_truncation_notice_for_short_stdout() -> None:
-    compacted = compact_execution_payload(ExecCommandData(record=_record(stdout="hello world")))
+def test_exec_serialization_no_truncation_notice_for_short_stdout() -> None:
+    compacted = _serialize_exec_payload(stdout="hello world")
 
     assert compacted.get("stdout") == "hello world"
     assert "stdout_truncated" not in compacted
 
 
-def test_compact_execution_payload_preserves_structured_result_preview() -> None:
-    compacted = compact_execution_payload(
-        ExecCommandData(
-            record=_record(
-                result="large dataframe repr",
-                outputs=[
-                    OutputItem.result(
-                        text="large dataframe repr",
-                        mime={
-                            "text/plain": "large dataframe repr",
-                            "application/json": '{"alpha": 1, "beta": 2}',
-                        },
-                    )
-                ],
+def test_exec_serialization_preserves_structured_result_preview() -> None:
+    compacted = _serialize_exec_payload(
+        result="large dataframe repr",
+        outputs=[
+            OutputItem.result(
+                text="large dataframe repr",
+                mime={
+                    "text/plain": "large dataframe repr",
+                    "application/json": '{"alpha": 1, "beta": 2}',
+                },
             )
-        )
+        ],
     )
 
     assert compacted["result"] == "large dataframe repr"
@@ -90,11 +92,9 @@ def test_compact_execution_payload_preserves_structured_result_preview() -> None
     }
 
 
-def test_compact_execution_payload_derives_structured_result_preview_from_result_text() -> None:
-    compacted = compact_execution_payload(
-        ExecCommandData(
-            record=_record(result="[{'id': 1, 'name': 'alpha'}, {'id': 2, 'name': 'beta'}]")
-        )
+def test_exec_serialization_derives_structured_result_preview_from_result_text() -> None:
+    compacted = _serialize_exec_payload(
+        result="[{'id': 1, 'name': 'alpha'}, {'id': 2, 'name': 'beta'}]"
     )
 
     assert compacted["result"] == "[{'id': 1, 'name': 'alpha'}, {'id': 2, 'name': 'beta'}]"
@@ -107,8 +107,8 @@ def test_compact_execution_payload_derives_structured_result_preview_from_result
     }
 
 
-def test_compact_execution_payload_does_not_invent_structured_preview_for_scalars() -> None:
-    compacted = compact_execution_payload(ExecCommandData(record=_record(result="42")))
+def test_exec_serialization_does_not_invent_structured_preview_for_scalars() -> None:
+    compacted = _serialize_exec_payload(result="42")
 
     assert compacted["result"] == "42"
     assert "result_preview" not in compacted

@@ -26,6 +26,7 @@ from .store import (
     ExecutionRun,
     ExecutionStore,
     ManagedExecution,
+    RunSelectorCandidate,
     StartOutcome,
     execution_record_payload,
     new_execution_id,
@@ -68,6 +69,17 @@ class LocalRunManager(RunManager):
             session_id=session_id,
             command_types={"exec", "reset"},
             errors_only=errors_only,
+        )
+
+    def list_run_selector_candidates(
+        self,
+        *,
+        project_root: Path,
+        session_id: str | None = None,
+    ) -> list[RunSelectorCandidate]:
+        return ExecutionStore(project_root).read_selector_candidates(
+            session_id=session_id,
+            command_types={"exec", "reset"},
         )
 
     def get_run(self, *, project_root: Path, execution_id: str) -> ExecutionRecord:

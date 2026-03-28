@@ -29,9 +29,10 @@ from agentnb.execution import (
     ExecutionRecord,
     ExecutionService,
     ManagedExecution,
-    RunListRequest,
     RunRetrievalOutcome,
     RunRetrievalRequest,
+    RunSelectionRequest,
+    RunSelectorCandidate,
     SessionAccessOutcome,
     StartOutcome,
 )
@@ -864,9 +865,19 @@ def test_app_run_lookup_sanitizes_tracebacks_and_hides_follow_output_fields(proj
 def test_app_runs_show_resolves_latest_selector_before_lookup(project_dir) -> None:
     runtime = Mock(spec=KernelRuntime)
     executions = Mock(spec=ExecutionService)
-    executions.list_runs.return_value = [
-        {"execution_id": "run-1", "ts": "2026-03-10T00:00:00+00:00"},
-        {"execution_id": "run-2", "ts": "2026-03-11T00:00:00+00:00"},
+    executions.list_run_selector_candidates.return_value = [
+        RunSelectorCandidate(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            status="ok",
+        ),
+        RunSelectorCandidate(
+            execution_id="run-2",
+            ts="2026-03-11T00:00:00+00:00",
+            session_id="default",
+            status="ok",
+        ),
     ]
     executions.retrieve_run.return_value = RunRetrievalOutcome(
         run=build_execution_record(
@@ -887,8 +898,8 @@ def test_app_runs_show_resolves_latest_selector_before_lookup(project_dir) -> No
 
     assert response.status == "ok"
     assert response.data["run"]["execution_id"] == "run-2"
-    list_request = _single_request(executions.list_runs)
-    assert isinstance(list_request, RunListRequest)
+    list_request = _single_request(executions.list_run_selector_candidates)
+    assert isinstance(list_request, RunSelectionRequest)
     assert list_request.project_root == project_dir.resolve()
     assert list_request.session_id is None
     lookup_request = _single_request(executions.retrieve_run)

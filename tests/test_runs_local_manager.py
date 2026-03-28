@@ -182,9 +182,23 @@ def test_local_run_manager_get_run_preserves_starting_background_record(project_
 
     run = LocalRunManager(_runtime()).get_run(project_root=project_dir, execution_id="run-1")
 
-    assert run["status"] == "starting"
-    assert run["worker_pid"] is None
-    assert run["snapshot_stale"] is True
+    assert run.status == "starting"
+    assert run.worker_pid is None
+
+
+def test_local_run_manager_lists_typed_run_selector_candidates(project_dir: Path) -> None:
+    store = ExecutionStore(project_dir)
+    store.append(_terminal_record(execution_id="run-ok", status="ok", result="2"))
+    store.append(_active_record(status="running"))
+
+    candidates = LocalRunManager(_runtime()).list_run_selector_candidates(
+        project_root=project_dir,
+    )
+
+    assert [(candidate.execution_id, candidate.status) for candidate in candidates] == [
+        ("run-ok", "ok"),
+        ("run-1", "running"),
+    ]
 
 
 def test_local_run_manager_submit_background_persists_spawn_failure(
@@ -422,8 +436,8 @@ def test_local_run_manager_wait_for_run_returns_completed_record(project_dir: Pa
         poll_interval_s=0.1,
     )
 
-    assert run["execution_id"] == "run-1"
-    assert run["status"] == "ok"
+    assert run.execution_id == "run-1"
+    assert run.status == "ok"
 
 
 def test_local_run_manager_helper_access_passes_through_runtime_wait(project_dir: Path) -> None:
@@ -612,7 +626,7 @@ def test_local_run_manager_follow_run_replays_incremental_events(project_dir: Pa
     assert observation.completion_reason == "terminal"
     assert observation.replayed_event_count == 1
     assert observation.emitted_event_count == 1
-    assert observation.run["status"] == "ok"
+    assert observation.run.status == "ok"
     assert sink.started_calls == [("run-1", "default")]
     assert sink.events == [
         ExecutionEvent(kind="stdout", content="hello\n"),
@@ -677,7 +691,7 @@ def test_local_run_manager_follow_run_skip_history_emits_only_new_events(
     assert observation.completion_reason == "terminal"
     assert observation.replayed_event_count == 0
     assert observation.emitted_event_count == 1
-    assert observation.run["status"] == "ok"
+    assert observation.run.status == "ok"
     assert sink.started_calls == [("run-1", "default")]
     assert sink.events == [ExecutionEvent(kind="result", content="2")]
 
@@ -695,8 +709,7 @@ def test_local_run_manager_follow_run_reports_elapsed_window(project_dir: Path, 
     )
 
     assert observation.completion_reason == "window_elapsed"
-    assert observation.run["status"] == "running"
-    assert observation.run["snapshot_stale"] is True
+    assert observation.run.status == "running"
 
 
 def test_local_run_manager_cancel_run_interrupts_session(project_dir: Path, mocker) -> None:
@@ -813,9 +826,9 @@ def test_local_run_manager_marks_exited_background_worker_as_error(
 
     run = LocalRunManager(_runtime()).get_run(project_root=project_dir, execution_id="run-1")
 
-    assert run["status"] == "error"
-    assert run["ename"] == "WorkerExitedError"
-    assert run["evalue"] == "Background worker exited before recording a result."
+    assert run.status == "error"
+    assert run.ename == "WorkerExitedError"
+    assert run.evalue == "Background worker exited before recording a result."
 
 
 def test_local_run_manager_marks_exited_background_worker_as_cancelled_after_cancel_request(
@@ -843,9 +856,9 @@ def test_local_run_manager_marks_exited_background_worker_as_cancelled_after_can
     run = LocalRunManager(_runtime()).get_run(project_root=project_dir, execution_id="run-1")
     stored = store.get("run-1")
 
-    assert run["status"] == "error"
-    assert run["ename"] == "CancelledError"
-    assert run["evalue"] == "Run was cancelled by user."
+    assert run.status == "error"
+    assert run.ename == "CancelledError"
+    assert run.evalue == "Run was cancelled by user."
     assert stored is not None
     assert stored.terminal_reason == "cancelled"
     assert stored.recorded_ename == "WorkerExitedError"

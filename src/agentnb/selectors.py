@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 from .errors import AgentNBException, ErrorContext
-from .execution import ExecutionService, RunListRequest
+from .execution import ExecutionService, RunSelectionRequest, RunSelectorCandidate
 from .journal import JournalQuery
 
 RunReferenceKind = Literal["execution_id", "latest", "active", "last_error", "last_success"]
@@ -101,14 +101,14 @@ class RunSelectorResolver:
                 project_root=project_root,
                 current_session_id=current_session_id,
                 raw=reference.raw,
-                predicate=lambda run: run.get("status") == "error",
+                predicate=lambda run: run.status == "error",
             )
         if reference.kind == "last_success":
             return self._resolve_matching_run(
                 project_root=project_root,
                 current_session_id=current_session_id,
                 raw=reference.raw,
-                predicate=lambda run: run.get("status") == "ok",
+                predicate=lambda run: run.status == "ok",
             )
         return self._resolve_active_run(
             project_root=project_root,
@@ -136,7 +136,7 @@ class RunSelectorResolver:
         project_root: Path,
         current_session_id: str | None,
         raw: str,
-        predicate,
+        predicate: Callable[[RunSelectorCandidate], bool],
     ) -> str:
         if current_session_id is not None:
             preferred = self._matching_runs(
@@ -145,10 +145,10 @@ class RunSelectorResolver:
                 predicate=predicate,
             )
             if preferred:
-                return _require_execution_id(_latest_run(preferred), raw=raw)
+                return _require_execution_id(_latest_candidate(preferred), raw=raw)
 
         runs = self._matching_runs(project_root=project_root, session_id=None, predicate=predicate)
-        return _require_execution_id(_latest_run(runs), raw=raw)
+        return _require_execution_id(_latest_candidate(runs), raw=raw)
 
     def _resolve_active_run(
         self,
@@ -161,15 +161,15 @@ class RunSelectorResolver:
             preferred = self._matching_runs(
                 project_root=project_root,
                 session_id=current_session_id,
-                predicate=_is_active_run,
+                predicate=_is_active_candidate,
             )
             if preferred:
-                return _require_execution_id(_latest_run(preferred), raw=raw)
+                return _require_execution_id(_latest_candidate(preferred), raw=raw)
 
         active_runs = self._matching_runs(
             project_root=project_root,
             session_id=None,
-            predicate=_is_active_run,
+            predicate=_is_active_candidate,
         )
         if not active_runs:
             raise AgentNBException(
@@ -177,11 +177,7 @@ class RunSelectorResolver:
                 message=f"No runs found for selector: {raw}",
             )
         if len(active_runs) > 1:
-            execution_ids = [
-                str(run.get("execution_id"))
-                for run in active_runs
-                if isinstance(run.get("execution_id"), str)
-            ]
+            execution_ids = [run.execution_id for run in active_runs]
             raise AgentNBException(
                 code="AMBIGUOUS_EXECUTION",
                 message="Multiple active runs match; pass an execution_id explicitly.",
@@ -194,16 +190,13 @@ class RunSelectorResolver:
         *,
         project_root: Path,
         session_id: str | None,
-        predicate,
-    ) -> list[Mapping[str, object]]:
-        runs = cast(
-            list[Mapping[str, object]],
-            self._executions.list_runs(
-                request=RunListRequest(
-                    project_root=project_root,
-                    session_id=session_id,
-                )
-            ),
+        predicate: Callable[[RunSelectorCandidate], bool],
+    ) -> list[RunSelectorCandidate]:
+        runs = self._executions.list_run_selector_candidates(
+            request=RunSelectionRequest(
+                project_root=project_root,
+                session_id=session_id,
+            )
         )
         return [run for run in runs if predicate(run)]
 
@@ -279,25 +272,25 @@ class HistorySelectorResolver:
         )
 
 
-def _latest_run(runs: list[Mapping[str, object]]) -> Mapping[str, object] | None:
+def _latest_candidate(runs: list[RunSelectorCandidate]) -> RunSelectorCandidate | None:
     if not runs:
         return None
     indexed_runs = list(enumerate(runs))
     _, latest = max(
         indexed_runs,
-        key=lambda item: (str(item[1].get("ts", "")), item[0]),
+        key=lambda item: (item[1].ts, item[0]),
     )
     return latest
 
 
-def _require_execution_id(run: Mapping[str, object] | None, *, raw: str) -> str:
+def _require_execution_id(run: RunSelectorCandidate | None, *, raw: str) -> str:
     if run is None:
         raise AgentNBException(
             code="EXECUTION_NOT_FOUND",
             message=f"No runs found for selector: {raw}",
         )
-    execution_id = run.get("execution_id")
-    if not isinstance(execution_id, str) or not execution_id:
+    execution_id = run.execution_id
+    if not execution_id:
         raise AgentNBException(
             code="EXECUTION_NOT_FOUND",
             message=f"No runs found for selector: {raw}",
@@ -305,6 +298,5 @@ def _require_execution_id(run: Mapping[str, object] | None, *, raw: str) -> str:
     return execution_id
 
 
-def _is_active_run(run: Mapping[str, object]) -> bool:
-    status = run.get("status")
-    return isinstance(status, str) and status in _ACTIVE_RUN_STATUSES
+def _is_active_candidate(run: RunSelectorCandidate) -> bool:
+    return run.status in _ACTIVE_RUN_STATUSES

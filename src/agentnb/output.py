@@ -5,7 +5,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import cast
+from typing import Any, cast
 
 from .command_data import (
     DoctorCommandData,
@@ -18,7 +18,6 @@ from .command_data import (
     RunCancelCommandData,
     RunLookupCommandData,
     RunsListCommandData,
-    RunSnapshotData,
     SessionDeleteCommandData,
     SessionsDeleteBulkCommandData,
     SessionsListCommandData,
@@ -27,22 +26,17 @@ from .command_data import (
 )
 from .compact import preview_text
 from .contracts import CommandResponse
-from .payloads import (
-    DataframePreview,
-    ExecPayload,
-    HistoryEntryPayload,
-    MappingPreview,
-    NamespaceDeltaPayload,
-    ReloadReport,
-    RunLookupPayload,
-    RunSnapshot,
-    SequencePreview,
-    VarDisplayEntry,
+from .introspection_models import (
+    DataframePreviewData,
+    MappingPreviewData,
+    ReloadResult,
+    SequencePreviewData,
+    VariableEntry,
 )
+from .payloads import HistoryEntryPayload
 from .projection import ResponseProjector
 from .response_serialization import (
     compact_history_entry,
-    compact_inspect_payload,
     full_history_entry,
     summarize_history_text,
 )
@@ -225,35 +219,6 @@ def render_human(response: CommandResponse, *, options: RenderOptions) -> str:
     return _append_suggestions(body, suggestions)
 
 
-def _render_exec_like(data: ExecPayload) -> str:
-    selector = data.get("selected_output")
-    if selector is not None:
-        selected_text = data.get("selected_text", "")
-        return str(selected_text).rstrip("\n")
-
-    lines: list[str] = []
-    stdout = data.get("stdout")
-    stderr = data.get("stderr")
-    result = data.get("result")
-
-    if stdout:
-        lines.append(stdout.rstrip("\n"))
-    if stderr:
-        lines.append("[stderr]")
-        lines.append(stderr.rstrip("\n"))
-    if result is not None:
-        lines.append(_render_exec_result(data))
-    if not lines:
-        if data.get("background"):
-            execution_id = data.get("execution_id", "")
-            return f"Background execution started ({execution_id})."
-        file_exec_hint = _render_file_exec_hint(data)
-        if file_exec_hint is not None:
-            return file_exec_hint
-        lines.append("Execution completed.")
-    return "\n".join(lines)
-
-
 def _render_exec_command_data(data: ExecCommandData) -> str:
     selector = data.selected_output
     if selector is not None:
@@ -289,7 +254,7 @@ def _render_exec_result_data(data: ExecCommandData) -> str:
     if isinstance(preview, dict):
         preview_payload = cast(Mapping[str, object], preview)
         if _prefer_preview_for_human_result(preview_payload, result):
-            return preview_text(cast(DataframePreview | MappingPreview | SequencePreview, preview))
+            return preview_text(cast(Any, preview))
     return "" if result is None else str(result)
 
 
@@ -298,32 +263,15 @@ def _render_file_exec_hint_data(data: ExecCommandData) -> str | None:
         return None
     if data.namespace_delta is None:
         return "File executed."
-    payload = data.namespace_delta
-    entries = payload.get("entries", [])
+    entries = data.namespace_delta.entries
     lines = ["File executed. Namespace changes:"]
     for entry in entries:
-        change = entry.get("change")
-        name = entry.get("name")
-        repr_text = entry.get("repr")
-        type_name = entry.get("type")
-        if not isinstance(change, str) or not isinstance(name, str):
-            continue
-        suffix = f" ({type_name})" if isinstance(type_name, str) and type_name else ""
-        summary = (
-            f"{name}: {repr_text}{suffix}" if isinstance(repr_text, str) and repr_text else name
-        )
-        lines.append(f"- {change}: {summary}")
-    if payload.get("truncated"):
+        suffix = f" ({entry.type_name})" if entry.type_name else ""
+        summary = f"{entry.name}: {entry.repr_text}{suffix}" if entry.repr_text else entry.name
+        lines.append(f"- {entry.change}: {summary}")
+    if data.namespace_delta.truncated:
         lines.append("- ... additional namespace changes omitted")
     return "\n".join(lines)
-
-
-def _render_exec_result(data: ExecPayload) -> str:
-    result = data.get("result")
-    preview = data.get("result_preview")
-    if isinstance(preview, dict) and _prefer_preview_for_human_result(preview, result):
-        return preview_text(preview)
-    return "" if result is None else str(result)
 
 
 def _prefer_preview_for_human_result(preview: Mapping[str, object], result: object) -> bool:
@@ -403,27 +351,32 @@ def _render_vars_command_data(data: VarsCommandData, session_id: str | None) -> 
 
 
 def _render_inspect_command_data(data: InspectCommandData, session_id: str | None) -> str:
-    inspect_data = compact_inspect_payload(data.payload)
-    members = inspect_data.get("members", [])
-    members_text = ", ".join(members[:30]) if members else "(none)"
-    preview = inspect_data.get("preview")
-    if isinstance(preview, dict) and preview.get("kind") == "dataframe-like":
+    value = data.value
+    members_text = ", ".join(value.members[:30]) if value.members else "(none)"
+    preview = value.preview
+    if isinstance(preview, DataframePreviewData):
         lines = [
-            f"name: {inspect_data.get('name')}",
-            f"type: {inspect_data.get('type')}",
+            f"name: {value.name}",
+            f"type: {value.type_name}",
         ]
-        lines.extend(_render_dataframe_preview(cast(DataframePreview, preview)))
-    elif isinstance(preview, dict) and preview.get("kind") in {"sequence-like", "mapping-like"}:
+        lines.extend(_render_dataframe_preview(preview))
+    elif isinstance(preview, MappingPreviewData | SequencePreviewData):
         lines = [
-            f"name: {inspect_data.get('name')}",
-            f"type: {inspect_data.get('type')}",
+            f"name: {value.name}",
+            f"type: {value.type_name}",
         ]
-        lines.extend(_render_collection_preview(cast(MappingPreview | SequencePreview, preview)))
+        lines.extend(_render_collection_preview(preview))
     else:
+        repr_text = value.repr_text
+        summarized_repr = (
+            summarize_history_text(repr_text, limit=240)
+            if isinstance(repr_text, str) and repr_text
+            else None
+        )
         lines = [
-            f"name: {inspect_data.get('name')}",
-            f"type: {inspect_data.get('type')}",
-            f"repr: {inspect_data.get('repr')}",
+            f"name: {value.name}",
+            f"type: {value.type_name}",
+            f"repr: {summarized_repr}",
         ]
         lines.append(f"members: {members_text}")
     body = "\n".join(lines)
@@ -432,7 +385,7 @@ def _render_inspect_command_data(data: InspectCommandData, session_id: str | Non
 
 
 def _render_reload_command_data(data: ReloadCommandData) -> str:
-    return _render_reload(data.payload)
+    return _render_reload(data.result)
 
 
 def _render_history_command_data(data: HistoryCommandData) -> str:
@@ -511,48 +464,37 @@ def _render_runs_list_command_data(data: RunsListCommandData) -> str:
         return "No runs found."
     lines = []
     for run in data.runs:
-        payload = run.payload
-        display_status = (
-            "cancelled" if payload.get("terminal_reason") == "cancelled" else payload.get("status")
-        )
+        display_status = "cancelled" if run.terminal_reason == "cancelled" else run.status
         lines.append(
-            f"{payload.get('ts')} [{display_status}] {payload.get('execution_id')} "
-            f"{payload.get('command_type')} {payload.get('duration_ms')}ms"
+            f"{run.ts} [{display_status}] {run.execution_id} {run.command_type} {run.duration_ms}ms"
         )
     return "\n".join(lines)
 
 
 def _render_run_lookup_command_data(data: RunLookupCommandData, *, snapshot_only: bool) -> str:
-    return _render_run_snapshot_data(data.run, snapshot_only=snapshot_only)
+    return _render_run_snapshot_data(data, snapshot_only=snapshot_only)
 
 
-def _render_run_snapshot_data(run: RunSnapshotData, *, snapshot_only: bool) -> str:
-    payload = run.payload
-    status = "cancelled" if payload.get("terminal_reason") == "cancelled" else payload.get("status")
-    lines = [
-        "Run "
-        f"{payload.get('execution_id')} [{status}] {payload.get('command_type')} "
-        f"on session {payload.get('session_id')}."
-    ]
-    duration_ms = payload.get("duration_ms")
-    if isinstance(duration_ms, int):
-        lines.append(f"duration: {duration_ms}ms")
+def _render_run_snapshot_data(data: RunLookupCommandData, *, snapshot_only: bool) -> str:
+    run = data.run
+    status = "cancelled" if run.terminal_reason == "cancelled" else run.status
+    lines = [f"Run {run.execution_id} [{status}] {run.command_type} on session {run.session_id}."]
+    lines.append(f"duration: {run.duration_ms}ms")
     if snapshot_only and status in {"starting", "running"}:
         lines.append("snapshot: persisted state only; use `agentnb runs follow` for live events")
 
-    if run.include_output:
-        stdout = payload.get("stdout")
-        if isinstance(stdout, str) and stdout:
-            lines.extend(_render_output_block("stdout", stdout, limit=200))
-        stderr = payload.get("stderr")
-        if isinstance(stderr, str) and stderr:
-            lines.extend(_render_output_block("stderr", stderr, limit=200))
-        result = payload.get("result")
-        if isinstance(result, str) and result:
-            lines.append(f"result: {summarize_history_text(result, limit=240) or result[:240]}")
+    if data.include_output:
+        if run.stdout:
+            lines.extend(_render_output_block("stdout", run.stdout, limit=200))
+        if run.stderr:
+            lines.extend(_render_output_block("stderr", run.stderr, limit=200))
+        if isinstance(run.result, str) and run.result:
+            lines.append(
+                f"result: {summarize_history_text(run.result, limit=240) or run.result[:240]}"
+            )
 
-    ename = payload.get("ename")
-    evalue = payload.get("evalue")
+    ename = run.ename
+    evalue = run.evalue
     if ename or evalue:
         if ename and evalue:
             lines.append(f"error: {ename}: {evalue}")
@@ -561,9 +503,8 @@ def _render_run_snapshot_data(run: RunSnapshotData, *, snapshot_only: bool) -> s
         else:
             lines.append(f"error: {evalue}")
 
-    events = payload.get("events")
-    if run.include_output and isinstance(events, list):
-        lines.append(f"events: {len(events)} recorded")
+    if data.include_output:
+        lines.append(f"events: {len(run.events)} recorded")
 
     return "\n".join(lines)
 
@@ -571,7 +512,7 @@ def _render_run_snapshot_data(run: RunSnapshotData, *, snapshot_only: bool) -> s
 def _render_follow_completion_note_data(run_lookup: RunLookupCommandData) -> str | None:
     if run_lookup.completion_reason != "window_elapsed":
         return None
-    if run_lookup.run.payload.get("status") in {"starting", "running"}:
+    if run_lookup.run.status in {"starting", "running"}:
         return "Observation window elapsed; the run is still active."
     return "Observation window elapsed."
 
@@ -616,10 +557,10 @@ def _prepend_session_identity(body: str, session_id: str | None) -> str:
     return f"session: {session_id}\n{body}"
 
 
-def _render_var_entry(item: VarDisplayEntry) -> str:
-    name = item.get("name")
-    repr_text = item.get("repr")
-    type_name = item.get("type")
+def _render_var_entry(item: VariableEntry) -> str:
+    name = item.name
+    repr_text = item.repr_text
+    type_name = item.type_name
     if type_name:
         return f"{name}: {repr_text} ({type_name})"
     return f"{name}: {repr_text}"
@@ -677,32 +618,6 @@ def _append_suggestions(body: str, suggestions: list[str]) -> str:
         return body
     lines = [body, "", "Next:"]
     lines.extend(f"- {suggestion}" for suggestion in suggestions)
-    return "\n".join(lines)
-
-
-def _render_file_exec_hint(data: ExecPayload) -> str | None:
-    if data.get("source_kind") != "file":
-        return None
-    namespace_delta = data.get("namespace_delta")
-    if not isinstance(namespace_delta, dict):
-        return "File executed."
-    payload = cast(NamespaceDeltaPayload, namespace_delta)
-    entries = payload.get("entries", [])
-    lines = ["File executed. Namespace changes:"]
-    for entry in entries:
-        change = entry.get("change")
-        name = entry.get("name")
-        repr_text = entry.get("repr")
-        type_name = entry.get("type")
-        if not isinstance(change, str) or not isinstance(name, str):
-            continue
-        suffix = f" ({type_name})" if isinstance(type_name, str) and type_name else ""
-        summary = (
-            f"{name}: {repr_text}{suffix}" if isinstance(repr_text, str) and repr_text else name
-        )
-        lines.append(f"- {change}: {summary}")
-    if payload.get("truncated"):
-        lines.append("- ... additional namespace changes omitted")
     return "\n".join(lines)
 
 
@@ -810,102 +725,44 @@ def _env_flag(env: Mapping[str, str], name: str) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def _render_run_snapshot(run: RunSnapshot, *, snapshot_only: bool) -> str:
-    if not run:
-        return "{}"
-
-    execution_id = run.get("execution_id", "(unknown)")
-    status = (
-        "cancelled" if run.get("terminal_reason") == "cancelled" else run.get("status", "unknown")
-    )
-    command_type = run.get("command_type", "exec")
-    session_id = run.get("session_id", "default")
-    duration_ms = run.get("duration_ms")
-
-    lines = [f"Run {execution_id} [{status}] {command_type} on session {session_id}."]
-    if isinstance(duration_ms, int):
-        lines.append(f"duration: {duration_ms}ms")
-    if snapshot_only and status in {"starting", "running"}:
-        lines.append("snapshot: persisted state only; use `agentnb runs follow` for live events")
-
-    stdout = run.get("stdout")
-    if isinstance(stdout, str) and stdout:
-        lines.extend(_render_output_block("stdout", stdout, limit=200))
-
-    stderr = run.get("stderr")
-    if isinstance(stderr, str) and stderr:
-        lines.extend(_render_output_block("stderr", stderr, limit=200))
-
-    result = run.get("result")
-    if isinstance(result, str) and result:
-        lines.append(f"result: {summarize_history_text(result, limit=240) or result[:240]}")
-
-    ename = run.get("ename")
-    evalue = run.get("evalue")
-    if ename or evalue:
-        if ename and evalue:
-            lines.append(f"error: {ename}: {evalue}")
-        elif ename:
-            lines.append(f"error: {ename}")
-        else:
-            lines.append(f"error: {evalue}")
-
-    events = run.get("events")
-    if isinstance(events, list):
-        lines.append(f"events: {len(events)} recorded")
-
-    return "\n".join(lines)
-
-
-def _render_follow_completion_note(run_lookup: RunLookupPayload) -> str | None:
-    completion_reason = run_lookup.get("completion_reason")
-    if completion_reason != "window_elapsed":
-        return None
-    run = run_lookup.get("run")
-    status = run.get("status") if isinstance(run, dict) else None
-    if status in {"starting", "running"}:
-        return "Observation window elapsed; the run is still active."
-    return "Observation window elapsed."
-
-
-def _render_dataframe_preview(preview: DataframePreview) -> list[str]:
+def _render_dataframe_preview(preview: DataframePreviewData) -> list[str]:
     lines: list[str] = []
-    shape = preview.get("shape")
+    shape = preview.shape
     row_count = shape[0] if isinstance(shape, list) and len(shape) == 2 else None
     if isinstance(shape, list) and len(shape) == 2:
         lines.append(f"shape: ({shape[0]}, {shape[1]})")
 
-    columns = preview.get("columns")
-    if isinstance(columns, list) and columns:
+    columns = preview.columns
+    if columns:
         columns_text = ", ".join(str(column) for column in columns)
-        omission = _omission_suffix(preview.get("column_count"), preview.get("columns_shown"))
+        omission = _omission_suffix(preview.column_count, preview.columns_shown)
         if omission:
             columns_text = f"{columns_text}{omission}"
         lines.append("columns: " + columns_text)
 
-    dtypes = preview.get("dtypes")
+    dtypes = preview.dtypes
     if isinstance(dtypes, dict) and dtypes:
         dtype_text = ", ".join(f"{name}={dtype}" for name, dtype in dtypes.items())
-        omission = _omission_suffix(preview.get("column_count"), preview.get("dtypes_shown"))
+        omission = _omission_suffix(preview.column_count, preview.dtypes_shown)
         if omission:
             dtype_text = f"{dtype_text}{omission}"
         lines.append(f"dtypes: {dtype_text}")
 
-    null_counts = preview.get("null_counts")
+    null_counts = preview.null_counts
     if isinstance(null_counts, dict) and null_counts:
         null_text = ", ".join(f"{name}={count}" for name, count in null_counts.items())
         omission = _omission_suffix(
-            preview.get("column_count"),
-            preview.get("null_count_fields_shown"),
+            preview.column_count,
+            preview.null_count_fields_shown,
         )
         if omission:
             null_text = f"{null_text}{omission}"
         lines.append(f"nulls: {null_text}")
 
-    head = preview.get("head")
+    head = preview.head
     if isinstance(head, list):
         head_text = json.dumps(head, ensure_ascii=True)
-        omission = _omission_suffix(row_count, preview.get("head_rows_shown"), unit="rows")
+        omission = _omission_suffix(row_count, preview.head_rows_shown, unit="rows")
         if omission:
             head_text = f"{head_text}{omission}"
         lines.append("head: " + head_text)
@@ -952,15 +809,15 @@ def _summarize_history_text(value: object, limit: int = 100) -> str | None:
     return compact[: limit - 3] + "..."
 
 
-def _render_reload(data: ReloadReport) -> str:
-    reloaded_modules = data.get("reloaded_modules", [])
-    rebound_names = data.get("rebound_names", [])
-    stale_names = data.get("stale_names", [])
-    failed_modules = data.get("failed_modules", [])
-    notes = data.get("notes", [])
-    requested_module = data.get("requested_module")
+def _render_reload(data: ReloadResult) -> str:
+    reloaded_modules = data.reloaded_modules
+    rebound_names = data.rebound_names
+    stale_names = data.stale_names
+    failed_modules = data.failed_modules
+    notes = data.notes
+    requested_module = data.requested_module
 
-    if isinstance(reloaded_modules, list) and reloaded_modules:
+    if reloaded_modules:
         if isinstance(requested_module, str) and len(reloaded_modules) == 1:
             lines = [f"Reloaded module: {reloaded_modules[0]}"]
         else:
@@ -969,49 +826,49 @@ def _render_reload(data: ReloadReport) -> str:
     else:
         lines = ["No imported project-local modules were reloaded."]
 
-    if isinstance(rebound_names, list) and rebound_names:
+    if rebound_names:
         lines.append("Rebound names: " + ", ".join(str(name) for name in rebound_names[:10]))
-    if isinstance(stale_names, list) and stale_names:
+    if stale_names:
         lines.append("Possible stale objects: " + ", ".join(str(name) for name in stale_names[:10]))
         lines.append("Recreate them or run `agentnb reset` if stale state is widespread.")
-    if isinstance(failed_modules, list) and failed_modules:
-        failed_names = ", ".join(str(item.get("module")) for item in failed_modules[:10])
+    if failed_modules:
+        failed_names = ", ".join(item.module for item in failed_modules[:10])
         lines.append("Failed modules: " + failed_names)
-    if isinstance(notes, list):
-        lines.extend(str(note) for note in notes if isinstance(note, str) and note)
+    lines.extend(note for note in notes if note)
     return "\n".join(lines)
 
 
-def _render_collection_preview(preview: MappingPreview | SequencePreview) -> list[str]:
+def _render_collection_preview(
+    preview: MappingPreviewData | SequencePreviewData,
+) -> list[str]:
     lines: list[str] = []
 
-    length = preview.get("length")
-    if isinstance(length, int):
-        lines.append(f"length: {length}")
+    lines.append(f"length: {preview.length}")
 
-    item_type = preview.get("item_type")
+    item_type = preview.item_type if isinstance(preview, SequencePreviewData) else None
     if isinstance(item_type, str) and item_type:
         lines.append(f"item_type: {item_type}")
 
-    keys = preview.get("keys")
+    keys = preview.keys if isinstance(preview, MappingPreviewData) else None
     if isinstance(keys, list) and keys:
         keys_text = ", ".join(str(key) for key in keys[:10])
-        omission = _omission_suffix(preview.get("length"), preview.get("keys_shown"))
+        keys_shown = preview.keys_shown if isinstance(preview, MappingPreviewData) else None
+        omission = _omission_suffix(preview.length, keys_shown)
         if omission:
             keys_text = f"{keys_text}{omission}"
         lines.append("keys: " + keys_text)
 
-    sample_keys = preview.get("sample_keys")
+    sample_keys = preview.sample_keys if isinstance(preview, SequencePreviewData) else None
     if isinstance(sample_keys, list) and sample_keys:
         lines.append("sample_keys: " + ", ".join(str(key) for key in sample_keys[:10]))
 
-    sample = preview.get("sample")
+    sample = preview.sample
     if sample is not None:
         sample_text = json.dumps(sample, ensure_ascii=True)
         omission = _omission_suffix(
-            preview.get("length"),
-            preview.get("sample_items_shown"),
-            truncated=bool(preview.get("sample_truncated")),
+            preview.length,
+            preview.sample_items_shown,
+            truncated=bool(preview.sample_truncated),
         )
         if omission:
             sample_text = sample_text + omission

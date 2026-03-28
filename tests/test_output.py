@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agentnb.command_data import ExecCommandData, RunLookupCommandData, RunSnapshotData
+from agentnb.command_data import ExecCommandData, RunLookupCommandData
 from agentnb.contracts import error_response, success_response
 from agentnb.output import (
     OutputProfile,
@@ -17,7 +17,7 @@ from agentnb.projection import ResponseProjector
 from tests.helpers import (
     build_error_response,
     build_execution_record,
-    build_run_snapshot,
+    build_run_snapshot_data,
     build_success_response,
 )
 
@@ -111,21 +111,21 @@ def test_render_human_error_appends_traceback_and_suggestions() -> None:
 
 
 def test_render_human_runs_show_mentions_snapshot_for_running_run() -> None:
-    response = build_success_response(
+    response = success_response(
         command="runs-show",
         project="/tmp/project",
         session_id="default",
-        data={
-            "run": {
-                "execution_id": "run-1",
-                "status": "running",
-                "command_type": "exec",
-                "session_id": "analysis",
-                "duration_ms": 12,
-                "stdout": "tick 1\ntick 2\n",
-                "events": [{"kind": "stdout", "content": "tick 1\n", "metadata": {}}],
-            }
-        },
+        command_data=RunLookupCommandData(
+            run=build_run_snapshot_data(
+                execution_id="run-1",
+                session_id="analysis",
+                status="running",
+                duration_ms=12,
+                stdout="tick 1\ntick 2\n",
+                events=[{"kind": "stdout", "content": "tick 1\ntick 2\n", "metadata": {}}],
+            ),
+            status="running",
+        ),
     )
 
     rendered = render_human(response, options=RenderOptions())
@@ -748,24 +748,27 @@ def test_render_human_runs_list_and_wait_error_shape() -> None:
             ]
         },
     )
-    wait_response = build_success_response(
+    wait_response = success_response(
         command="runs-wait",
         project="/tmp/project",
         session_id="default",
-        data={
-            "run": {
-                "execution_id": "run-2",
-                "status": "error",
-                "command_type": "exec",
-                "session_id": "default",
-                "duration_ms": 12,
-                "stderr": "warning",
-                "result": "partial",
-                "ename": "RuntimeError",
-                "evalue": "boom",
-                "events": [],
-            }
-        },
+        command_data=RunLookupCommandData(
+            run=build_run_snapshot_data(
+                execution_id="run-2",
+                session_id="default",
+                status="error",
+                duration_ms=12,
+                stderr="warning",
+                result="partial",
+                ename="RuntimeError",
+                evalue="boom",
+                events=[
+                    {"kind": "stderr", "content": "warning", "metadata": {}},
+                    {"kind": "result", "content": "partial", "metadata": {}},
+                ],
+            ),
+            status="error",
+        ),
     )
 
     assert render_human(list_response, options=RenderOptions()) == (
@@ -777,34 +780,34 @@ def test_render_human_runs_list_and_wait_error_shape() -> None:
         "stderr: warning\n"
         "result: partial\n"
         "error: RuntimeError: boom\n"
-        "events: 0 recorded"
+        "events: 2 recorded"
     )
 
 
 def test_render_human_runs_follow_reuses_snapshot_renderer_and_window_note() -> None:
-    response = build_success_response(
+    response = success_response(
         command="runs-follow",
         project="/tmp/project",
         session_id="default",
-        data={
-            "run": {
-                "execution_id": "run-2",
-                "status": "running",
-                "command_type": "exec",
-                "session_id": "default",
-                "duration_ms": 12,
-                "stdout": "tick\n",
-                "events": [],
-            },
-            "completion_reason": "window_elapsed",
-        },
+        command_data=RunLookupCommandData(
+            run=build_run_snapshot_data(
+                execution_id="run-2",
+                session_id="default",
+                status="running",
+                duration_ms=12,
+                stdout="tick\n",
+                events=[{"kind": "stdout", "content": "tick\n", "metadata": {}}],
+            ),
+            status="running",
+            completion_reason="window_elapsed",
+        ),
     )
 
     assert render_human(response, options=RenderOptions()) == (
         "Run run-2 [running] exec on session default.\n"
         "duration: 12ms\n"
         "stdout: tick\n"
-        "events: 0 recorded\n"
+        "events: 1 recorded\n"
         "Observation window elapsed; the run is still active."
     )
 
@@ -866,7 +869,13 @@ def test_render_human_reload_variants_and_unknown_command() -> None:
             "reloaded_modules": ["localmod"],
             "rebound_names": ["greet"],
             "stale_names": ["instance"],
-            "failed_modules": [{"module": "broken_mod"}],
+            "failed_modules": [
+                {
+                    "module": "broken_mod",
+                    "error_type": "ImportError",
+                    "message": "boom",
+                }
+            ],
             "notes": ["Reload note"],
         },
     )
@@ -1054,18 +1063,13 @@ def test_typed_run_lookup_response_keeps_agent_and_human_contracts() -> None:
         project="/tmp/project",
         session_id="default",
         command_data=RunLookupCommandData(
-            run=RunSnapshotData(
-                payload={
-                    key: value
-                    for key, value in build_run_snapshot(
-                        execution_id="run-7",
-                        session_id="analysis",
-                        status="running",
-                        duration_ms=12,
-                        stdout="tick\n",
-                        events=[],
-                    ).items()
-                },
+            run=build_run_snapshot_data(
+                execution_id="run-7",
+                session_id="analysis",
+                status="running",
+                duration_ms=12,
+                stdout="tick\n",
+                events=[{"kind": "stdout", "content": "tick\n", "metadata": {}}],
             ),
             status="running",
         ),
@@ -1088,5 +1092,5 @@ def test_typed_run_lookup_response_keeps_agent_and_human_contracts() -> None:
         "duration: 12ms\n"
         "snapshot: persisted state only; use `agentnb runs follow` for live events\n"
         "stdout: tick\n"
-        "events: 0 recorded"
+        "events: 1 recorded"
     )

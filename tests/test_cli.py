@@ -36,7 +36,13 @@ from agentnb.journal import JournalEntry, JournalQuery
 from agentnb.kernel.provisioner import DoctorCheck, DoctorReport
 from agentnb.runs import RunCancelOutcome
 from agentnb.runtime import DeleteSessionOutcome, DoctorStatus, SessionListEntry
-from tests.helpers import build_command_data, build_execution_record
+from tests.helpers import (
+    _inspect_value_from_mapping,
+    _reload_result_from_mapping,
+    _variable_entries_from_payload,
+    build_command_data,
+    build_execution_record,
+)
 
 pytestmark = pytest.mark.usefixtures("patch_cli_runtime")
 
@@ -181,9 +187,18 @@ def _helper_result(
     *,
     access_metadata: HelperAccessMetadata | None = None,
 ) -> KernelHelperResult[object]:
+    typed_payload = payload
+    if isinstance(payload, list):
+        typed_payload = _variable_entries_from_payload(payload)
+    elif isinstance(payload, dict):
+        mapping_payload = cast(dict[str, object], payload)
+        if "reloaded_modules" in payload or "failed_modules" in payload:
+            typed_payload = _reload_result_from_mapping(mapping_payload)
+        else:
+            typed_payload = _inspect_value_from_mapping(mapping_payload)
     return KernelHelperResult(
         execution=ExecutionResult(status="ok"),
-        payload=payload,
+        payload=typed_payload,
         access_metadata=access_metadata or HelperAccessMetadata(),
     )
 
@@ -1554,9 +1569,8 @@ def test_cli_vars_human_output_includes_session_identity(
 def test_cli_vars_reports_helper_wait_metadata(cli_runner: CliRunner, project_dir: Path) -> None:
     import agentnb.cli as cli
 
-    cli.introspection.list_vars = lambda **_: KernelHelperResult(  # type: ignore[method-assign]
-        execution=ExecutionResult(status="ok"),
-        payload=[{"name": "value", "type": "int", "repr": "42"}],
+    cli.introspection.list_vars = lambda **_: _helper_result(  # type: ignore[method-assign]
+        [{"name": "value", "type": "int", "repr": "42"}],
         access_metadata=HelperAccessMetadata(
             started_new_session=True,
             waited=True,
@@ -2096,20 +2110,20 @@ def test_cli_runs_list_returns_compacted_runs(cli_runner: CliRunner, project_dir
     import agentnb.cli as cli
 
     cli.executions.list_runs = lambda **_: [  # type: ignore[method-assign]
-        {
-            "execution_id": "run-1",
-            "ts": "2026-03-10T00:00:00+00:00",
-            "session_id": "default",
-            "command_type": "exec",
-            "status": "error",
-            "duration_ms": 12,
-            "terminal_reason": "cancelled",
-            "cancel_requested": True,
-            "stdout": "",
-            "stderr": "",
-            "result": "42",
-            "ename": "CancelledError",
-        }
+        build_execution_record(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="error",
+            duration_ms=12,
+            terminal_reason="cancelled",
+            cancel_requested=True,
+            stdout="",
+            stderr="",
+            result="42",
+            ename="CancelledError",
+        )
     ]
 
     result = cli_runner.invoke(main, ["runs", "list", "--project", str(project_dir), "--json"])
@@ -2127,35 +2141,31 @@ def test_cli_runs_show_returns_run_details(cli_runner: CliRunner, project_dir: P
     import agentnb.cli as cli
 
     cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
-        run=cast(
-            ExecutionRecord,
-            {
-                "execution_id": "run-1",
-                "ts": "2026-03-10T00:00:00+00:00",
-                "session_id": "default",
-                "command_type": "exec",
-                "status": "error",
-                "duration_ms": 12,
-                "code": "1 + 1",
-                "stdout": "",
-                "stderr": "",
-                "result": "2",
-                "execution_count": 1,
-                "ename": "CancelledError",
-                "evalue": "Run was cancelled by user.",
-                "traceback": None,
-                "terminal_reason": "cancelled",
-                "cancel_requested": True,
-                "recorded_ename": "KeyboardInterrupt",
-                "outputs": [
-                    {
-                        "kind": "result",
-                        "text": "2",
-                        "mime": {"text/plain": "2"},
-                    }
-                ],
-                "events": [],
-            },
+        run=build_execution_record(
+            execution_id="run-1",
+            ts="2026-03-10T00:00:00+00:00",
+            session_id="default",
+            command_type="exec",
+            status="error",
+            duration_ms=12,
+            code="1 + 1",
+            stdout="",
+            stderr="",
+            result="2",
+            execution_count=1,
+            ename="CancelledError",
+            evalue="Run was cancelled by user.",
+            traceback=None,
+            terminal_reason="cancelled",
+            cancel_requested=True,
+            recorded_ename="KeyboardInterrupt",
+            outputs=[
+                {
+                    "kind": "result",
+                    "text": "2",
+                    "mime": {"text/plain": "2"},
+                }
+            ],
         )
     )
 
@@ -2180,27 +2190,23 @@ def test_cli_runs_show_json_strips_ansi_tracebacks(
     import agentnb.cli as cli
 
     cli.executions.retrieve_run = lambda **_: RunRetrievalOutcome(  # type: ignore[method-assign]
-        run=cast(
-            ExecutionRecord,
-            {
-                "execution_id": "run-1",
-                "session_id": "default",
-                "status": "error",
-                "traceback": ["\u001b[31mTraceback...\u001b[0m", "ZeroDivisionError: boom"],
-                "recorded_traceback": ["\u001b[31mKeyboardInterrupt\u001b[0m"],
-                "events": [
-                    {
-                        "kind": "error",
-                        "content": "boom",
-                        "metadata": {
-                            "traceback": [
-                                "\u001b[31mTraceback...\u001b[0m",
-                                "ZeroDivisionError: boom",
-                            ]
-                        },
-                    }
-                ],
-            },
+        run=build_execution_record(
+            execution_id="run-1",
+            session_id="default",
+            status="error",
+            recorded_traceback=["\u001b[31mKeyboardInterrupt\u001b[0m"],
+            events=[
+                {
+                    "kind": "error",
+                    "content": "boom",
+                    "metadata": {
+                        "traceback": [
+                            "\u001b[31mTraceback...\u001b[0m",
+                            "ZeroDivisionError: boom",
+                        ]
+                    },
+                }
+            ],
         )
     )
 
@@ -2417,21 +2423,18 @@ def test_cli_runs_wait_returns_completed_run(cli_runner: CliRunner, project_dir:
                 cli.executions,
                 "retrieve_run",
                 lambda **_: RunRetrievalOutcome(
-                    run=cast(
-                        ExecutionRecord,
-                        {
-                            "execution_id": "run-1",
-                            "session_id": "default",
-                            "status": "ok",
-                            "result": "2",
-                            "outputs": [
-                                {
-                                    "kind": "result",
-                                    "text": "2",
-                                    "mime": {"text/plain": "2"},
-                                }
-                            ],
-                        },
+                    run=build_execution_record(
+                        execution_id="run-1",
+                        session_id="default",
+                        status="ok",
+                        result="2",
+                        outputs=[
+                            {
+                                "kind": "result",
+                                "text": "2",
+                                "mime": {"text/plain": "2"},
+                            }
+                        ],
                     )
                 ),
             ),

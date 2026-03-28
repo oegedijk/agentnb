@@ -27,17 +27,31 @@ from .command_data import (
 from .compact import compact_preview, preview_text, strip_ansi_lines, summarize_exec_label
 from .execution_output import preview_from_result_text
 from .history import summarize_history_multiline, summarize_history_text
+from .introspection_models import (
+    DataframePreviewData,
+    InspectPreviewData,
+    InspectValue,
+    MappingPreviewData,
+    NamespaceDelta,
+    NamespaceDeltaEntry,
+    ReloadResult,
+    VariableEntry,
+)
 from .journal import JournalEntry
 from .payloads import (
+    DataframePreview,
     DoctorPayload,
     ExecPayload,
+    ExecutionEventPayload,
     HistoryEntryPayload,
     HistoryPayload,
     InspectPayload,
     InspectPreview,
+    MappingPreview,
     RunListEntryPayload,
     RunLookupPayload,
     RunSnapshot,
+    SequencePreview,
     SessionsListPayload,
 )
 
@@ -73,7 +87,13 @@ def serialize_command_data(command_name: str, data: CommandData) -> dict[str, An
     if isinstance(data, RunCancelCommandData):
         return _serialize_run_cancel_data(data)
     if isinstance(data, RunLookupCommandData):
-        payload: RunLookupPayload = {"run": _serialize_run_snapshot(data.run)}
+        payload: RunLookupPayload = {
+            "run": _serialize_run_snapshot(
+                data.run,
+                include_output=data.include_output,
+                snapshot_stale=data.snapshot_stale,
+            )
+        }
         if data.status is not None:
             payload["status"] = data.status
         if data.completion_reason is not None:
@@ -84,15 +104,15 @@ def serialize_command_data(command_name: str, data: CommandData) -> dict[str, An
             payload["emitted_event_count"] = data.emitted_event_count
         return _with_switched_session(payload, data)
     if isinstance(data, VarsCommandData):
-        payload = data.access_metadata.merge_data({"vars": list(data.values)})
-        return _with_switched_session(payload, data)
-    if isinstance(data, InspectCommandData):
         payload = data.access_metadata.merge_data(
-            {"inspect": compact_inspect_payload(data.payload)}
+            {"vars": [_serialize_variable_entry(item) for item in data.values]}
         )
         return _with_switched_session(payload, data)
+    if isinstance(data, InspectCommandData):
+        payload = data.access_metadata.merge_data({"inspect": compact_inspect_value(data.value)})
+        return _with_switched_session(payload, data)
     if isinstance(data, ReloadCommandData):
-        payload = data.access_metadata.merge_data(_mapping_to_dict(data.payload))
+        payload = data.access_metadata.merge_data(_serialize_reload_result(data.result))
         return _with_switched_session(payload, data)
     if isinstance(data, HistoryCommandData):
         entries = [
@@ -272,30 +292,25 @@ def compact_result_preview(
     return None
 
 
-def compact_inspect_payload(payload: InspectPayload) -> InspectPayload:
-    compacted: InspectPayload = {}
-    name = payload.get("name")
-    if isinstance(name, str):
-        compacted["name"] = name
-    type_name = payload.get("type")
-    if isinstance(type_name, str):
-        compacted["type"] = type_name
-    preview = payload.get("preview")
-    if isinstance(preview, dict):
-        compacted_preview = compact_preview(cast(InspectPreview, preview))
+def compact_inspect_value(value: InspectValue) -> InspectPayload:
+    compacted: InspectPayload = {
+        "name": value.name,
+        "type": value.type_name,
+    }
+    if value.preview is not None:
+        compacted_preview = compact_preview(_serialize_preview_data(value.preview))
         if compacted_preview:
             compacted["preview"] = compacted_preview
             return compacted
 
-    repr_text = payload.get("repr")
+    repr_text = value.repr_text
     if isinstance(repr_text, str) and repr_text:
         summary = summarize_history_text(repr_text, limit=_RESULT_LIMIT)
         if summary is not None:
             compacted["repr"] = summary
 
-    members = payload.get("members")
-    if isinstance(members, list) and members:
-        compacted["members"] = [str(member) for member in members[:_MEMBER_LIMIT]]
+    if value.members:
+        compacted["members"] = [member for member in value.members[:_MEMBER_LIMIT]]
 
     return compacted
 
@@ -363,14 +378,6 @@ def compact_history_entry(entry: JournalEntry) -> HistoryEntryPayload:
     return compacted
 
 
-def compact_run_entry(data: RunListEntryData) -> RunListEntryPayload:
-    return _serialize_run_list_entry(data)
-
-
-def serialize_run_lookup_payload(data: RunLookupCommandData) -> RunLookupPayload:
-    return cast(RunLookupPayload, serialize_command_data("runs-show", data))
-
-
 def _serialize_kernel_session_data(data: KernelSessionData) -> dict[str, Any]:
     payload: dict[str, Any] = {"alive": data.alive}
     if data.pid is not None:
@@ -429,7 +436,7 @@ def _serialize_exec_data(data: ExecCommandData) -> dict[str, Any]:
     if data.session_python is not None:
         payload["session_python"] = data.session_python
     if data.namespace_delta is not None:
-        payload["namespace_delta"] = data.namespace_delta
+        payload["namespace_delta"] = _serialize_namespace_delta(data.namespace_delta)
     return _with_switched_session(payload, data)
 
 
@@ -510,13 +517,171 @@ def _serialize_run_cancel_data(data: RunCancelCommandData) -> dict[str, Any]:
     )
 
 
-def _serialize_run_snapshot(data: RunSnapshotData) -> RunSnapshot:
-    raw_payload = _mapping_to_dict(data.payload)
-    hidden_keys = {"outputs"}
-    if not data.include_output:
-        hidden_keys.update({"stdout", "stderr", "result", "events"})
-    payload = {key: value for key, value in raw_payload.items() if key not in hidden_keys}
-    if data.snapshot_stale or payload.get("status") in {"starting", "running"}:
+def _serialize_variable_entry(item: VariableEntry) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "name": item.name,
+        "repr": item.repr_text,
+    }
+    if item.type_name is not None:
+        payload["type"] = item.type_name
+    return payload
+
+
+def _serialize_namespace_delta(delta: NamespaceDelta) -> dict[str, object]:
+    return {
+        "entries": [_serialize_namespace_delta_entry(entry) for entry in delta.entries],
+        "new_count": delta.new_count,
+        "updated_count": delta.updated_count,
+        "truncated": delta.truncated,
+    }
+
+
+def _serialize_namespace_delta_entry(entry: NamespaceDeltaEntry) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "name": entry.name,
+        "repr": entry.repr_text,
+        "change": entry.change,
+    }
+    if entry.type_name is not None:
+        payload["type"] = entry.type_name
+    return payload
+
+
+def _serialize_reload_result(result: ReloadResult) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    if result.mode is not None:
+        payload["mode"] = result.mode
+    payload["requested_module"] = result.requested_module
+    payload["reloaded_modules"] = list(result.reloaded_modules)
+    payload["failed_modules"] = [
+        {
+            "module": item.module,
+            "error_type": item.error_type,
+            "message": item.message,
+        }
+        for item in result.failed_modules
+    ]
+    payload["skipped_modules"] = list(result.skipped_modules)
+    payload["rebound_names"] = list(result.rebound_names)
+    payload["stale_names"] = list(result.stale_names)
+    if result.excluded_module_count is not None:
+        payload["excluded_module_count"] = result.excluded_module_count
+    payload["notes"] = list(result.notes)
+    return payload
+
+
+def _serialize_preview_data(preview: InspectPreviewData) -> InspectPreview:
+    if isinstance(preview, DataframePreviewData):
+        payload: DataframePreview = {"kind": "dataframe-like"}
+        if preview.shape is not None:
+            payload["shape"] = list(preview.shape)
+        if preview.columns:
+            payload["columns"] = list(preview.columns)
+        if preview.column_count is not None:
+            payload["column_count"] = preview.column_count
+        if preview.columns_shown is not None:
+            payload["columns_shown"] = preview.columns_shown
+        if preview.dtypes is not None:
+            payload["dtypes"] = dict(preview.dtypes)
+        if preview.dtypes_shown is not None:
+            payload["dtypes_shown"] = preview.dtypes_shown
+        if preview.head is not None:
+            payload["head"] = list(preview.head)
+        if preview.head_rows_shown is not None:
+            payload["head_rows_shown"] = preview.head_rows_shown
+        if preview.null_counts is not None:
+            payload["null_counts"] = dict(preview.null_counts)
+        if preview.null_count_fields_shown is not None:
+            payload["null_count_fields_shown"] = preview.null_count_fields_shown
+        return payload
+    if isinstance(preview, MappingPreviewData):
+        payload: MappingPreview = {
+            "kind": "mapping-like",
+            "length": preview.length,
+            "keys": list(preview.keys),
+            "sample": dict(preview.sample),
+        }
+        if preview.keys_shown is not None:
+            payload["keys_shown"] = preview.keys_shown
+        if preview.sample_items_shown is not None:
+            payload["sample_items_shown"] = preview.sample_items_shown
+        if preview.sample_truncated is not None:
+            payload["sample_truncated"] = preview.sample_truncated
+        return payload
+    payload: SequencePreview = {
+        "kind": "sequence-like",
+        "length": preview.length,
+        "sample": list(preview.sample),
+    }
+    if preview.item_type is not None:
+        payload["item_type"] = preview.item_type
+    if preview.sample_keys:
+        payload["sample_keys"] = list(preview.sample_keys)
+    if preview.sample_items_shown is not None:
+        payload["sample_items_shown"] = preview.sample_items_shown
+    if preview.sample_keys_shown is not None:
+        payload["sample_keys_shown"] = preview.sample_keys_shown
+    if preview.sample_truncated is not None:
+        payload["sample_truncated"] = preview.sample_truncated
+    return payload
+
+
+def _serialize_run_snapshot(
+    run: RunSnapshotData,
+    *,
+    include_output: bool,
+    snapshot_stale: bool,
+) -> RunSnapshot:
+    payload: RunSnapshot = {
+        "execution_id": run.execution_id,
+        "ts": run.ts,
+        "session_id": run.session_id,
+        "command_type": run.command_type,
+        "status": run.status,
+        "duration_ms": run.duration_ms,
+        "cancel_requested": run.cancel_requested,
+    }
+    if run.code is not None:
+        payload["code"] = run.code
+    if run.worker_pid is not None:
+        payload["worker_pid"] = run.worker_pid
+    if run.execution_count is not None:
+        payload["execution_count"] = run.execution_count
+    if run.ename is not None:
+        payload["ename"] = run.ename
+    if run.evalue is not None:
+        payload["evalue"] = run.evalue
+    if run.traceback is not None:
+        payload["traceback"] = list(run.traceback)
+    if run.recorded_status is not None:
+        payload["recorded_status"] = run.recorded_status
+    if run.recorded_ename is not None:
+        payload["recorded_ename"] = run.recorded_ename
+    if run.recorded_evalue is not None:
+        payload["recorded_evalue"] = run.recorded_evalue
+    if run.recorded_traceback is not None:
+        payload["recorded_traceback"] = list(run.recorded_traceback)
+    if run.cancel_requested_at is not None:
+        payload["cancel_requested_at"] = run.cancel_requested_at
+    if run.cancel_request_source is not None:
+        payload["cancel_request_source"] = run.cancel_request_source
+    if run.failure_origin is not None:
+        payload["failure_origin"] = run.failure_origin
+    if run.error_data is not None:
+        payload["error_data"] = dict(run.error_data)
+    if include_output:
+        if run.stdout:
+            payload["stdout"] = run.stdout
+        if run.stderr:
+            payload["stderr"] = run.stderr
+        if run.result is not None:
+            payload["result"] = run.result
+        if run.events:
+            payload["events"] = [_serialize_execution_event(event) for event in run.events]
+    terminal_reason = _public_terminal_reason(run.terminal_reason)
+    if terminal_reason is not None:
+        payload["terminal_reason"] = terminal_reason
+    if snapshot_stale or run.status in {"starting", "running"}:
         payload["snapshot_stale"] = True
     for key in ("traceback", "recorded_traceback"):
         value = payload.get(key)
@@ -524,11 +689,11 @@ def _serialize_run_snapshot(data: RunSnapshotData) -> RunSnapshot:
             payload[key] = strip_ansi_lines(cast(list[str], value))
     events = payload.get("events")
     if isinstance(events, list):
-        sanitized_events: list[dict[str, object]] = []
+        sanitized_events: list[ExecutionEventPayload] = []
         for event in events:
             if not isinstance(event, dict):
                 continue
-            sanitized_event = dict(event)
+            sanitized_event = cast(ExecutionEventPayload, dict(event))
             metadata = sanitized_event.get("metadata")
             if isinstance(metadata, dict):
                 sanitized_metadata = dict(metadata)
@@ -538,49 +703,65 @@ def _serialize_run_snapshot(data: RunSnapshotData) -> RunSnapshot:
                 sanitized_event["metadata"] = sanitized_metadata
             sanitized_events.append(sanitized_event)
         payload["events"] = sanitized_events
-    payload = _with_switched_session(payload, data)
-    return cast(RunSnapshot, payload)
+    return payload
 
 
-def _serialize_run_list_entry(data: RunListEntryData) -> RunListEntryPayload:
-    payload = data.payload
+def _serialize_run_list_entry(run: RunListEntryData) -> RunListEntryPayload:
     compacted: RunListEntryPayload = {
-        "execution_id": cast(str | None, payload.get("execution_id")),
-        "ts": cast(str | None, payload.get("ts")),
-        "session_id": cast(str | None, payload.get("session_id")),
-        "command_type": cast(str | None, payload.get("command_type")),
-        "status": cast(str | None, payload.get("status")),
-        "duration_ms": cast(int | None, payload.get("duration_ms")),
-        "cancel_requested": bool(payload.get("cancel_requested")),
+        "execution_id": run.execution_id,
+        "ts": run.ts,
+        "session_id": run.session_id,
+        "command_type": run.command_type,
+        "status": run.status,
+        "duration_ms": run.duration_ms,
+        "cancel_requested": run.cancel_requested,
     }
-    terminal_reason = payload.get("terminal_reason")
+    terminal_reason = _public_terminal_reason(run.terminal_reason)
     if terminal_reason is not None:
-        compacted["terminal_reason"] = cast(str, terminal_reason)
+        compacted["terminal_reason"] = terminal_reason
 
     result_preview = compact_result_preview(
-        result_preview=payload.get("result_preview"),
-        result=payload.get("result"),
+        result_preview=run.result_preview,
+        result=run.result,
     )
     if result_preview is not None:
         compacted["result_preview"] = result_preview
     else:
-        result = payload.get("result")
+        result = run.result
         if isinstance(result, str):
             summary = summarize_history_text(result, limit=_RESULT_LIMIT)
             if summary is not None:
                 compacted["result_preview"] = summary
 
-    stdout = payload.get("stdout")
+    stdout = run.stdout
     if isinstance(stdout, str) and stdout:
         summary = summarize_history_text(stdout, limit=_STDOUT_LIMIT)
         if summary is not None:
             compacted["stdout_preview"] = summary
 
-    ename = payload.get("ename")
-    if isinstance(ename, str) and ename:
-        compacted["error_type"] = ename
+    error_type = run.error_type
+    if isinstance(error_type, str) and error_type:
+        compacted["error_type"] = error_type
 
-    return cast(RunListEntryPayload, _with_switched_session(compacted, data))
+    return compacted
+
+
+def _serialize_execution_event(event: object) -> ExecutionEventPayload:
+    kind = getattr(event, "kind", None)
+    content = getattr(event, "content", None)
+    metadata = getattr(event, "metadata", {})
+    payload: ExecutionEventPayload = {}
+    if isinstance(kind, str):
+        payload["kind"] = kind
+    if content is None or isinstance(content, str):
+        payload["content"] = content
+    else:
+        payload["content"] = str(content)
+    if isinstance(metadata, dict):
+        payload["metadata"] = dict(metadata)
+    else:
+        payload["metadata"] = {}
+    return payload
 
 
 def _project_run_lookup_agent(
@@ -633,8 +814,8 @@ def _serialize_run_snapshot_for_agent(run: RunSnapshot) -> dict[str, object]:
     terminal_reason = run.get("terminal_reason")
     if terminal_reason is not None:
         payload["terminal_reason"] = terminal_reason
-    if "cancel_requested" in run:
-        payload["cancel_requested"] = bool(run.get("cancel_requested"))
+    if run.get("cancel_requested") is True:
+        payload["cancel_requested"] = True
 
     result_preview = run.get("result_preview")
     result = run.get("result")
@@ -695,6 +876,12 @@ def _prefer_preview_text(preview: object, result: object) -> bool:
     return "\n" in result or len(result) > 120
 
 
+def _public_terminal_reason(terminal_reason: object) -> str | None:
+    if terminal_reason in {"cancelled", "worker_exited"}:
+        return cast(str, terminal_reason)
+    return None
+
+
 def _mapping_to_dict(payload: Mapping[str, object]) -> dict[str, object]:
     return {key: value for key, value in payload.items()}
 
@@ -702,12 +889,10 @@ def _mapping_to_dict(payload: Mapping[str, object]) -> dict[str, object]:
 __all__ = [
     "compact_execution_payload",
     "compact_history_entry",
-    "compact_inspect_payload",
+    "compact_inspect_value",
     "compact_result_preview",
-    "compact_run_entry",
     "full_history_entry",
     "project_agent_data",
     "selected_exec_output",
     "serialize_command_data",
-    "serialize_run_lookup_payload",
 ]

@@ -26,7 +26,6 @@ from .command_data import (
     SessionsListCommandData,
     StopCommandData,
     VarsCommandData,
-    normalize_run_payload,
     run_lookup_session_id,
     with_switched_session,
 )
@@ -52,8 +51,12 @@ from .execution import (
 )
 from .execution_invocation import ExecInvocationPolicy, ExecSourceKind
 from .introspection import HelperExecutionPolicy, KernelIntrospection
-from .payloads import NamespaceDeltaEntry, NamespaceDeltaPayload, VarDisplayEntry
-from .response_serialization import selected_exec_output, serialize_command_data
+from .introspection_models import NamespaceDelta, NamespaceDeltaEntry, VariableEntry
+from .response_serialization import (
+    compact_result_preview,
+    selected_exec_output,
+    serialize_command_data,
+)
 from .runtime import KernelRuntime
 from .selectors import (
     HistoryReference,
@@ -630,19 +633,19 @@ class AgentNBApp:
         values = helper_result.payload
         if request.match_text:
             match_lower = request.match_text.lower()
-            values = [item for item in values if match_lower in str(item["name"]).lower()]
+            values = [item for item in values if match_lower in item.name.lower()]
         if request.recent is not None:
             values = values[-request.recent :]
         if not request.include_types:
-            display_values: list[VarDisplayEntry] = [
-                {"name": item["name"], "repr": item["repr"]} for item in values
+            display_values: list[VariableEntry] = [
+                VariableEntry(name=item.name, repr_text=item.repr_text) for item in values
             ]
             return VarsCommandData(
                 values=display_values,
                 access_metadata=helper_result.access_metadata,
             )
         return VarsCommandData(
-            values=cast(list[VarDisplayEntry], values),
+            values=values,
             access_metadata=helper_result.access_metadata,
         )
 
@@ -654,7 +657,7 @@ class AgentNBApp:
             execution_policy=_HELPER_EXECUTION_POLICY,
         )
         return InspectCommandData(
-            payload=helper_result.payload,
+            value=helper_result.payload,
             access_metadata=helper_result.access_metadata,
         )
 
@@ -666,7 +669,7 @@ class AgentNBApp:
             execution_policy=_HELPER_EXECUTION_POLICY,
         )
         return ReloadCommandData(
-            payload=helper_result.payload,
+            result=helper_result.payload,
             access_metadata=helper_result.access_metadata,
         )
 
@@ -745,9 +748,7 @@ class AgentNBApp:
         )
         if request.last is not None:
             entries = entries[-request.last :]
-        return RunsListCommandData(
-            runs=[RunListEntryData(payload=normalize_run_payload(entry)) for entry in entries]
-        )
+        return RunsListCommandData(runs=[_run_list_entry_data(item) for item in entries])
 
     def _run_lookup_payload(
         self,
@@ -781,15 +782,12 @@ class AgentNBApp:
                 skip_history=skip_history,
             )
         )
-        run = retrieval.run
-        run_payload = normalize_run_payload(run)
+        run = _run_snapshot_data(retrieval.run)
         payload = RunLookupCommandData(
-            run=RunSnapshotData(
-                payload=run_payload,
-                include_output=not (retrieval.completion_reason is not None and skip_history),
-                snapshot_stale=retrieval.completion_reason == "window_elapsed",
-            ),
-            status=cast(str | None, run_payload.get("status")),
+            run=run,
+            include_output=not (retrieval.completion_reason is not None and skip_history),
+            snapshot_stale=retrieval.completion_reason == "window_elapsed",
+            status=run.status,
         )
         if retrieval.completion_reason is not None:
             payload.completion_reason = retrieval.completion_reason
@@ -1051,7 +1049,7 @@ class _ExecPayloadBuilder:
     introspection: KernelIntrospection
     request: ExecRequest
     session_id: str
-    namespace_before: list[VarDisplayEntry] | None = field(init=False)
+    namespace_before: list[VariableEntry] | None = field(init=False)
 
     def __post_init__(self) -> None:
         self.namespace_before = self._file_exec_namespace_snapshot()
@@ -1086,7 +1084,7 @@ class _ExecPayloadBuilder:
             payload.namespace_delta = namespace_delta
         return payload
 
-    def _file_exec_namespace_snapshot(self) -> list[VarDisplayEntry] | None:
+    def _file_exec_namespace_snapshot(self) -> list[VariableEntry] | None:
         if self.request.source_kind != "file" or self.request.invocation.is_background:
             return None
         state = self.runtime.runtime_state(
@@ -1102,13 +1100,12 @@ class _ExecPayloadBuilder:
             wait_for_usable=True,
         )
 
-    def _file_exec_namespace_delta(self, payload: ExecCommandData) -> NamespaceDeltaPayload | None:
+    def _file_exec_namespace_delta(self, payload: ExecCommandData) -> NamespaceDelta | None:
         if self.request.source_kind != "file" or self.request.invocation.is_background:
             return None
         if payload.record.status == "error":
             return None
-        serialized_payload = serialize_command_data("exec", payload)
-        if self.namespace_before is None or not _exec_payload_is_empty(serialized_payload):
+        if self.namespace_before is None or not _exec_payload_is_empty(payload):
             return None
         after = self._ephemeral_vars_snapshot(
             ensure_started=False,
@@ -1123,7 +1120,7 @@ class _ExecPayloadBuilder:
         *,
         ensure_started: bool,
         wait_for_usable: bool,
-    ) -> list[VarDisplayEntry] | None:
+    ) -> list[VariableEntry] | None:
         try:
             helper_result = self.introspection.list_vars(
                 project_root=self.request.project_root,
@@ -1137,7 +1134,7 @@ class _ExecPayloadBuilder:
             )
         except AgentNBException:
             return None
-        return cast(list[VarDisplayEntry], helper_result.payload)
+        return helper_result.payload
 
     def _session_python(self) -> str | None:
         state = self.runtime.runtime_state(
@@ -1152,18 +1149,12 @@ class _ExecPayloadBuilder:
         return None
 
 
-def _exec_payload_is_empty(payload: Mapping[str, object]) -> bool:
-    for key in ("result", "stdout", "stderr", "selected_text"):
-        value = payload.get(key)
+def _exec_payload_is_empty(payload: ExecCommandData) -> bool:
+    outcome = payload.record.outcome()
+    for value in (outcome.result, outcome.stdout, outcome.stderr, payload.selected_text):
         if isinstance(value, str) and value:
             return False
-    namespace_delta = payload.get("namespace_delta")
-    entries = (
-        cast(Mapping[str, object], namespace_delta).get("entries")
-        if isinstance(namespace_delta, dict)
-        else None
-    )
-    return not entries
+    return not (payload.namespace_delta and payload.namespace_delta.entries)
 
 
 def _kernel_session_data_from_access(access: SessionAccessOutcome) -> KernelSessionData:
@@ -1179,49 +1170,100 @@ def _kernel_session_data_from_access(access: SessionAccessOutcome) -> KernelSess
     )
 
 
+def _run_list_entry_data(record) -> RunListEntryData:
+    outcome = record.outcome()
+    return RunListEntryData(
+        execution_id=record.execution_id,
+        ts=record.ts,
+        session_id=record.session_id,
+        command_type=record.command_type,
+        status=record.status,
+        duration_ms=record.duration_ms,
+        cancel_requested=record.cancel_requested,
+        terminal_reason=record.terminal_reason,
+        result=record.result,
+        result_preview=compact_result_preview(
+            result_preview=outcome.result_preview,
+            result=record.result,
+        ),
+        stdout=record.stdout,
+        error_type=record.ename,
+    )
+
+
+def _run_snapshot_data(record) -> RunSnapshotData:
+    error_data = dict(record.error_data) if record.error_data is not None else None
+    return RunSnapshotData(
+        execution_id=record.execution_id,
+        ts=record.ts,
+        session_id=record.session_id,
+        command_type=record.command_type,
+        status=record.status,
+        duration_ms=record.duration_ms,
+        code=record.code,
+        worker_pid=record.worker_pid,
+        stdout=record.stdout,
+        stderr=record.stderr,
+        result=record.result,
+        execution_count=record.execution_count,
+        ename=record.ename,
+        evalue=record.evalue,
+        traceback=list(record.traceback) if record.traceback is not None else None,
+        events=list(record.events),
+        terminal_reason=record.terminal_reason,
+        cancel_requested=record.cancel_requested,
+        cancel_requested_at=record.cancel_requested_at,
+        cancel_request_source=record.cancel_request_source,
+        recorded_status=record.recorded_status,
+        recorded_ename=record.recorded_ename,
+        recorded_evalue=record.recorded_evalue,
+        recorded_traceback=(
+            list(record.recorded_traceback) if record.recorded_traceback is not None else None
+        ),
+        failure_origin=record.failure_origin,
+        error_data=error_data,
+    )
+
+
 def _namespace_delta(
     *,
-    before: list[VarDisplayEntry],
-    after: list[VarDisplayEntry],
-) -> NamespaceDeltaPayload | None:
-    before_by_name = {
-        str(item.get("name")): item
-        for item in before
-        if isinstance(item.get("name"), str) and item.get("name")
-    }
+    before: list[VariableEntry],
+    after: list[VariableEntry],
+) -> NamespaceDelta | None:
+    before_by_name = {item.name: item for item in before if item.name}
     changed: list[NamespaceDeltaEntry] = []
     new_count = 0
     updated_count = 0
     for item in after:
-        name = item.get("name")
-        if not isinstance(name, str) or not name:
+        name = item.name
+        if not name:
             continue
         previous = before_by_name.get(name)
-        current_repr = item.get("repr")
-        current_type = item.get("type")
+        current_repr = item.repr_text
+        current_type = item.type_name
         change: str | None = None
         if previous is None:
             change = "new"
             new_count += 1
-        elif previous.get("repr") != current_repr or previous.get("type") != current_type:
+        elif previous.repr_text != current_repr or previous.type_name != current_type:
             change = "updated"
             updated_count += 1
         if change is None:
             continue
         changed.append(
-            {
-                "name": name,
-                "type": str(current_type or ""),
-                "repr": str(current_repr or ""),
-                "change": change,
-            }
+            NamespaceDeltaEntry(
+                name=name,
+                type_name=current_type,
+                repr_text=current_repr,
+                change=change,
+            )
         )
     if not changed:
         return None
     limited = changed[:5]
-    return {
-        "entries": limited,
-        "new_count": new_count,
-        "updated_count": updated_count,
-        "truncated": len(changed) > len(limited),
-    }
+    return NamespaceDelta(
+        entries=limited,
+        new_count=new_count,
+        updated_count=updated_count,
+        truncated=len(changed) > len(limited),
+    )

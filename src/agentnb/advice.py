@@ -538,7 +538,7 @@ class AdvicePolicy:
         if command_name == "reload":
             if not isinstance(command_data, ReloadCommandData):
                 return []
-            stale_names = command_data.payload.get("stale_names")
+            stale_names = command_data.result.stale_names
             if stale_names:
                 return [
                     _run_step(
@@ -550,8 +550,8 @@ class AdvicePolicy:
                         with_action=False,
                     )
                 ]
-            reloaded = command_data.payload.get("reloaded_modules")
-            if isinstance(reloaded, list) and not reloaded:
+            reloaded = command_data.result.reloaded_modules
+            if not reloaded:
                 return [
                     _text_step("No project-local modules were found to reload."),
                     _text_step(
@@ -710,10 +710,9 @@ class AdvicePolicy:
         if command_name == "runs-show":
             if not isinstance(command_data, RunLookupCommandData):
                 return []
-            run_payload = command_data.run.payload
-            run_status = run_payload.get("status")
+            run_status = command_data.run.status
             if _run_is_active(run_status):
-                execution_id = _execution_id(run_payload)
+                execution_id = command_data.run.execution_id
                 return [
                     _run_step(
                         scope,
@@ -748,10 +747,9 @@ class AdvicePolicy:
         if command_name == "runs-follow":
             if not isinstance(command_data, RunLookupCommandData):
                 return []
-            run_payload = command_data.run.payload
-            run_status = run_payload.get("status")
+            run_status = command_data.run.status
             if _run_is_active(run_status):
-                execution_id = _execution_id(run_payload)
+                execution_id = command_data.run.execution_id
                 return [
                     _run_step(
                         scope,
@@ -951,7 +949,7 @@ def _exec_output_is_empty(
     ):
         if isinstance(value, str) and value:
             return False
-    return not (command_data.namespace_delta and command_data.namespace_delta.get("entries"))
+    return not (command_data.namespace_delta and command_data.namespace_delta.entries)
 
 
 def _file_exec_truncated(command_data: ExecCommandData) -> bool:

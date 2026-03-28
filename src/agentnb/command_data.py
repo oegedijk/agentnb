@@ -1,25 +1,24 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import Literal
 
 from .contracts import (
+    ExecutionEvent,
     HelperAccessMetadata,
     HelperInitialRuntimeState,
     HelperWaitFor,
     KernelStatus,
 )
+from .introspection_models import (
+    InspectValue,
+    NamespaceDelta,
+    ReloadResult,
+    VariableEntry,
+)
 from .journal import JournalEntry
 from .kernel.provisioner import DoctorCheck
-from .payloads import (
-    HistoryEntryPayload,
-    InspectPayload,
-    NamespaceDeltaPayload,
-    ReloadReport,
-    RunSnapshot,
-    VarDisplayEntry,
-)
+from .payloads import JSONValue
 from .runs import RunCancelOutcome
 from .runs.store import ExecutionRecord
 from .runtime import (
@@ -114,7 +113,7 @@ class ExecCommandData(CommandData):
     initial_runtime_state: HelperInitialRuntimeState | None = None
     session_restarted: bool = False
     session_python: str | None = None
-    namespace_delta: NamespaceDeltaPayload | None = None
+    namespace_delta: NamespaceDelta | None = None
     selected_output: str | None = None
     selected_text: str | None = None
 
@@ -229,25 +228,61 @@ class SessionsDeleteBulkCommandData(CommandData):
     count: int
 
 
-@dataclass(slots=True)
-class RunSnapshotData(CommandData):
-    payload: dict[str, object]
-    include_output: bool = True
-    snapshot_stale: bool = False
+@dataclass(slots=True, frozen=True)
+class RunListEntryData:
+    execution_id: str
+    ts: str
+    session_id: str
+    command_type: str
+    status: str
+    duration_ms: int
+    cancel_requested: bool = False
+    terminal_reason: str | None = None
+    result: str | None = None
+    result_preview: object | None = None
+    stdout: str = ""
+    error_type: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class RunSnapshotData:
+    execution_id: str
+    ts: str
+    session_id: str
+    command_type: str
+    status: str
+    duration_ms: int
+    code: str | None = None
+    worker_pid: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    result: str | None = None
+    execution_count: int | None = None
+    ename: str | None = None
+    evalue: str | None = None
+    traceback: list[str] | None = None
+    events: list[ExecutionEvent] = field(default_factory=list)
+    terminal_reason: str | None = None
+    cancel_requested: bool = False
+    cancel_requested_at: str | None = None
+    cancel_request_source: str | None = None
+    recorded_status: str | None = None
+    recorded_ename: str | None = None
+    recorded_evalue: str | None = None
+    recorded_traceback: list[str] | None = None
+    failure_origin: str | None = None
+    error_data: dict[str, JSONValue] | None = None
 
 
 @dataclass(slots=True)
 class RunLookupCommandData(CommandData):
     run: RunSnapshotData
+    include_output: bool = True
+    snapshot_stale: bool = False
     status: str | None = None
     completion_reason: Literal["terminal", "window_elapsed"] | None = None
     replayed_event_count: int | None = None
     emitted_event_count: int | None = None
-
-
-@dataclass(slots=True)
-class RunListEntryData(CommandData):
-    payload: dict[str, object]
 
 
 @dataclass(slots=True)
@@ -278,19 +313,19 @@ class RunCancelCommandData(CommandData):
 
 @dataclass(slots=True)
 class VarsCommandData(CommandData):
-    values: list[VarDisplayEntry]
+    values: list[VariableEntry]
     access_metadata: HelperAccessMetadata = field(default_factory=HelperAccessMetadata)
 
 
 @dataclass(slots=True)
 class InspectCommandData(CommandData):
-    payload: InspectPayload
+    value: InspectValue
     access_metadata: HelperAccessMetadata = field(default_factory=HelperAccessMetadata)
 
 
 @dataclass(slots=True)
 class ReloadCommandData(CommandData):
-    payload: ReloadReport
+    result: ReloadResult
     access_metadata: HelperAccessMetadata = field(default_factory=HelperAccessMetadata)
 
 
@@ -306,27 +341,5 @@ def with_switched_session(data: CommandData, switched_session: str) -> CommandDa
 
 
 def run_lookup_session_id(data: RunLookupCommandData) -> str | None:
-    session_id = data.run.payload.get("session_id")
-    return session_id if isinstance(session_id, str) and session_id else None
-
-
-def normalize_run_payload(run: ExecutionRecord | Mapping[str, object]) -> dict[str, object]:
-    if isinstance(run, ExecutionRecord):
-        return _mapping_to_dict(run.to_dict())
-    return _mapping_to_dict(run)
-
-
-def run_snapshot_payload(
-    payload: Mapping[str, object],
-) -> RunSnapshot:
-    return cast(RunSnapshot, _mapping_to_dict(payload))
-
-
-def history_entries_payload(
-    payload: list[HistoryEntryPayload],
-) -> list[HistoryEntryPayload]:
-    return [cast(HistoryEntryPayload, _mapping_to_dict(entry)) for entry in payload]
-
-
-def _mapping_to_dict(payload: Mapping[str, object]) -> dict[str, object]:
-    return {key: value for key, value in payload.items()}
+    session_id = data.run.session_id
+    return session_id if session_id else None

@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from agentnb.errors import AgentNBException
-from agentnb.execution import ExecutionService
+from agentnb.execution import ExecutionService, RunListRequest
 from agentnb.journal import JournalQuery
 from agentnb.selectors import (
     HistoryReference,
@@ -94,7 +94,11 @@ def test_run_selector_resolver_prefers_current_session_for_latest(project_dir) -
     )
 
     assert execution_id == "run-analysis"
-    executions.list_runs.assert_called_once_with(project_root=project_dir, session_id="analysis")
+    executions.list_runs.assert_called_once()
+    request = executions.list_runs.call_args.kwargs["request"]
+    assert isinstance(request, RunListRequest)
+    assert request.project_root == project_dir
+    assert request.session_id == "analysis"
 
 
 def test_run_selector_resolver_falls_back_to_project_latest(project_dir) -> None:

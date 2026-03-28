@@ -16,6 +16,22 @@ The main architectural problem is **premature serialization**. Internal modules
 should mostly exchange domain objects. Wire-oriented `TypedDict` payloads should
 mostly exist at the response/serialization edge.
 
+## Refactor Rule: Clean Cutovers
+
+Each tranche should end in a clean cut at the seam it changes.
+
+- when a boundary moves, internal callers should move fully to the new owning
+  interface
+- do not preserve dual internal interfaces just to soften the transition
+- do not keep wrapper/shim layers around once they stop adding real semantic
+  value
+- compatibility belongs only at deliberate external or wire-level edges, not
+  between internal modules
+
+This refactor is explicitly not trying to preserve every pre-refactor internal
+API. The goal is to leave behind clearer owning boundaries, not a pile of
+temporary adapters that become permanent.
+
 ## Current Assessment
 
 Strong deep modules:
@@ -432,22 +448,14 @@ Completed in the current refactor:
   - `RunCancelRequest`
 - app-facing exec/reset/run-lookup paths now use those typed execution-side
   requests instead of scattering wrapper semantics across `app.py`.
-- `ExecutionService` compatibility wrappers were restored at the public edge so
-  existing direct callers still keep stable method contracts for:
-  - `execute_code(...)`
-  - `start_background_code(...)`
-  - `reset_session(...)`
-  - `list_runs(...)`
-  - `get_run(...)`
-  - `wait_for_run(...)`
-  - `observe_run(...)`
-  - `cancel_run(...)`
-- the richer typed run-retrieval path now lives behind
-  `ExecutionService.retrieve_run(...)` so app-facing internal callers can use
-  `RunRetrievalOutcome` without changing the older edge contract of
-  `get_run(...)`.
-- `follow_run(...)` now forces follow semantics through the observation path so
-  request-shape mistakes cannot silently degrade into snapshot reads.
+- the execution boundary now has one internal run API instead of parallel
+  wrapper and request-object paths:
+  - `list_runs(request=...)`
+  - `retrieve_run(...)`
+  - `cancel_run(request=...)`
+- run lookup semantics now live in `RunRetrievalRequest.mode` rather than in a
+  second layer of wrapper methods like `get_run(...)` / `wait_for_run(...)` /
+  `follow_run(...)`.
 - active-run lookup for idle/helper coordination is now owned by run-control
   through `RunManager.active_run_for_session(...)` instead of being rebuilt in
   `execution.py` by scanning generic run listings.
@@ -463,14 +471,11 @@ Completed in the current refactor:
 - tests were rebalanced accordingly:
   - the `NotebookOps` unit seam was removed
   - app/CLI tests now target `KernelIntrospection` or typed execution requests
-  - execution tests now cover both the compatibility wrappers and the typed
-    retrieval path
+  - execution tests now target the typed execution boundary directly
 
 What this tranche intentionally did not do:
 
 - it did not remove the CLI dependency from background execution
-- it did not remove `ExecutionService` compatibility wrappers at the public
-  edge
 - it did not remove the remaining command-data compatibility adapters
 - it did not eliminate all mapping-based output/projection fallbacks
 
@@ -478,9 +483,6 @@ What is still incomplete:
 
 - background run bootstrapping still depends on the hidden CLI
   `_background-run` command rather than a run-control-owned worker entrypoint.
-- `ExecutionService` still carries both:
-  - the new typed internal request/retrieval surface
-  - the preserved compatibility wrapper surface for older callers
 - `SerializedCommandData` / `compat_command_data(...)` and some
   mapping-oriented output/projection fallbacks still remain at explicit
   compatibility edges.
@@ -512,11 +514,10 @@ Advice for that tranche:
 
 - keep `app.py` and `cli.py` thin: they should submit work to run-control, not
   define the worker boot path.
-- avoid mixing this tranche with aggressive public-edge compatibility pruning;
-  the worker entrypoint inversion is already a deep enough cut.
-- let the worker-entrypoint redesign inform the later decision about how long
-  to keep `ExecutionService` compatibility wrappers and remaining explicit
-  command-data adapters.
+- make it another clean cut: once the worker entrypoint moves under `runs`, do
+  not leave the CLI path as a second implementation route.
+- avoid mixing this tranche with unrelated adapter cleanup; the worker
+  entrypoint inversion is already a deep enough cut.
 
 After that, the likely tranche is to decide how aggressively to prune the
 remaining explicit compatibility adapters at the execution/command-data edge.

@@ -14,13 +14,14 @@ from agentnb.contracts import (
     HelperAccessMetadata,
     KernelStatus,
 )
-from agentnb.errors import AgentNBException, RunWaitTimedOutError, StateCompatibilityError
+from agentnb.errors import AgentNBException, StateCompatibilityError
 from agentnb.execution import (
     ExecutionCommandRequest,
     ExecutionRecord,
     ExecutionRun,
     ExecutionService,
     ExecutionStore,
+    RunRetrievalOutcome,
     RunRetrievalRequest,
     SessionAccessOutcome,
     _ExecutionProgressSink,
@@ -467,9 +468,9 @@ def test_execution_service_stream_sink_reuses_execution_id(project_dir: Path) ->
     assert stored.stdout == "hello\n"
 
 
-def test_execution_service_get_run_raises_when_missing(project_dir: Path) -> None:
+def test_execution_service_retrieve_run_raises_when_missing(project_dir: Path) -> None:
     with pytest.raises(AgentNBException, match="Execution not found: missing"):
-        ExecutionService(KernelRuntime()).get_run(
+        ExecutionService(KernelRuntime()).retrieve_run(
             RunRetrievalRequest(project_root=project_dir, execution_id="missing")
         )
 
@@ -679,7 +680,7 @@ def test_execution_service_wait_for_session_access_wraps_helper_access(project_d
     )
 
 
-def test_execution_service_follow_run_raises_timeout_when_window_elapses(
+def test_execution_service_retrieve_run_returns_follow_outcome_when_window_elapses(
     project_dir: Path,
 ) -> None:
     runtime = KernelRuntime(backend=Mock())
@@ -697,18 +698,24 @@ def test_execution_service_follow_run_raises_timeout_when_window_elapses(
     )
     service = ExecutionService(runtime, run_manager=run_manager)
 
-    with pytest.raises(RunWaitTimedOutError):
-        service.follow_run(
-            RunRetrievalRequest(
-                project_root=project_dir,
-                execution_id="run-1",
-                mode="follow",
-                timeout_s=3.0,
-            )
+    outcome = service.retrieve_run(
+        RunRetrievalRequest(
+            project_root=project_dir,
+            execution_id="run-1",
+            mode="follow",
+            timeout_s=3.0,
         )
+    )
+
+    assert outcome == RunRetrievalOutcome(
+        run=run_manager.follow_run.return_value.run,
+        completion_reason="window_elapsed",
+        replayed_event_count=0,
+        emitted_event_count=0,
+    )
 
 
-def test_execution_service_get_run_preserves_execution_record_contract(project_dir: Path) -> None:
+def test_execution_service_retrieve_run_returns_get_outcome(project_dir: Path) -> None:
     runtime = KernelRuntime(backend=Mock())
     run_manager = Mock()
     record = ExecutionRecord(
@@ -723,16 +730,18 @@ def test_execution_service_get_run_preserves_execution_record_contract(project_d
     run_manager.get_run.return_value = record
     service = ExecutionService(runtime, run_manager=run_manager)
 
-    loaded = service.get_run(project_root=project_dir, execution_id="run-1")
+    outcome = service.retrieve_run(
+        RunRetrievalRequest(project_root=project_dir, execution_id="run-1")
+    )
 
-    assert loaded is record
+    assert outcome == RunRetrievalOutcome(run=record)
     run_manager.get_run.assert_called_once_with(
         project_root=project_dir.resolve(),
         execution_id="run-1",
     )
 
 
-def test_execution_service_follow_run_forces_follow_mode(project_dir: Path) -> None:
+def test_execution_service_retrieve_run_uses_follow_mode(project_dir: Path) -> None:
     runtime = KernelRuntime(backend=Mock())
     run_manager = Mock()
     run_manager.follow_run.return_value = RunObservationResult(
@@ -749,16 +758,17 @@ def test_execution_service_follow_run_forces_follow_mode(project_dir: Path) -> N
     )
     service = ExecutionService(runtime, run_manager=run_manager)
 
-    loaded = service.follow_run(
+    outcome = service.retrieve_run(
         RunRetrievalRequest(
             project_root=project_dir,
             execution_id="run-1",
-            mode="get",
+            mode="follow",
             timeout_s=3.0,
         )
     )
 
-    assert loaded.result == "2"
+    assert outcome.run.result == "2"
+    assert outcome.completion_reason == "terminal"
     run_manager.follow_run.assert_called_once_with(
         project_root=project_dir.resolve(),
         execution_id="run-1",
